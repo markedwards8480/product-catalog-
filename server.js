@@ -1702,6 +1702,6 @@ function getHTML() {
 // Start server
 initDB().then(() => {
     app.listen(PORT, () => {
-        console.log(\`Product Catalog running on port \${PORT}\`);
+        console.log('Product Catalog running on port ' + PORT);
     });
 });

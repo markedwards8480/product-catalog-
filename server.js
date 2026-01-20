@@ -115,16 +115,21 @@ async function zohoApiCall(url, options = {}) {
 async function syncFromZohoAnalytics() {
     try {
         const viewId = process.env.ZOHO_VIEW_ID;
+        const workspaceId = process.env.ZOHO_WORKSPACE_ID;
         const orgId = process.env.ZOHO_ORG_ID;
         
         if (!viewId) {
             return { success: false, error: 'ZOHO_VIEW_ID not configured in Railway variables' };
         }
-
-        console.log('Syncing from Zoho Analytics, View ID:', viewId);
         
-        // Use the export API with view ID
-        let url = 'https://analyticsapi.zoho.com/restapi/v2/views/' + viewId + '/data?CONFIG={"responseFormat":"json"}';
+        if (!workspaceId) {
+            return { success: false, error: 'ZOHO_WORKSPACE_ID not configured in Railway variables' };
+        }
+
+        console.log('Syncing from Zoho Analytics, Workspace ID:', workspaceId, 'View ID:', viewId);
+        
+        // Use the export API with workspace ID and view ID
+        let url = 'https://analyticsapi.zoho.com/restapi/v2/workspaces/' + workspaceId + '/views/' + viewId + '/data?CONFIG={"responseFormat":"json"}';
         if (orgId) {
             url += '&ZOHO_ORG_ID=' + orgId;
         }
@@ -277,8 +282,7 @@ app.get('/api/zoho/status', requireAuth, requireAdmin, async (req, res) => {
         configured,
         connected: hasToken,
         viewId: process.env.ZOHO_VIEW_ID || null,
-        workspace: process.env.ZOHO_WORKSPACE_NAME || null,
-        view: process.env.ZOHO_VIEW_NAME || null,
+        workspaceId: process.env.ZOHO_WORKSPACE_ID || null,
         lastSync: lastSync.rows.length > 0 ? lastSync.rows[0].created_at : null
     });
 });
@@ -403,7 +407,7 @@ function getHTML() {
 <div class="stats-bar"><div class="stats-inner"><div class="stat"><span class="stat-value" id="totalStyles">0</span><span class="stat-label">Styles</span></div><div class="stat"><span class="stat-value" id="totalUnits">0</span><span class="stat-label">Units Available</span></div><div class="stat"><span class="stat-value" id="inStockCount">0</span><span class="stat-label">In Stock</span></div><div class="sync-info" id="syncInfo"></div></div></div>
 <main class="main">
 <div id="adminPanel" class="admin-panel hidden"><h2>Admin Panel</h2><div class="admin-tabs"><button class="admin-tab active" data-tab="zoho">Zoho Analytics</button><button class="admin-tab" data-tab="import">CSV Import</button><button class="admin-tab" data-tab="users">Manage Users</button><button class="admin-tab" data-tab="history">Sync History</button></div>
-<div id="zohoSection" class="admin-section active"><div id="zohoStatus" class="zoho-status"><strong>Status:</strong> <span id="zohoStatusText">Checking...</span></div><p style="margin-bottom:1rem;color:#666"><strong>View ID:</strong> <span id="zohoViewId">-</span></p><div style="display:flex;gap:1rem;flex-wrap:wrap"><button class="btn btn-secondary" id="testZohoBtn">Test Connection</button><button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div><div id="zohoMessage" style="margin-top:1rem"></div></div>
+<div id="zohoSection" class="admin-section active"><div id="zohoStatus" class="zoho-status"><strong>Status:</strong> <span id="zohoStatusText">Checking...</span></div><p style="margin-bottom:.5rem;color:#666"><strong>View ID:</strong> <span id="zohoViewId">-</span></p><p style="margin-bottom:1rem;color:#666"><strong>Workspace ID:</strong> <span id="zohoWorkspaceId">-</span></p><div style="display:flex;gap:1rem;flex-wrap:wrap"><button class="btn btn-secondary" id="testZohoBtn">Test Connection</button><button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div><div id="zohoMessage" style="margin-top:1rem"></div></div>
 <div id="importSection" class="admin-section"><p style="margin-bottom:1rem;color:#666">Upload a CSV export from Zoho Analytics.</p><div class="file-upload-area"><input type="file" id="csvUpload" accept=".csv"><label for="csvUpload">Click to upload CSV file</label></div><div id="importStatus" style="margin-top:1rem"></div></div>
 <div id="usersSection" class="admin-section"><table class="user-table"><thead><tr><th>Username</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="userTableBody"></tbody></table><div class="add-user-form"><input type="text" id="newUsername" placeholder="Username"><input type="password" id="newPassword" placeholder="Password"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add User</button></div></div>
 <div id="historySection" class="admin-section"><table class="sync-table"><thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Records</th><th>Error</th></tr></thead><tbody id="syncHistoryBody"></tbody></table></div>
@@ -421,7 +425,7 @@ document.getElementById('loginForm').addEventListener('submit',async e=>{e.preve
 document.getElementById('logoutBtn').addEventListener('click',async()=>{await fetch('/api/logout',{method:'POST'});showLogin()});
 document.getElementById('adminBtn').addEventListener('click',()=>{document.getElementById('adminPanel').classList.toggle('hidden')});
 document.querySelectorAll('.admin-tab').forEach(t=>{t.addEventListener('click',e=>{document.querySelectorAll('.admin-tab').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.admin-section').forEach(x=>x.classList.remove('active'));e.target.classList.add('active');document.getElementById(e.target.dataset.tab+'Section').classList.add('active')})});
-async function loadZohoStatus(){try{const r=await fetch('/api/zoho/status');const d=await r.json();document.getElementById('zohoViewId').textContent=d.viewId||'Not configured';if(d.connected){document.getElementById('zohoStatus').classList.add('connected');document.getElementById('zohoStatusText').textContent='Connected'}else if(d.configured){document.getElementById('zohoStatusText').textContent='Configured (not yet connected)'}else{document.getElementById('zohoStatusText').textContent='Not configured'}if(d.lastSync){document.getElementById('syncInfo').textContent='Last sync: '+new Date(d.lastSync).toLocaleString()}}catch(e){}}
+async function loadZohoStatus(){try{const r=await fetch('/api/zoho/status');const d=await r.json();document.getElementById('zohoViewId').textContent=d.viewId||'Not configured';document.getElementById('zohoWorkspaceId').textContent=d.workspaceId||'Not configured';if(d.connected){document.getElementById('zohoStatus').classList.add('connected');document.getElementById('zohoStatusText').textContent='Connected'}else if(d.configured){document.getElementById('zohoStatusText').textContent='Configured (not yet connected)'}else{document.getElementById('zohoStatusText').textContent='Not configured'}if(d.lastSync){document.getElementById('syncInfo').textContent='Last sync: '+new Date(d.lastSync).toLocaleString()}}catch(e){}}
 document.getElementById('testZohoBtn').addEventListener('click',async()=>{const b=document.getElementById('testZohoBtn');b.disabled=true;b.innerHTML='<span class="loading"></span> Testing...';try{const r=await fetch('/api/zoho/test',{method:'POST'});const d=await r.json();if(d.success){document.getElementById('zohoMessage').innerHTML='<p class="success-message">Connection successful!</p>';document.getElementById('zohoStatus').classList.add('connected');document.getElementById('zohoStatusText').textContent='Connected'}else{document.getElementById('zohoMessage').innerHTML='<p class="error-message">'+(d.error||'Failed')+'</p>'}}catch(e){document.getElementById('zohoMessage').innerHTML='<p class="error-message">'+e.message+'</p>'}b.disabled=false;b.textContent='Test Connection'});
 document.getElementById('syncZohoBtn').addEventListener('click',async()=>{const b=document.getElementById('syncZohoBtn');b.disabled=true;b.innerHTML='<span class="loading"></span> Syncing...';try{const r=await fetch('/api/zoho/sync',{method:'POST'});const d=await r.json();if(d.success){document.getElementById('zohoMessage').innerHTML='<p class="success-message">Synced '+d.imported+' products!</p>';loadProducts();loadSyncHistory();loadZohoStatus()}else{document.getElementById('zohoMessage').innerHTML='<p class="error-message">'+(d.error||'Failed')+'</p>'}}catch(e){document.getElementById('zohoMessage').innerHTML='<p class="error-message">'+e.message+'</p>'}b.disabled=false;b.textContent='Sync Now'});
 async function loadSyncHistory(){try{const r=await fetch('/api/zoho/sync-history');const h=await r.json();document.getElementById('syncHistoryBody').innerHTML=h.map(x=>'<tr><td>'+new Date(x.created_at).toLocaleString()+'</td><td>'+x.sync_type+'</td><td style="color:'+(x.status==='success'?'var(--success)':'var(--danger)')+'">'+x.status+'</td><td>'+(x.records_synced||'-')+'</td><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(x.error_message||'-')+'</td></tr>').join('')}catch(e){}}

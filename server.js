@@ -25,12 +25,14 @@ app.use(session({
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
+// Zoho credentials from environment variables
+let zohoAccessToken = null;
+
 async function initDB() {
     try {
         await pool.query(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, username VARCHAR(255) UNIQUE NOT NULL, password VARCHAR(255) NOT NULL, role VARCHAR(50) DEFAULT 'sales_rep', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
         await pool.query(`CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, style_id VARCHAR(100) NOT NULL, base_style VARCHAR(100), name VARCHAR(255) NOT NULL, category VARCHAR(100), image_url TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
         await pool.query(`CREATE TABLE IF NOT EXISTS product_colors (id SERIAL PRIMARY KEY, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE, color_name VARCHAR(100) NOT NULL, available_qty INTEGER DEFAULT 0, on_hand INTEGER DEFAULT 0, open_order INTEGER DEFAULT 0, to_come INTEGER DEFAULT 0, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
-        await pool.query(`CREATE TABLE IF NOT EXISTS zoho_settings (id SERIAL PRIMARY KEY, setting_key VARCHAR(100) UNIQUE NOT NULL, setting_value TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
         await pool.query(`CREATE TABLE IF NOT EXISTS sync_history (id SERIAL PRIMARY KEY, sync_type VARCHAR(50), status VARCHAR(50), records_synced INTEGER DEFAULT 0, error_message TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
 
         const userCheck = await pool.query('SELECT COUNT(*) FROM users');
@@ -45,113 +47,135 @@ async function initDB() {
     }
 }
 
-// Zoho Settings Functions
-async function getZohoSetting(key) {
-    try {
-        const result = await pool.query('SELECT setting_value FROM zoho_settings WHERE setting_key = $1', [key]);
-        return result.rows.length > 0 ? result.rows[0].setting_value : null;
-    } catch (err) { return null; }
-}
-
-async function setZohoSetting(key, value) {
-    try {
-        await pool.query(`INSERT INTO zoho_settings (setting_key, setting_value, updated_at) VALUES ($1, $2, CURRENT_TIMESTAMP) ON CONFLICT (setting_key) DO UPDATE SET setting_value = $2, updated_at = CURRENT_TIMESTAMP`, [key, value]);
-        return true;
-    } catch (err) { return false; }
-}
-
-async function getAllZohoSettings() {
-    const keys = ['client_id', 'client_secret', 'refresh_token', 'access_token', 'workspace_name', 'view_name', 'org_id', 'last_sync'];
-    const settings = {};
-    for (const key of keys) { settings[key] = await getZohoSetting(key); }
-    return settings;
-}
-
-// Token Refresh
+// Token Refresh using environment variables
 async function refreshZohoToken() {
     try {
-        const clientId = await getZohoSetting('client_id');
-        const clientSecret = await getZohoSetting('client_secret');
-        const refreshToken = await getZohoSetting('refresh_token');
-        if (!clientId || !clientSecret || !refreshToken) { console.log('Zoho credentials not configured'); return null; }
+        const clientId = process.env.ZOHO_CLIENT_ID;
+        const clientSecret = process.env.ZOHO_CLIENT_SECRET;
+        const refreshToken = process.env.ZOHO_REFRESH_TOKEN;
+        
+        if (!clientId || !clientSecret || !refreshToken) {
+            console.log('Zoho credentials not configured in environment variables');
+            return null;
+        }
 
         console.log('Refreshing Zoho access token...');
         const response = await fetch('https://accounts.zoho.com/oauth/v2/token', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({ refresh_token: refreshToken, client_id: clientId, client_secret: clientSecret, grant_type: 'refresh_token' })
+            body: new URLSearchParams({ 
+                refresh_token: refreshToken, 
+                client_id: clientId, 
+                client_secret: clientSecret, 
+                grant_type: 'refresh_token' 
+            })
         });
 
         const data = await response.json();
         if (data.access_token) {
-            await setZohoSetting('access_token', data.access_token);
+            zohoAccessToken = data.access_token;
             console.log('Zoho access token refreshed successfully');
             return data.access_token;
         } else {
             console.error('Failed to refresh Zoho token:', data);
             return null;
         }
-    } catch (err) { console.error('Error refreshing Zoho token:', err); return null; }
+    } catch (err) {
+        console.error('Error refreshing Zoho token:', err);
+        return null;
+    }
 }
 
+// Background token refresh every 30 minutes
 let tokenRefreshInterval = null;
 function startTokenRefreshJob() {
     if (tokenRefreshInterval) clearInterval(tokenRefreshInterval);
+    refreshZohoToken(); // Initial refresh
     tokenRefreshInterval = setInterval(async () => { await refreshZohoToken(); }, 30 * 60 * 1000);
     console.log('Background token refresh started (every 30 minutes)');
 }
 
 async function zohoApiCall(url, options = {}) {
-    let accessToken = await getZohoSetting('access_token');
-    if (!accessToken) { accessToken = await refreshZohoToken(); if (!accessToken) throw new Error('No valid Zoho access token'); }
-    const headers = { 'Authorization': 'Zoho-oauthtoken ' + accessToken, ...options.headers };
+    if (!zohoAccessToken) {
+        await refreshZohoToken();
+        if (!zohoAccessToken) throw new Error('No valid Zoho access token');
+    }
+    
+    const headers = { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken, ...options.headers };
     let response = await fetch(url, { ...options, headers });
+    
     if (response.status === 401) {
         console.log('Zoho API returned 401 - refreshing token...');
-        accessToken = await refreshZohoToken();
-        if (accessToken) { headers['Authorization'] = 'Zoho-oauthtoken ' + accessToken; response = await fetch(url, { ...options, headers }); }
+        await refreshZohoToken();
+        if (zohoAccessToken) {
+            headers['Authorization'] = 'Zoho-oauthtoken ' + zohoAccessToken;
+            response = await fetch(url, { ...options, headers });
+        }
     }
     return response;
 }
 
 async function syncFromZohoAnalytics() {
     try {
-        const workspaceName = await getZohoSetting('workspace_name');
-        const viewName = await getZohoSetting('view_name');
-        const orgId = await getZohoSetting('org_id');
-        if (!workspaceName || !viewName) return { success: false, error: 'Zoho Analytics workspace/view not configured' };
+        const workspaceName = process.env.ZOHO_WORKSPACE_NAME;
+        const viewName = process.env.ZOHO_VIEW_NAME;
+        
+        if (!workspaceName || !viewName) {
+            return { success: false, error: 'ZOHO_WORKSPACE_NAME or ZOHO_VIEW_NAME not configured' };
+        }
 
         console.log('Syncing from Zoho Analytics:', workspaceName, '/', viewName);
         const encodedWorkspace = encodeURIComponent(workspaceName);
         const encodedView = encodeURIComponent(viewName);
+        
         let url = 'https://analyticsapi.zoho.com/restapi/v2/workspaces/' + encodedWorkspace + '/views/' + encodedView + '/data?CONFIG={"responseFormat":"json"}';
-        if (orgId) url += '&ZOHO_ORG_ID=' + orgId;
 
         const response = await zohoApiCall(url);
         if (!response.ok) {
             const errorText = await response.text();
+            console.error('Zoho Analytics API error:', errorText);
             await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho_analytics', 'failed', errorText.substring(0, 500)]);
-            return { success: false, error: 'Zoho Analytics API error: ' + response.status };
+            return { success: false, error: 'Zoho Analytics API error: ' + response.status + ' - ' + errorText.substring(0, 200) };
         }
 
         const data = await response.json();
-        if (!data.data || !data.data.rows) return { success: false, error: 'No data returned from Zoho Analytics' };
+        console.log('Zoho API response keys:', Object.keys(data));
+        
+        if (!data.data) {
+            console.error('Unexpected response structure:', JSON.stringify(data).substring(0, 500));
+            return { success: false, error: 'Unexpected response from Zoho Analytics' };
+        }
 
-        const rows = data.data.rows;
+        const rows = data.data.rows || data.data;
         const columns = data.data.columns || [];
+        
+        console.log('Columns:', columns);
+        console.log('Number of rows:', Array.isArray(rows) ? rows.length : 'not an array');
+
+        // Map column names to indices
         const colMap = {};
-        columns.forEach((col, idx) => { colMap[col.toLowerCase().replace(/\s+/g, '_')] = idx; });
+        if (Array.isArray(columns)) {
+            columns.forEach((col, idx) => {
+                const colName = (typeof col === 'string' ? col : col.name || col.columnName || '').toLowerCase().replace(/\s+/g, '_');
+                colMap[colName] = idx;
+            });
+        }
+        console.log('Column map:', colMap);
 
         let imported = 0;
-        for (const row of rows) {
+        const rowsArray = Array.isArray(rows) ? rows : [];
+        
+        for (const row of rowsArray) {
             try {
-                const styleId = row[colMap['style_name']] || row[colMap['style']] || row[0];
-                const color = row[colMap['color']] || '';
-                const category = row[colMap['commodity']] || row[colMap['category']] || 'Uncategorized';
-                const available = parseInt(row[colMap['left_to_sell']] || row[colMap['available']] || 0) || 0;
-                const onHand = parseInt(row[colMap['on_hand']] || 0) || 0;
-                const openOrder = parseInt(row[colMap['open_order']] || 0) || 0;
-                const toCome = parseInt(row[colMap['to_come']] || 0) || 0;
+                // Try different column name patterns
+                const styleId = row[colMap['style_name']] || row[colMap['stylename']] || row[colMap['style']] || row[0];
+                const color = row[colMap['color']] || row[colMap['colour']] || row[1] || '';
+                const category = row[colMap['commodity']] || row[colMap['category']] || row[2] || 'Uncategorized';
+                const onHand = parseInt(row[colMap['on_hand']] || row[colMap['onhand']] || row[3] || 0) || 0;
+                const openOrder = parseInt(row[colMap['open_order']] || row[colMap['openorder']] || row[4] || 0) || 0;
+                const toCome = parseInt(row[colMap['to_come']] || row[colMap['tocome']] || row[5] || 0) || 0;
+                const available = parseInt(row[colMap['left_to_sell']] || row[colMap['lefttosell']] || row[colMap['available']] || row[6] || 0) || 0;
+                
                 if (!styleId) continue;
 
                 const baseStyle = styleId.toString().split('-')[0];
@@ -176,10 +200,11 @@ async function syncFromZohoAnalytics() {
                     }
                 }
                 imported++;
-            } catch (rowErr) { console.error('Error importing row:', rowErr); }
+            } catch (rowErr) {
+                console.error('Error importing row:', rowErr);
+            }
         }
 
-        await setZohoSetting('last_sync', new Date().toISOString());
         await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1, $2, $3)', ['zoho_analytics', 'success', imported]);
         console.log('Zoho Analytics sync complete:', imported, 'records');
         return { success: true, imported };
@@ -211,41 +236,24 @@ app.post('/api/login', async (req, res) => {
 app.post('/api/logout', (req, res) => { req.session.destroy(); res.json({ success: true }); });
 app.get('/api/session', (req, res) => { if (req.session && req.session.userId) res.json({ loggedIn: true, username: req.session.username, role: req.session.role }); else res.json({ loggedIn: false }); });
 
-app.get('/api/zoho/settings', requireAuth, requireAdmin, async (req, res) => {
-    try {
-        const settings = await getAllZohoSettings();
-        res.json({
-            client_id: settings.client_id ? '****' + settings.client_id.slice(-8) : null,
-            client_secret: settings.client_secret ? '****' : null,
-            refresh_token: settings.refresh_token ? '****' : null,
-            access_token: settings.access_token ? 'configured' : null,
-            workspace_name: settings.workspace_name,
-            view_name: settings.view_name,
-            org_id: settings.org_id,
-            last_sync: settings.last_sync
-        });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/zoho/settings', requireAuth, requireAdmin, async (req, res) => {
-    try {
-        const { client_id, client_secret, refresh_token, workspace_name, view_name, org_id } = req.body;
-        if (client_id) await setZohoSetting('client_id', client_id);
-        if (client_secret) await setZohoSetting('client_secret', client_secret);
-        if (refresh_token) await setZohoSetting('refresh_token', refresh_token);
-        if (workspace_name !== undefined) await setZohoSetting('workspace_name', workspace_name);
-        if (view_name !== undefined) await setZohoSetting('view_name', view_name);
-        if (org_id !== undefined) await setZohoSetting('org_id', org_id);
-        if (client_id && client_secret && refresh_token) await refreshZohoToken();
-        res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+app.get('/api/zoho/status', requireAuth, requireAdmin, async (req, res) => {
+    const configured = !!(process.env.ZOHO_CLIENT_ID && process.env.ZOHO_CLIENT_SECRET && process.env.ZOHO_REFRESH_TOKEN);
+    const hasToken = !!zohoAccessToken;
+    const lastSync = await pool.query('SELECT created_at FROM sync_history WHERE status = $1 ORDER BY created_at DESC LIMIT 1', ['success']);
+    res.json({
+        configured,
+        connected: hasToken,
+        workspace: process.env.ZOHO_WORKSPACE_NAME || null,
+        view: process.env.ZOHO_VIEW_NAME || null,
+        lastSync: lastSync.rows.length > 0 ? lastSync.rows[0].created_at : null
+    });
 });
 
 app.post('/api/zoho/test', requireAuth, requireAdmin, async (req, res) => {
     try {
         const token = await refreshZohoToken();
         if (token) res.json({ success: true, message: 'Token refresh successful' });
-        else res.status(400).json({ success: false, error: 'Failed to refresh token' });
+        else res.status(400).json({ success: false, error: 'Failed to refresh token - check Railway environment variables' });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -271,7 +279,7 @@ app.post('/api/import', requireAuth, requireAdmin, upload.single('file'), async 
         if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
         const content = req.file.buffer.toString('utf-8');
         const lines = content.split('\n').filter(line => line.trim());
-        if (lines.length < 2) return res.status(400).json({ error: 'File appears empty or invalid' });
+        if (lines.length < 2) return res.status(400).json({ error: 'File appears empty' });
 
         const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/"/g, ''));
         let imported = 0;
@@ -334,7 +342,7 @@ app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
 
 app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
     try {
-        if (req.params.id == req.session.userId) return res.status(400).json({ error: 'Cannot delete your own account' });
+        if (req.params.id == req.session.userId) return res.status(400).json({ error: 'Cannot delete yourself' });
         await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
@@ -361,7 +369,7 @@ function getHTML() {
 <div class="stats-bar"><div class="stats-inner"><div class="stat"><span class="stat-value" id="totalStyles">0</span><span class="stat-label">Styles</span></div><div class="stat"><span class="stat-value" id="totalUnits">0</span><span class="stat-label">Units Available</span></div><div class="stat"><span class="stat-value" id="inStockCount">0</span><span class="stat-label">In Stock</span></div><div class="sync-info" id="syncInfo"></div></div></div>
 <main class="main">
 <div id="adminPanel" class="admin-panel hidden"><h2>Admin Panel</h2><div class="admin-tabs"><button class="admin-tab active" data-tab="zoho">Zoho Analytics</button><button class="admin-tab" data-tab="import">CSV Import</button><button class="admin-tab" data-tab="users">Manage Users</button><button class="admin-tab" data-tab="history">Sync History</button></div>
-<div id="zohoSection" class="admin-section active"><div id="zohoStatus" class="zoho-status"><strong>Status:</strong> <span id="zohoStatusText">Not configured</span></div><div class="form-group"><label>Client ID</label><input type="text" id="zohoClientId" placeholder="1000.XXXXX..."></div><div class="form-group"><label>Client Secret</label><input type="password" id="zohoClientSecret" placeholder="Your client secret"></div><div class="form-group"><label>Refresh Token</label><input type="password" id="zohoRefreshToken" placeholder="1000.XXXXX..."></div><div class="form-group"><label>Workspace Name</label><input type="text" id="zohoWorkspace" placeholder="e.g., My Workspace"></div><div class="form-group"><label>View/Report Name</label><input type="text" id="zohoView" placeholder="e.g., Inventory Availability Report"></div><div class="form-group"><label>Organization ID (optional)</label><input type="text" id="zohoOrgId" placeholder="Optional"></div><div style="display:flex;gap:1rem;margin-top:1.5rem;flex-wrap:wrap"><button class="btn btn-primary" id="saveZohoBtn">Save Settings</button><button class="btn btn-secondary" id="testZohoBtn">Test Connection</button><button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div><div id="zohoMessage" style="margin-top:1rem"></div></div>
+<div id="zohoSection" class="admin-section active"><div id="zohoStatus" class="zoho-status"><strong>Status:</strong> <span id="zohoStatusText">Checking...</span></div><p style="margin-bottom:1rem;color:#666"><strong>Workspace:</strong> <span id="zohoWorkspace">-</span><br><strong>View:</strong> <span id="zohoView">-</span></p><div style="display:flex;gap:1rem;flex-wrap:wrap"><button class="btn btn-secondary" id="testZohoBtn">Test Connection</button><button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div><div id="zohoMessage" style="margin-top:1rem"></div></div>
 <div id="importSection" class="admin-section"><p style="margin-bottom:1rem;color:#666">Upload a CSV export from Zoho Analytics.</p><div class="file-upload-area"><input type="file" id="csvUpload" accept=".csv"><label for="csvUpload">Click to upload CSV file</label></div><div id="importStatus" style="margin-top:1rem"></div></div>
 <div id="usersSection" class="admin-section"><table class="user-table"><thead><tr><th>Username</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="userTableBody"></tbody></table><div class="add-user-form"><input type="text" id="newUsername" placeholder="Username"><input type="password" id="newPassword" placeholder="Password"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add User</button></div></div>
 <div id="historySection" class="admin-section"><table class="sync-table"><thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Records</th><th>Error</th></tr></thead><tbody id="syncHistoryBody"></tbody></table></div>
@@ -371,25 +379,23 @@ function getHTML() {
 </div>
 <div class="modal-overlay" id="modal"><div class="modal-content"><button class="modal-close" onclick="closeModal()">&times;</button><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div class="modal-style" id="modalStyle"></div><h2 class="modal-name" id="modalName"></h2><div class="modal-category" id="modalCategory"></div><div class="modal-availability-title">Availability by Color</div><div class="modal-colors" id="modalColors"></div><div class="modal-total"><span class="modal-total-label">Total Available</span><span class="modal-total-value" id="modalTotal"></span></div></div></div></div>
 <script>
-let products=[],currentCategory='all',isAdmin=false,lastSync=null;
-async function checkSession(){try{const r=await fetch('/api/session');const d=await r.json();if(d.loggedIn){showApp(d.username,d.role);loadProducts();if(d.role==='admin'){loadZohoSettings();loadUsers();loadSyncHistory()}}else{showLogin()}}catch(e){showLogin()}}
+let products=[],currentCategory='all',isAdmin=false;
+async function checkSession(){try{const r=await fetch('/api/session');const d=await r.json();if(d.loggedIn){showApp(d.username,d.role);loadProducts();if(d.role==='admin'){loadZohoStatus();loadUsers();loadSyncHistory()}}else{showLogin()}}catch(e){showLogin()}}
 function showLogin(){document.getElementById('loginPage').classList.remove('hidden');document.getElementById('mainApp').classList.add('hidden')}
 function showApp(u,r){document.getElementById('loginPage').classList.add('hidden');document.getElementById('mainApp').classList.remove('hidden');document.getElementById('currentUser').textContent=u;isAdmin=r==='admin';document.getElementById('adminBtn').style.display=isAdmin?'block':'none'}
-document.getElementById('loginForm').addEventListener('submit',async e=>{e.preventDefault();const u=document.getElementById('loginUsername').value;const p=document.getElementById('loginPassword').value;try{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});const d=await r.json();if(d.success){showApp(d.username,d.role);loadProducts();if(d.role==='admin'){loadZohoSettings();loadUsers();loadSyncHistory()}}else{document.getElementById('loginError').textContent=d.error||'Login failed';document.getElementById('loginError').classList.remove('hidden')}}catch(e){document.getElementById('loginError').textContent='Connection error';document.getElementById('loginError').classList.remove('hidden')}});
+document.getElementById('loginForm').addEventListener('submit',async e=>{e.preventDefault();const u=document.getElementById('loginUsername').value;const p=document.getElementById('loginPassword').value;try{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});const d=await r.json();if(d.success){showApp(d.username,d.role);loadProducts();if(d.role==='admin'){loadZohoStatus();loadUsers();loadSyncHistory()}}else{document.getElementById('loginError').textContent=d.error||'Login failed';document.getElementById('loginError').classList.remove('hidden')}}catch(e){document.getElementById('loginError').textContent='Connection error';document.getElementById('loginError').classList.remove('hidden')}});
 document.getElementById('logoutBtn').addEventListener('click',async()=>{await fetch('/api/logout',{method:'POST'});showLogin()});
 document.getElementById('adminBtn').addEventListener('click',()=>{document.getElementById('adminPanel').classList.toggle('hidden')});
 document.querySelectorAll('.admin-tab').forEach(t=>{t.addEventListener('click',e=>{document.querySelectorAll('.admin-tab').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.admin-section').forEach(x=>x.classList.remove('active'));e.target.classList.add('active');document.getElementById(e.target.dataset.tab+'Section').classList.add('active')})});
-async function loadZohoSettings(){try{const r=await fetch('/api/zoho/settings');const d=await r.json();if(d.workspace_name)document.getElementById('zohoWorkspace').value=d.workspace_name;if(d.view_name)document.getElementById('zohoView').value=d.view_name;if(d.org_id)document.getElementById('zohoOrgId').value=d.org_id;if(d.access_token==='configured'){document.getElementById('zohoStatus').classList.add('connected');document.getElementById('zohoStatusText').textContent='Connected'}if(d.last_sync){lastSync=new Date(d.last_sync);updateSyncInfo()}}catch(e){}}
-function updateSyncInfo(){if(lastSync)document.getElementById('syncInfo').textContent='Last sync: '+lastSync.toLocaleString()}
-document.getElementById('saveZohoBtn').addEventListener('click',async()=>{const b=document.getElementById('saveZohoBtn');b.disabled=true;b.innerHTML='<span class="loading"></span> Saving...';try{const r=await fetch('/api/zoho/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_id:document.getElementById('zohoClientId').value||undefined,client_secret:document.getElementById('zohoClientSecret').value||undefined,refresh_token:document.getElementById('zohoRefreshToken').value||undefined,workspace_name:document.getElementById('zohoWorkspace').value,view_name:document.getElementById('zohoView').value,org_id:document.getElementById('zohoOrgId').value})});const d=await r.json();if(d.success){document.getElementById('zohoMessage').innerHTML='<p class="success-message">Settings saved!</p>';loadZohoSettings()}else{document.getElementById('zohoMessage').innerHTML='<p class="error-message">'+(d.error||'Failed')+'</p>'}}catch(e){document.getElementById('zohoMessage').innerHTML='<p class="error-message">Error: '+e.message+'</p>'}b.disabled=false;b.textContent='Save Settings'});
+async function loadZohoStatus(){try{const r=await fetch('/api/zoho/status');const d=await r.json();document.getElementById('zohoWorkspace').textContent=d.workspace||'Not configured';document.getElementById('zohoView').textContent=d.view||'Not configured';if(d.connected){document.getElementById('zohoStatus').classList.add('connected');document.getElementById('zohoStatusText').textContent='Connected'}else if(d.configured){document.getElementById('zohoStatusText').textContent='Configured (not yet connected)'}else{document.getElementById('zohoStatusText').textContent='Not configured - add environment variables in Railway'}if(d.lastSync){document.getElementById('syncInfo').textContent='Last sync: '+new Date(d.lastSync).toLocaleString()}}catch(e){document.getElementById('zohoStatusText').textContent='Error loading status'}}
 document.getElementById('testZohoBtn').addEventListener('click',async()=>{const b=document.getElementById('testZohoBtn');b.disabled=true;b.innerHTML='<span class="loading"></span> Testing...';try{const r=await fetch('/api/zoho/test',{method:'POST'});const d=await r.json();if(d.success){document.getElementById('zohoMessage').innerHTML='<p class="success-message">Connection successful!</p>';document.getElementById('zohoStatus').classList.add('connected');document.getElementById('zohoStatusText').textContent='Connected'}else{document.getElementById('zohoMessage').innerHTML='<p class="error-message">'+(d.error||'Failed')+'</p>'}}catch(e){document.getElementById('zohoMessage').innerHTML='<p class="error-message">Error: '+e.message+'</p>'}b.disabled=false;b.textContent='Test Connection'});
-document.getElementById('syncZohoBtn').addEventListener('click',async()=>{const b=document.getElementById('syncZohoBtn');b.disabled=true;b.innerHTML='<span class="loading"></span> Syncing...';try{const r=await fetch('/api/zoho/sync',{method:'POST'});const d=await r.json();if(d.success){document.getElementById('zohoMessage').innerHTML='<p class="success-message">Synced '+d.imported+' products!</p>';loadProducts();loadSyncHistory();lastSync=new Date();updateSyncInfo()}else{document.getElementById('zohoMessage').innerHTML='<p class="error-message">'+(d.error||'Failed')+'</p>'}}catch(e){document.getElementById('zohoMessage').innerHTML='<p class="error-message">Error: '+e.message+'</p>'}b.disabled=false;b.textContent='Sync Now'});
-async function loadSyncHistory(){try{const r=await fetch('/api/zoho/sync-history');const h=await r.json();document.getElementById('syncHistoryBody').innerHTML=h.map(x=>'<tr><td>'+new Date(x.created_at).toLocaleString()+'</td><td>'+x.sync_type+'</td><td style="color:'+(x.status==='success'?'var(--success)':'var(--danger)')+'">'+x.status+'</td><td>'+(x.records_synced||'-')+'</td><td>'+(x.error_message||'-')+'</td></tr>').join('')}catch(e){}}
+document.getElementById('syncZohoBtn').addEventListener('click',async()=>{const b=document.getElementById('syncZohoBtn');b.disabled=true;b.innerHTML='<span class="loading"></span> Syncing...';try{const r=await fetch('/api/zoho/sync',{method:'POST'});const d=await r.json();if(d.success){document.getElementById('zohoMessage').innerHTML='<p class="success-message">Synced '+d.imported+' products!</p>';loadProducts();loadSyncHistory();loadZohoStatus()}else{document.getElementById('zohoMessage').innerHTML='<p class="error-message">'+(d.error||'Failed')+'</p>'}}catch(e){document.getElementById('zohoMessage').innerHTML='<p class="error-message">Error: '+e.message+'</p>'}b.disabled=false;b.textContent='Sync Now'});
+async function loadSyncHistory(){try{const r=await fetch('/api/zoho/sync-history');const h=await r.json();document.getElementById('syncHistoryBody').innerHTML=h.map(x=>'<tr><td>'+new Date(x.created_at).toLocaleString()+'</td><td>'+x.sync_type+'</td><td style="color:'+(x.status==='success'?'var(--success)':'var(--danger)')+'">'+x.status+'</td><td>'+(x.records_synced||'-')+'</td><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">'+(x.error_message||'-')+'</td></tr>').join('')}catch(e){}}
 async function loadProducts(){try{const r=await fetch('/api/products');products=await r.json();updateCategoryFilters();renderProducts()}catch(e){}}
 function updateCategoryFilters(){const cats=[...new Set(products.map(p=>p.category).filter(Boolean))];const c=document.getElementById('categoryFilters');c.innerHTML='<button class="filter-pill active" data-category="all">All</button>';cats.sort().forEach(cat=>{c.innerHTML+='<button class="filter-pill" data-category="'+cat+'">'+cat+'s</button>'});document.querySelectorAll('.filter-pill').forEach(p=>{p.addEventListener('click',e=>{document.querySelectorAll('.filter-pill').forEach(x=>x.classList.remove('active'));e.target.classList.add('active');currentCategory=e.target.dataset.category;renderProducts()})})}
 function formatNumber(n){return(n||0).toLocaleString()}
 function getSwatchStyle(c){const colors={black:'#1A1A1A',ivory:'linear-gradient(145deg,#FFFFF0,#F5F5DC)','heather grey':'linear-gradient(145deg,#9CA3AF,#6B7280)',pink:'linear-gradient(145deg,#F9A8D4,#EC4899)',brown:'linear-gradient(145deg,#A78B71,#78583A)',navy:'#1E3A5F',burgundy:'#722F37',olive:'#556B2F',cream:'linear-gradient(145deg,#FFFDD0,#F5E6C8)',charcoal:'#36454F',white:'#FFFFFF',grey:'#808080',red:'#DC2626',blue:'#2563EB',green:'#16A34A'};return colors[(c||'').toLowerCase()]||'#CCCCCC'}
-function renderProducts(){const s=document.getElementById('searchInput').value.toLowerCase();let f=products.filter(p=>{const ms=!s||(p.style_id||'').toLowerCase().includes(s)||(p.name||'').toLowerCase().includes(s)||(p.category||'').toLowerCase().includes(s)||(p.colors||[]).some(c=>(c.color_name||'').toLowerCase().includes(s));const mc=currentCategory==='all'||p.category===currentCategory;return ms&&mc});const bc={};f.forEach(p=>{const cat=p.category||'Uncategorized';if(!bc[cat])bc[cat]=[];bc[cat].push(p)});let h='';Object.keys(bc).sort().forEach(cat=>{const cp=bc[cat];h+='<section class="category-section"><div class="category-header"><h2 class="category-title">'+cat+'s</h2><span class="category-count">'+cp.length+' style'+(cp.length!==1?'s':'')+'</span></div><div class="product-grid">';cp.forEach(p=>{const colors=p.colors||[];const total=colors.reduce((s,c)=>s+(c.available_qty||0),0);const low=total<5000&&total>0;let ch=colors.map(c=>'<div class="color-row"><div class="color-info"><div class="color-swatch" style="background:'+getSwatchStyle(c.color_name)+'"></div><span class="color-name">'+(c.color_name||'Unknown')+'</span></div><span class="color-qty'+(c.available_qty===0?' out':c.available_qty<1000?' low':'')+'">'+formatNumber(c.available_qty)+'</span></div>').join('');h+='<div class="product-card" onclick="openModal('+p.id+')"><div class="product-image-container">';if(p.image_url)h+='<img class="product-image" src="'+p.image_url+'" alt="'+p.name+'" loading="lazy">';else h+='<span class="no-image">No Image</span>';if(low)h+='<span class="product-badge low-stock">Low Stock</span>';h+='</div><div class="product-info"><div class="product-style">'+(p.style_id||p.base_style)+'</div><h3 class="product-name">'+(p.name||'Unnamed')+'</h3><div class="color-availability">'+ch+'</div><div class="total-row"><span class="total-label">Total Available</span><span class="total-value">'+formatNumber(total)+'</span></div></div></div>'});h+='</div></section>'});if(h==='')h='<div class="empty-state"><h3>No products found</h3><p>Try adjusting your search, or sync data from Zoho Analytics.</p></div>';document.getElementById('productContainer').innerHTML=h;updateStats(f)}
+function renderProducts(){const s=document.getElementById('searchInput').value.toLowerCase();let f=products.filter(p=>{const ms=!s||(p.style_id||'').toLowerCase().includes(s)||(p.name||'').toLowerCase().includes(s)||(p.category||'').toLowerCase().includes(s)||(p.colors||[]).some(c=>(c.color_name||'').toLowerCase().includes(s));const mc=currentCategory==='all'||p.category===currentCategory;return ms&&mc});const bc={};f.forEach(p=>{const cat=p.category||'Uncategorized';if(!bc[cat])bc[cat]=[];bc[cat].push(p)});let h='';Object.keys(bc).sort().forEach(cat=>{const cp=bc[cat];h+='<section class="category-section"><div class="category-header"><h2 class="category-title">'+cat+'s</h2><span class="category-count">'+cp.length+' style'+(cp.length!==1?'s':'')+'</span></div><div class="product-grid">';cp.forEach(p=>{const colors=p.colors||[];const total=colors.reduce((s,c)=>s+(c.available_qty||0),0);const low=total<5000&&total>0;let ch=colors.map(c=>'<div class="color-row"><div class="color-info"><div class="color-swatch" style="background:'+getSwatchStyle(c.color_name)+'"></div><span class="color-name">'+(c.color_name||'Unknown')+'</span></div><span class="color-qty'+(c.available_qty===0?' out':c.available_qty<1000?' low':'')+'">'+formatNumber(c.available_qty)+'</span></div>').join('');h+='<div class="product-card" onclick="openModal('+p.id+')"><div class="product-image-container">';if(p.image_url)h+='<img class="product-image" src="'+p.image_url+'" alt="'+p.name+'" loading="lazy">';else h+='<span class="no-image">No Image</span>';if(low)h+='<span class="product-badge low-stock">Low Stock</span>';h+='</div><div class="product-info"><div class="product-style">'+(p.style_id||p.base_style)+'</div><h3 class="product-name">'+(p.name||'Unnamed')+'</h3><div class="color-availability">'+ch+'</div><div class="total-row"><span class="total-label">Total Available</span><span class="total-value">'+formatNumber(total)+'</span></div></div></div>'});h+='</div></section>'});if(h==='')h='<div class="empty-state"><h3>No products found</h3><p>Click "Sync Now" in Admin panel to import from Zoho Analytics.</p></div>';document.getElementById('productContainer').innerHTML=h;updateStats(f)}
 function updateStats(f){document.getElementById('totalStyles').textContent=f.length;document.getElementById('totalUnits').textContent=formatNumber(f.reduce((s,p)=>s+(p.colors||[]).reduce((x,c)=>x+(c.available_qty||0),0),0));document.getElementById('inStockCount').textContent=f.filter(p=>(p.colors||[]).some(c=>c.available_qty>0)).length}
 document.getElementById('searchInput').addEventListener('input',renderProducts);
 function openModal(id){const p=products.find(x=>x.id===id);if(!p)return;const colors=p.colors||[];const total=colors.reduce((s,c)=>s+(c.available_qty||0),0);if(p.image_url){document.getElementById('modalImage').src=p.image_url;document.getElementById('modalImage').style.display='block'}else{document.getElementById('modalImage').style.display='none'}document.getElementById('modalStyle').textContent=p.style_id||p.base_style;document.getElementById('modalName').textContent=p.name||'Unnamed';document.getElementById('modalCategory').textContent=p.category||'';document.getElementById('modalTotal').textContent=formatNumber(total);document.getElementById('modalColors').innerHTML=colors.map(c=>'<div class="modal-color-row"><div class="modal-color-info"><div class="modal-color-swatch" style="background:'+getSwatchStyle(c.color_name)+'"></div><span class="modal-color-name">'+(c.color_name||'Unknown')+'</span></div><span class="modal-color-qty">'+formatNumber(c.available_qty)+'</span></div>').join('');document.getElementById('modal').classList.add('active');document.body.style.overflow='hidden'}

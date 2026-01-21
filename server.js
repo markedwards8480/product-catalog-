@@ -195,7 +195,6 @@ app.get('/api/users', requireAuth, requireAdmin, async function(req, res) { try 
 app.post('/api/users', requireAuth, requireAdmin, async function(req, res) { try { var username = req.body.username; var password = req.body.password; var role = req.body.role; var hash = await bcrypt.hash(password, 10); await pool.query('INSERT INTO users (username, password, role) VALUES ($1,$2,$3)', [username, hash, role || 'sales_rep']); res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.delete('/api/users/:id', requireAuth, requireAdmin, async function(req, res) { try { await pool.query('DELETE FROM users WHERE id=$1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });
 
-// Image proxy for WorkDrive images - FIXED VERSION
 app.get('/api/image/:fileId', async function(req, res) {
     var retryCount = 0;
     async function fetchImage() {
@@ -259,11 +258,14 @@ function getHTML() {
     html += '.filters { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }';
     html += '.filter-btn { padding: 0.5rem 1rem; border: 1px solid #ddd; background: white; border-radius: 20px; cursor: pointer; }';
     html += '.filter-btn.active { background: #2c5545; color: white; border-color: #2c5545; }';
-    html += '.product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.5rem; }';
+    html += '.product-grid { display: grid; gap: 1.5rem; }';
+    html += '.product-grid.size-small { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }';
+    html += '.product-grid.size-medium { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }';
+    html += '.product-grid.size-large { grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); }';
     html += '.product-card { background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); cursor: pointer; transition: transform 0.2s; }';
     html += '.product-card:hover { transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0,0,0,0.15); }';
-    html += '.product-image { height: 200px; background: #f0f0f0; display: flex; align-items: center; justify-content: center; overflow: hidden; }';
-    html += '.product-image img { width: 100%; height: 100%; object-fit: cover; }';
+    html += '.product-image { height: 220px; background: #f8f8f8; display: flex; align-items: center; justify-content: center; overflow: hidden; }';
+    html += '.product-image img { max-width: 100%; max-height: 100%; object-fit: contain; }';
     html += '.product-info { padding: 1rem; }';
     html += '.product-style { font-size: 0.75rem; color: #666; text-transform: uppercase; }';
     html += '.product-name { font-size: 1.1rem; font-weight: 600; margin: 0.25rem 0; }';
@@ -275,8 +277,8 @@ function getHTML() {
     html += '.modal.active { display: flex; }';
     html += '.modal-content { background: white; border-radius: 8px; max-width: 800px; width: 90%; max-height: 90vh; overflow: auto; position: relative; }';
     html += '.modal-body { display: flex; }';
-    html += '.modal-image { width: 50%; background: #f0f0f0; min-height: 300px; }';
-    html += '.modal-image img { width: 100%; height: 100%; object-fit: cover; }';
+    html += '.modal-image { width: 50%; background: #f0f0f0; min-height: 300px; display: flex; align-items: center; justify-content: center; }';
+    html += '.modal-image img { max-width: 100%; max-height: 400px; object-fit: contain; }';
     html += '.modal-details { width: 50%; padding: 2rem; }';
     html += '.modal-close { position: absolute; top: 1rem; right: 1rem; background: white; border: none; font-size: 1.5rem; cursor: pointer; border-radius: 50%; width: 36px; height: 36px; }';
     html += 'table { width: 100%; border-collapse: collapse; }';
@@ -289,6 +291,12 @@ function getHTML() {
     html += '.status-value { color: #666; }';
     html += '.status-value.connected { color: #2e7d32; }';
     html += '.status-value.disconnected { color: #c4553d; }';
+    html += '.view-controls { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; padding: 0.75rem 1rem; background: white; border-radius: 8px; }';
+    html += '.view-controls label { font-weight: 500; color: #333; }';
+    html += '.size-btn { padding: 0.5rem 1rem; border: 1px solid #ddd; background: white; cursor: pointer; }';
+    html += '.size-btn:first-of-type { border-radius: 4px 0 0 4px; }';
+    html += '.size-btn:last-of-type { border-radius: 0 4px 4px 0; }';
+    html += '.size-btn.active { background: #2c5545; color: white; border-color: #2c5545; }';
     html += '</style></head><body>';
     
     html += '<div id="loginPage" class="login-page"><div class="login-box"><h1>Product Catalog</h1>';
@@ -333,7 +341,14 @@ function getHTML() {
     
     html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div>';
     html += '<div><div class="stat-value" id="totalUnits">0</div><div class="stat-label">Units Available</div></div></div>';
-    html += '<div class="filters" id="filters"></div><div class="product-grid" id="productGrid"></div>';
+    
+    // View controls for tile size
+    html += '<div class="view-controls"><label>Tile Size:</label>';
+    html += '<button class="size-btn" data-size="small">Small</button>';
+    html += '<button class="size-btn active" data-size="medium">Medium</button>';
+    html += '<button class="size-btn" data-size="large">Large</button></div>';
+    
+    html += '<div class="filters" id="filters"></div><div class="product-grid size-medium" id="productGrid"></div>';
     html += '<div class="empty hidden" id="emptyState">No products found. Import a CSV or sync from Zoho to get started.</div></main></div>';
     
     html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button>';
@@ -343,13 +358,17 @@ function getHTML() {
     html += '<div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div></div></div></div></div>';
     
     html += '<script>';
-    html += 'var products=[];var currentFilter="all";';
+    html += 'var products=[];var currentFilter="all";var currentSize="medium";';
     html += 'function checkSession(){fetch("/api/session").then(function(r){return r.json()}).then(function(d){if(d.loggedIn){showApp(d.username,d.role);loadProducts();loadZohoStatus();if(d.role==="admin"){loadUsers();loadHistory()}}else{document.getElementById("loginPage").classList.remove("hidden");document.getElementById("mainApp").classList.add("hidden")}})}';
     html += 'function showApp(u,r){document.getElementById("loginPage").classList.add("hidden");document.getElementById("mainApp").classList.remove("hidden");document.getElementById("userInfo").textContent="Welcome, "+u;if(r==="admin")document.getElementById("adminBtn").style.display="block"}';
     html += 'document.getElementById("loginForm").addEventListener("submit",function(e){e.preventDefault();var u=document.getElementById("username").value;var p=document.getElementById("password").value;fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:u,password:p})}).then(function(r){return r.json()}).then(function(d){if(d.success){showApp(d.username,d.role);loadProducts();loadZohoStatus();if(d.role==="admin"){loadUsers();loadHistory()}}else{document.getElementById("loginError").textContent=d.error;document.getElementById("loginError").classList.remove("hidden")}})});';
     html += 'document.getElementById("logoutBtn").addEventListener("click",function(){fetch("/api/logout",{method:"POST"}).then(function(){location.reload()})});';
     html += 'document.getElementById("adminBtn").addEventListener("click",function(){document.getElementById("adminPanel").classList.toggle("hidden")});';
     html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var all=document.querySelectorAll(".tab");var cons=document.querySelectorAll(".tab-content");for(var j=0;j<all.length;j++)all[j].classList.remove("active");for(var k=0;k<cons.length;k++)cons[k].classList.remove("active");e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active")})}';
+    
+    // Size buttons
+    html += 'var sizeBtns=document.querySelectorAll(".size-btn");for(var si=0;si<sizeBtns.length;si++){sizeBtns[si].addEventListener("click",function(e){for(var sj=0;sj<sizeBtns.length;sj++)sizeBtns[sj].classList.remove("active");e.target.classList.add("active");currentSize=e.target.getAttribute("data-size");var grid=document.getElementById("productGrid");grid.className="product-grid size-"+currentSize})}';
+    
     html += 'function loadZohoStatus(){fetch("/api/zoho/status").then(function(r){return r.json()}).then(function(d){var st=document.getElementById("zohoStatusText");if(d.connected){st.textContent="Connected";st.className="status-value connected"}else if(d.configured){st.textContent="Configured (not connected)";st.className="status-value"}else{st.textContent="Not configured";st.className="status-value disconnected"}document.getElementById("zohoWorkspaceId").textContent=d.workspaceId||"Not set";document.getElementById("zohoViewId").textContent=d.viewId||"Not set"})}';
     html += 'document.getElementById("testZohoBtn").addEventListener("click",function(){document.getElementById("zohoMessage").innerHTML="Testing...";fetch("/api/zoho/test",{method:"POST"}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("zohoMessage").innerHTML="<span class=\\"success\\">"+d.message+"</span>";loadZohoStatus()}else{document.getElementById("zohoMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}})});';
     html += 'document.getElementById("syncZohoBtn").addEventListener("click",function(){document.getElementById("zohoMessage").innerHTML="Syncing...";fetch("/api/zoho/sync",{method:"POST"}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("zohoMessage").innerHTML="<span class=\\"success\\">"+d.message+"</span>";loadProducts();loadHistory()}else{document.getElementById("zohoMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>";loadHistory()}})});';

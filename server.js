@@ -357,6 +357,189 @@ app.get('/api/data-freshness', requireAuth, async function(req, res) {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Sales History API - Get invoices and sales orders for a style from Zoho Books
+app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
+    try {
+        var styleId = req.params.styleId;
+        var orgId = process.env.ZOHO_BOOKS_ORG_ID || process.env.ZOHO_ORGANIZATION_ID || '677681121';
+        
+        if (!zohoAccessToken) {
+            var tokenResult = await refreshZohoToken();
+            if (!tokenResult.success) {
+                return res.json({ success: false, error: 'Failed to get Zoho token' });
+            }
+        }
+        
+        var results = [];
+        var seenIds = {};
+        
+        // Helper function to make Zoho Books API calls with retry
+        async function zohoApiCall(url) {
+            var response = await fetch(url, {
+                headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
+            });
+            if (response.status === 401) {
+                await refreshZohoToken();
+                response = await fetch(url, {
+                    headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
+                });
+            }
+            if (!response.ok) return null;
+            return response.json();
+        }
+        
+        // Search invoices - use item_name search
+        // The styleId might be "85715J-AB" and items are "85715J-AB-BLUE-XS"
+        try {
+            var invoiceUrl = 'https://www.zohoapis.com/books/v3/invoices?organization_id=' + orgId + '&item_name_contains=' + encodeURIComponent(styleId);
+            var invoiceData = await zohoApiCall(invoiceUrl);
+            
+            if (invoiceData && invoiceData.invoices) {
+                for (var i = 0; i < invoiceData.invoices.length; i++) {
+                    var inv = invoiceData.invoices[i];
+                    if (seenIds['inv-' + inv.invoice_id]) continue;
+                    seenIds['inv-' + inv.invoice_id] = true;
+                    
+                    // Get full invoice details to get line items
+                    var detailUrl = 'https://www.zohoapis.com/books/v3/invoices/' + inv.invoice_id + '?organization_id=' + orgId;
+                    var detailData = await zohoApiCall(detailUrl);
+                    
+                    if (detailData && detailData.invoice && detailData.invoice.line_items) {
+                        var totalQty = 0;
+                        var matchingItems = [];
+                        
+                        for (var j = 0; j < detailData.invoice.line_items.length; j++) {
+                            var item = detailData.invoice.line_items[j];
+                            var itemName = (item.name || item.item_name || '').toUpperCase();
+                            var itemSku = (item.sku || '').toUpperCase();
+                            var searchStyle = styleId.toUpperCase();
+                            
+                            // Check if item name or SKU starts with the style ID
+                            if (itemName.indexOf(searchStyle) === 0 || itemSku.indexOf(searchStyle) === 0) {
+                                totalQty += item.quantity || 0;
+                                matchingItems.push({
+                                    name: item.name || item.item_name,
+                                    quantity: item.quantity,
+                                    rate: item.rate,
+                                    amount: item.item_total
+                                });
+                            }
+                        }
+                        
+                        if (totalQty > 0) {
+                            results.push({
+                                type: 'invoice',
+                                documentNumber: inv.invoice_number,
+                                date: inv.date,
+                                customerName: inv.customer_name,
+                                status: inv.status,
+                                quantity: totalQty,
+                                total: inv.total,
+                                items: matchingItems
+                            });
+                        }
+                    }
+                }
+            }
+        } catch (invErr) {
+            console.error('Invoice search error:', invErr.message);
+        }
+        
+        // Search sales orders
+        try {
+            var soUrl = 'https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId + '&item_name_contains=' + encodeURIComponent(styleId);
+            var soData = await zohoApiCall(soUrl);
+            
+            if (soData && soData.salesorders) {
+                for (var k = 0; k < soData.salesorders.length; k++) {
+                    var so = soData.salesorders[k];
+                    if (seenIds['so-' + so.salesorder_id]) continue;
+                    seenIds['so-' + so.salesorder_id] = true;
+                    
+                    // Get full sales order details
+                    var soDetailUrl = 'https://www.zohoapis.com/books/v3/salesorders/' + so.salesorder_id + '?organization_id=' + orgId;
+                    var soDetailData = await zohoApiCall(soDetailUrl);
+                    
+                    if (soDetailData && soDetailData.salesorder && soDetailData.salesorder.line_items) {
+                        var soTotalQty = 0;
+                        var soMatchingItems = [];
+                        
+                        for (var m = 0; m < soDetailData.salesorder.line_items.length; m++) {
+                            var soItem = soDetailData.salesorder.line_items[m];
+                            var soItemName = (soItem.name || soItem.item_name || '').toUpperCase();
+                            var soItemSku = (soItem.sku || '').toUpperCase();
+                            var soSearchStyle = styleId.toUpperCase();
+                            
+                            if (soItemName.indexOf(soSearchStyle) === 0 || soItemSku.indexOf(soSearchStyle) === 0) {
+                                soTotalQty += soItem.quantity || 0;
+                                soMatchingItems.push({
+                                    name: soItem.name || soItem.item_name,
+                                    quantity: soItem.quantity,
+                                    rate: soItem.rate,
+                                    amount: soItem.item_total
+                                });
+                            }
+                        }
+                        
+                        if (soTotalQty > 0) {
+                            results.push({
+                                type: 'salesorder',
+                                documentNumber: so.salesorder_number,
+                                date: so.date,
+                                customerName: so.customer_name,
+                                status: so.status,
+                                quantity: soTotalQty,
+                                total: so.total,
+                                items: soMatchingItems,
+                                isOpen: so.status === 'open' || so.status === 'pending'
+                            });
+                        }
+                    }
+                }
+            }
+        } catch (soErr) {
+            console.error('Sales order search error:', soErr.message);
+        }
+        
+        // Sort by date descending
+        results.sort(function(a, b) {
+            return new Date(b.date) - new Date(a.date);
+        });
+        
+        // Calculate summary
+        var totalInvoiced = 0;
+        var totalOpenOrders = 0;
+        var invoiceCount = 0;
+        var openOrderCount = 0;
+        
+        for (var n = 0; n < results.length; n++) {
+            if (results[n].type === 'invoice') {
+                totalInvoiced += results[n].quantity;
+                invoiceCount++;
+            } else if (results[n].isOpen) {
+                totalOpenOrders += results[n].quantity;
+                openOrderCount++;
+            }
+        }
+        
+        res.json({
+            success: true,
+            styleId: styleId,
+            summary: {
+                totalInvoiced: totalInvoiced,
+                invoiceCount: invoiceCount,
+                totalOpenOrders: totalOpenOrders,
+                openOrderCount: openOrderCount
+            },
+            history: results
+        });
+        
+    } catch (err) {
+        console.error('Sales history error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 function parseCSVLine(line) { var result = []; var current = ''; var inQuotes = false; for (var i = 0; i < line.length; i++) { var char = line[i]; if (char === '"') { inQuotes = !inQuotes; } else if (char === ',' && !inQuotes) { result.push(current.trim()); current = ''; } else { current += char; } } result.push(current.trim()); return result; }
 function parseNumber(val) { if (!val) return 0; return parseInt(val.toString().replace(/,/g, '').replace(/"/g, '').trim()) || 0; }
 
@@ -608,7 +791,7 @@ function getHTML() {
     html += '<div class="share-modal" id="shareModal"><div class="share-modal-content"><h3>Share Selection</h3><div id="shareForm"><input type="text" id="selectionName" placeholder="Name this selection (e.g. Spring Collection for Acme Co)"><div class="share-modal-actions"><button class="btn btn-secondary" id="cancelShareBtn">Cancel</button><button class="btn btn-primary" id="createShareBtn">Create Link</button></div></div><div class="share-result hidden" id="shareResult"><p style="margin-bottom:1rem;color:#666" id="shareNameDisplay"></p><div class="share-buttons"><button class="share-action-btn" id="emailLinkBtn">📧 Email Link</button><button class="share-action-btn" id="textLinkBtn">💬 Text Link</button><button class="share-action-btn" id="copyLinkBtn">🔗 Copy Link</button><a class="share-action-btn" id="pdfLink" href="" target="_blank">📄 Download PDF</a></div><div style="margin-top:1.5rem;text-align:center"><button class="btn btn-secondary" id="closeShareModalBtn">Done</button></div></div></div></div>';
     
     // Product modal
-    html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button><div class="modal-body"><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div class="product-style" id="modalStyle"></div><h2 id="modalName"></h2><p id="modalCategory" style="color:#666;margin-bottom:1rem"></p><div id="modalColors"></div><div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div><div class="modal-actions"><button class="btn btn-secondary btn-sm" id="modalPickBtn">♡ Add to My Picks</button><button class="btn btn-secondary btn-sm" id="modalCompareBtn">+ Add to Compare</button></div><div class="note-section"><label><strong>My Notes:</strong></label><textarea id="modalNote" placeholder="Add private notes about this product..."></textarea><button class="btn btn-sm btn-primary" id="saveNoteBtn">Save Note</button></div></div></div></div></div>';
+    html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button><div class="modal-body"><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div class="product-style" id="modalStyle"></div><h2 id="modalName"></h2><p id="modalCategory" style="color:#666;margin-bottom:1rem"></p><div id="modalColors"></div><div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div><div class="modal-actions"><button class="btn btn-secondary btn-sm" id="modalPickBtn">♡ Add to My Picks</button><button class="btn btn-secondary btn-sm" id="modalCompareBtn">+ Add to Compare</button></div><div class="sales-history-section"><h3 style="margin:1rem 0 0.75rem;font-size:1rem;display:flex;align-items:center;gap:0.5rem">📊 Sales History <span id="salesHistoryLoading" style="font-size:0.75rem;color:#666;font-weight:normal">(loading...)</span></h3><div id="salesHistorySummary" style="display:flex;gap:1.5rem;margin-bottom:0.75rem;font-size:0.875rem"></div><div id="salesHistoryList" style="max-height:200px;overflow-y:auto;font-size:0.875rem"></div></div><div class="note-section"><label><strong>My Notes:</strong></label><textarea id="modalNote" placeholder="Add private notes about this product..."></textarea><button class="btn btn-sm btn-primary" id="saveNoteBtn">Save Note</button></div></div></div></div></div>';
     
     // Compare modal
     html += '<div class="compare-modal" id="compareModal"><div class="compare-content"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem"><h2>Compare Products</h2><button class="btn btn-secondary" id="closeCompareBtn">Close</button></div><div class="compare-grid" id="compareGrid"></div></div></div>';
@@ -691,7 +874,9 @@ function getHTML() {
     
     html += 'function updateCompareUI(){document.getElementById("compareCount").textContent=compareProducts.length;document.getElementById("compareBtn").disabled=compareProducts.length===0;document.getElementById("compareBtn").textContent="Compare ("+compareProducts.length+")";document.getElementById("compareBar").classList.toggle("visible",compareProducts.length>0)}';
     
-    html += 'function showProductModal(id){currentModalProductId=id;var pr=products.find(function(p){return p.id===id});if(!pr)return;var imgUrl=getImageUrl(pr.image_url);document.getElementById("modalImage").src=imgUrl||"";document.getElementById("modalStyle").textContent=pr.style_id;document.getElementById("modalName").textContent=pr.name;document.getElementById("modalCategory").textContent=pr.category||"";var cols=pr.colors||[];var tot=0;var ch="";cols.forEach(function(c){tot+=c.available_qty||0;ch+="<div class=\\"color-row\\"><span>"+c.color_name+"</span><span>"+(c.available_qty||0).toLocaleString()+"</span></div>"});document.getElementById("modalColors").innerHTML=ch;document.getElementById("modalTotal").textContent=tot.toLocaleString();document.getElementById("modalNote").value=userNotes[id]||"";var isPicked=userPicks.indexOf(id)!==-1;document.getElementById("modalPickBtn").textContent=isPicked?"♥ In My Picks":"♡ Add to My Picks";document.getElementById("modal").classList.add("active")}';
+    html += 'function showProductModal(id){currentModalProductId=id;var pr=products.find(function(p){return p.id===id});if(!pr)return;var imgUrl=getImageUrl(pr.image_url);document.getElementById("modalImage").src=imgUrl||"";document.getElementById("modalStyle").textContent=pr.style_id;document.getElementById("modalName").textContent=pr.name;document.getElementById("modalCategory").textContent=pr.category||"";var cols=pr.colors||[];var tot=0;var ch="";cols.forEach(function(c){tot+=c.available_qty||0;ch+="<div class=\\"color-row\\"><span>"+c.color_name+"</span><span>"+(c.available_qty||0).toLocaleString()+"</span></div>"});document.getElementById("modalColors").innerHTML=ch;document.getElementById("modalTotal").textContent=tot.toLocaleString();document.getElementById("modalNote").value=userNotes[id]||"";var isPicked=userPicks.indexOf(id)!==-1;document.getElementById("modalPickBtn").textContent=isPicked?"♥ In My Picks":"♡ Add to My Picks";document.getElementById("modal").classList.add("active");loadSalesHistory(pr.style_id)}';
+    
+    html += 'function loadSalesHistory(styleId){document.getElementById("salesHistoryLoading").textContent="(loading...)";document.getElementById("salesHistorySummary").innerHTML="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#666;padding:0.5rem\\">Loading sales history...</div>";fetch("/api/sales-history/"+encodeURIComponent(styleId)).then(function(r){return r.json()}).then(function(d){document.getElementById("salesHistoryLoading").textContent="";if(!d.success){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">Unable to load sales history</div>";return}var sum=d.summary;document.getElementById("salesHistorySummary").innerHTML="<div style=\\"padding:0.5rem 0.75rem;background:#e8f5e9;border-radius:4px\\"><div style=\\"font-weight:bold;color:#2e7d32\\">"+sum.totalInvoiced.toLocaleString()+"</div><div style=\\"font-size:0.75rem;color:#666\\">Units Invoiced ("+sum.invoiceCount+" orders)</div></div><div style=\\"padding:0.5rem 0.75rem;background:#fff3e0;border-radius:4px\\"><div style=\\"font-weight:bold;color:#ef6c00\\">"+sum.totalOpenOrders.toLocaleString()+"</div><div style=\\"font-size:0.75rem;color:#666\\">Open Orders ("+sum.openOrderCount+")</div></div>";if(d.history.length===0){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">No sales history found for this style</div>";return}var h="<table style=\\"width:100%;border-collapse:collapse;font-size:0.8rem\\"><thead><tr style=\\"background:#f5f5f5\\"><th style=\\"text-align:left;padding:0.4rem\\">Date</th><th style=\\"text-align:left;padding:0.4rem\\">Customer</th><th style=\\"text-align:left;padding:0.4rem\\">Type</th><th style=\\"text-align:right;padding:0.4rem\\">Qty</th></tr></thead><tbody>";d.history.forEach(function(rec){var typeLabel=rec.type==="invoice"?"<span style=\\"color:#2e7d32\\">Invoice</span>":"<span style=\\"color:#ef6c00\\">SO"+(rec.isOpen?" (Open)":"")+"</span>";var dt=new Date(rec.date).toLocaleDateString();h+="<tr style=\\"border-bottom:1px solid #eee\\"><td style=\\"padding:0.4rem\\">"+dt+"</td><td style=\\"padding:0.4rem\\">"+rec.customerName+"</td><td style=\\"padding:0.4rem\\">"+typeLabel+"</td><td style=\\"padding:0.4rem;text-align:right\\">"+rec.quantity.toLocaleString()+"</td></tr>"});h+="</tbody></table>";document.getElementById("salesHistoryList").innerHTML=h}).catch(function(err){document.getElementById("salesHistoryLoading").textContent="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">Error loading sales history</div>"})}';
     
     html += 'function updateSelectionUI(){document.getElementById("selectedCount").textContent=selectedProducts.length;var bar=document.getElementById("selectionBar");if(selectedProducts.length>0&&selectionMode){bar.classList.add("visible")}else{bar.classList.remove("visible")}}';
     

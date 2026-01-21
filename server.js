@@ -16,496 +16,200 @@ const pool = new Pool({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(session({
-    secret: process.env.SESSION_SECRET || 'catalog-secret-key-change-in-production',
+    secret: process.env.SESSION_SECRET || 'catalog-secret-key',
     resave: false,
     saveUninitialized: false,
     cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 }
 }));
 
-const storage = multer.memoryStorage();
-const upload = multer({ storage: storage });
-
-// Zoho credentials
-let zohoAccessToken = null;
+const upload = multer({ storage: multer.memoryStorage() });
 
 async function initDB() {
     try {
-        await pool.query(`CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username VARCHAR(255) UNIQUE NOT NULL,
-            password VARCHAR(255) NOT NULL,
-            role VARCHAR(50) DEFAULT 'sales_rep',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`);
-        
-        await pool.query(`CREATE TABLE IF NOT EXISTS products (
-            id SERIAL PRIMARY KEY,
-            style_id VARCHAR(100) NOT NULL,
-            base_style VARCHAR(100),
-            name VARCHAR(255) NOT NULL,
-            category VARCHAR(100),
-            image_url TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`);
-        
-        await pool.query(`CREATE TABLE IF NOT EXISTS product_colors (
-            id SERIAL PRIMARY KEY,
-            product_id INTEGER REFERENCES products(id) ON DELETE CASCADE,
-            color_name VARCHAR(100) NOT NULL,
-            available_qty INTEGER DEFAULT 0,
-            on_hand INTEGER DEFAULT 0,
-            open_order INTEGER DEFAULT 0,
-            to_come INTEGER DEFAULT 0,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`);
-        
-        await pool.query(`CREATE TABLE IF NOT EXISTS sync_history (
-            id SERIAL PRIMARY KEY,
-            sync_type VARCHAR(50),
-            status VARCHAR(50),
-            records_synced INTEGER DEFAULT 0,
-            error_message TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`);
-        
-        await pool.query(`CREATE TABLE IF NOT EXISTS zoho_tokens (
-            id SERIAL PRIMARY KEY,
-            access_token TEXT,
-            refresh_token TEXT,
-            expires_at TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`);
-
-        // Create default admin user
-        const adminExists = await pool.query("SELECT id FROM users WHERE username = 'admin'");
-        if (adminExists.rows.length === 0) {
-            const hashedPassword = await bcrypt.hash('admin123', 10);
-            await pool.query("INSERT INTO users (username, password, role) VALUES ('admin', $1, 'admin')", [hashedPassword]);
+        await pool.query(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, username VARCHAR(255) UNIQUE NOT NULL, password VARCHAR(255) NOT NULL, role VARCHAR(50) DEFAULT 'sales_rep', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+        await pool.query(`CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, style_id VARCHAR(100) NOT NULL, base_style VARCHAR(100), name VARCHAR(255) NOT NULL, category VARCHAR(100), image_url TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+        await pool.query(`CREATE TABLE IF NOT EXISTS product_colors (id SERIAL PRIMARY KEY, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE, color_name VARCHAR(100) NOT NULL, available_qty INTEGER DEFAULT 0, on_hand INTEGER DEFAULT 0, open_order INTEGER DEFAULT 0, to_come INTEGER DEFAULT 0, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+        await pool.query(`CREATE TABLE IF NOT EXISTS sync_history (id SERIAL PRIMARY KEY, sync_type VARCHAR(50), status VARCHAR(50), records_synced INTEGER DEFAULT 0, error_message TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+        const userCheck = await pool.query('SELECT COUNT(*) FROM users');
+        if (parseInt(userCheck.rows[0].count) === 0) {
+            const hash = await bcrypt.hash('admin123', 10);
+            await pool.query('INSERT INTO users (username, password, role) VALUES ($1, $2, $3)', ['admin', hash, 'admin']);
+            console.log('Default admin user created (admin/admin123)');
         }
-
-        // Load stored token
-        const tokenResult = await pool.query("SELECT * FROM zoho_tokens ORDER BY id DESC LIMIT 1");
-        if (tokenResult.rows.length > 0) {
-            zohoAccessToken = tokenResult.rows[0].access_token;
-        }
-
         console.log('Database initialized successfully');
-    } catch (err) {
-        console.error('Database initialization error:', err.message);
-    }
+    } catch (err) { console.error('Database initialization error:', err); }
 }
 
-// Auth middleware - DISABLED for now
-function requireAuth(req, res, next) {
-    next(); // Skip auth check
-}
+function requireAuth(req, res, next) { if (req.session && req.session.userId) next(); else res.status(401).json({ error: 'Unauthorized' }); }
+function requireAdmin(req, res, next) { if (req.session && req.session.role === 'admin') next(); else res.status(403).json({ error: 'Admin access required' }); }
 
-function requireAdmin(req, res, next) {
-    next(); // Skip admin check
-}
-
-// Auth routes
 app.post('/api/login', async (req, res) => {
     try {
         const { username, password } = req.body;
         const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-        
-        if (result.rows.length === 0) {
-            return res.json({ success: false, error: 'Invalid credentials' });
-        }
-        
+        if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
         const user = result.rows[0];
-        const validPassword = await bcrypt.compare(password, user.password);
-        
-        if (!validPassword) {
-            return res.json({ success: false, error: 'Invalid credentials' });
-        }
-        
+        const valid = await bcrypt.compare(password, user.password);
+        if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
         req.session.userId = user.id;
         req.session.username = user.username;
         req.session.role = user.role;
-        
-        res.json({ success: true, user: { username: user.username, role: user.role } });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
+        res.json({ success: true, username: user.username, role: user.role });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/logout', (req, res) => {
-    req.session.destroy();
-    res.json({ success: true });
-});
-
+app.post('/api/logout', (req, res) => { req.session.destroy(); res.json({ success: true }); });
 app.get('/api/session', (req, res) => {
-    if (req.session && req.session.userId) {
-        res.json({ 
-            authenticated: true, 
-            user: { username: req.session.username, role: req.session.role } 
-        });
-    } else {
-        res.json({ authenticated: false });
-    }
+    if (req.session && req.session.userId) res.json({ loggedIn: true, username: req.session.username, role: req.session.role });
+    else res.json({ loggedIn: false });
 });
 
-// User management
-app.get('/api/users', requireAuth, requireAdmin, async (req, res) => {
+app.get('/api/products', requireAuth, async (req, res) => {
     try {
-        const result = await pool.query('SELECT id, username, role, created_at FROM users ORDER BY created_at DESC');
+        const result = await pool.query(`
+            SELECT p.id, p.style_id, p.base_style, p.name, p.category, p.image_url,
+            json_agg(json_build_object('id', pc.id, 'color_name', pc.color_name, 'available_qty', pc.available_qty, 'on_hand', pc.on_hand)) FILTER (WHERE pc.id IS NOT NULL) as colors
+            FROM products p LEFT JOIN product_colors pc ON p.id = pc.product_id
+            GROUP BY p.id ORDER BY p.category, p.name`);
         res.json(result.rows);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/zoho/sync-history', requireAuth, requireAdmin, async (req, res) => {
+    try { const result = await pool.query('SELECT * FROM sync_history ORDER BY created_at DESC LIMIT 20'); res.json(result.rows); }
+    catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+function parseCSVLine(line) {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') { inQuotes = !inQuotes; }
+        else if (char === ',' && !inQuotes) { result.push(current.trim()); current = ''; }
+        else { current += char; }
     }
+    result.push(current.trim());
+    return result;
+}
+
+function parseNumber(val) {
+    if (!val) return 0;
+    return parseInt(val.toString().replace(/,/g, '').replace(/"/g, '').trim()) || 0;
+}
+
+app.post('/api/import', requireAuth, requireAdmin, upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+        const content = req.file.buffer.toString('utf-8');
+        const lines = content.split('\n').filter(line => line.trim());
+        if (lines.length < 2) return res.status(400).json({ error: 'File appears empty' });
+
+        let headerLine = lines[0];
+        if (headerLine.charCodeAt(0) === 0xFEFF) headerLine = headerLine.slice(1);
+        const headers = parseCSVLine(headerLine).map(h => h.toLowerCase().replace(/[^\w\s]/g, '').trim());
+        console.log('CSV Headers:', headers);
+
+        const headerMap = {};
+        headers.forEach((h, idx) => { headerMap[h] = idx; });
+
+        let imported = 0, skipped = 0;
+        let lastStyleId = null, lastImageUrl = null, lastCategory = null;
+
+        for (let i = 1; i < lines.length; i++) {
+            try {
+                const values = parseCSVLine(lines[i]);
+                if (values[0] && values[0].includes('Grand Summary')) { skipped++; continue; }
+
+                let styleId = values[headerMap['style name']] || values[0];
+                let imageUrl = values[headerMap['style image']] || values[1];
+                let color = values[headerMap['color']] || values[2];
+                let category = values[headerMap['commodity']] || values[3];
+                let onHand = parseNumber(values[headerMap['on hand']] || values[4]);
+                let allocated = parseNumber(values[headerMap['allocated on hand']] || values[5]);
+                let available = parseNumber(values[headerMap['available now']] || values[headerMap['left to sell']] || values[7]);
+
+                if (!styleId && color) {
+                    styleId = lastStyleId;
+                    if (!imageUrl || imageUrl === '-No Value-') imageUrl = lastImageUrl;
+                    if (!category || category === '-No Value-') category = lastCategory;
+                }
+                if (!styleId) { skipped++; continue; }
+
+                lastStyleId = styleId;
+                if (imageUrl && imageUrl !== '-No Value-' && imageUrl.startsWith('http')) lastImageUrl = imageUrl;
+                if (category && category !== '-No Value-') lastCategory = category;
+
+                const baseStyle = styleId.split('-')[0];
+                const validCategory = (category && category !== '-No Value-') ? category : 'Uncategorized';
+                const name = validCategory + ' - ' + baseStyle;
+                const validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.startsWith('http')) ? imageUrl : lastImageUrl;
+
+                let productResult = await pool.query('SELECT id, image_url FROM products WHERE style_id = $1', [styleId]);
+                let productId;
+
+                if (productResult.rows.length > 0) {
+                    productId = productResult.rows[0].id;
+                    const finalImage = validImageUrl || productResult.rows[0].image_url;
+                    await pool.query('UPDATE products SET name=$1, category=$2, base_style=$3, image_url=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5',
+                        [name, validCategory, baseStyle, finalImage, productId]);
+                } else {
+                    const ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url) VALUES ($1,$2,$3,$4,$5) RETURNING id',
+                        [styleId, baseStyle, name, validCategory, validImageUrl]);
+                    productId = ins.rows[0].id;
+                }
+
+                if (color && color !== '-No Value-') {
+                    const colorResult = await pool.query('SELECT id FROM product_colors WHERE product_id=$1 AND color_name=$2', [productId, color]);
+                    if (colorResult.rows.length > 0) {
+                        await pool.query('UPDATE product_colors SET available_qty=$1, on_hand=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3',
+                            [available, onHand, colorResult.rows[0].id]);
+                    } else {
+                        await pool.query('INSERT INTO product_colors (product_id, color_name, available_qty, on_hand) VALUES ($1,$2,$3,$4)',
+                            [productId, color, available, onHand]);
+                    }
+                }
+                imported++;
+            } catch (rowErr) { console.error('Row error:', rowErr.message); skipped++; }
+        }
+
+        await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1,$2,$3)', ['csv_import', 'success', imported]);
+        res.json({ success: true, imported, skipped });
+    } catch (err) { console.error('Import error:', err); res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/products/clear', requireAuth, requireAdmin, async (req, res) => {
+    try {
+        await pool.query('DELETE FROM product_colors');
+        await pool.query('DELETE FROM products');
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/users', requireAuth, requireAdmin, async (req, res) => {
+    try { const result = await pool.query('SELECT id, username, role, created_at FROM users ORDER BY created_at'); res.json(result.rows); }
+    catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
     try {
         const { username, password, role } = req.body;
-        const hashedPassword = await bcrypt.hash(password, 10);
-        await pool.query('INSERT INTO users (username, password, role) VALUES ($1, $2, $3)', [username, hashedPassword, role || 'sales_rep']);
+        const hash = await bcrypt.hash(password, 10);
+        await pool.query('INSERT INTO users (username, password, role) VALUES ($1,$2,$3)', [username, hash, role || 'sales_rep']);
         res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
     try {
-        await pool.query('DELETE FROM users WHERE id = $1 AND username != $2', [req.params.id, 'admin']);
+        if (req.params.id == req.session.userId) return res.status(400).json({ error: 'Cannot delete yourself' });
+        await pool.query('DELETE FROM users WHERE id=$1', [req.params.id]);
         res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Products
-app.get('/api/products', requireAuth, async (req, res) => {
-    try {
-        const productsResult = await pool.query('SELECT * FROM products ORDER BY category, name');
-        const products = productsResult.rows;
-        
-        for (let product of products) {
-            const colorsResult = await pool.query('SELECT * FROM product_colors WHERE product_id = $1 ORDER BY color_name', [product.id]);
-            product.colors = colorsResult.rows;
-        }
-        
-        res.json(products);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Zoho OAuth
-app.post('/api/zoho/save-credentials', requireAuth, requireAdmin, async (req, res) => {
-    try {
-        const { clientId, clientSecret, refreshToken } = req.body;
-        
-        // Store in environment (in production, these would be in Railway variables)
-        process.env.ZOHO_CLIENT_ID = clientId;
-        process.env.ZOHO_CLIENT_SECRET = clientSecret;
-        process.env.ZOHO_REFRESH_TOKEN = refreshToken;
-        
-        // Try to get access token
-        const tokenResult = await refreshZohoToken();
-        if (tokenResult.success) {
-            res.json({ success: true, message: 'Credentials saved and verified' });
-        } else {
-            res.json({ success: false, error: tokenResult.error });
-        }
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-async function refreshZohoToken() {
-    try {
-        const clientId = process.env.ZOHO_CLIENT_ID;
-        const clientSecret = process.env.ZOHO_CLIENT_SECRET;
-        const refreshToken = process.env.ZOHO_REFRESH_TOKEN;
-        
-        if (!clientId || !clientSecret || !refreshToken) {
-            return { success: false, error: 'Missing Zoho credentials' };
-        }
-        
-        const params = new URLSearchParams({
-            refresh_token: refreshToken,
-            client_id: clientId,
-            client_secret: clientSecret,
-            grant_type: 'refresh_token'
-        });
-        
-        const response = await fetch('https://accounts.zoho.com/oauth/v2/token', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: params.toString()
-        });
-        
-        const data = await response.json();
-        
-        if (data.access_token) {
-            zohoAccessToken = data.access_token;
-            const expiresAt = new Date(Date.now() + (data.expires_in || 3600) * 1000);
-            
-            await pool.query(`
-                INSERT INTO zoho_tokens (access_token, refresh_token, expires_at, updated_at)
-                VALUES ($1, $2, $3, NOW())
-            `, [zohoAccessToken, refreshToken, expiresAt]);
-            
-            return { success: true };
-        } else {
-            return { success: false, error: data.error || 'Failed to refresh token' };
-        }
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-}
-
-app.get('/api/zoho/status', requireAuth, async (req, res) => {
-    const hasCredentials = !!(process.env.ZOHO_CLIENT_ID && process.env.ZOHO_CLIENT_SECRET && process.env.ZOHO_REFRESH_TOKEN);
-    const hasToken = !!zohoAccessToken;
-    const hasViewId = !!process.env.ZOHO_VIEW_ID;
-    const hasWorkspaceId = !!process.env.ZOHO_WORKSPACE_ID;
-    
-    res.json({
-        configured: hasCredentials,
-        connected: hasToken,
-        viewConfigured: hasViewId && hasWorkspaceId,
-        viewId: process.env.ZOHO_VIEW_ID || null,
-        workspaceId: process.env.ZOHO_WORKSPACE_ID || null
-    });
-});
-
-app.post('/api/zoho/test-connection', requireAuth, requireAdmin, async (req, res) => {
-    try {
-        if (!zohoAccessToken) {
-            const tokenResult = await refreshZohoToken();
-            if (!tokenResult.success) {
-                return res.json({ success: false, error: tokenResult.error });
-            }
-        }
-        
-        res.json({ success: true, message: 'Connection successful' });
-    } catch (err) {
-        res.json({ success: false, error: err.message });
-    }
-});
-
-app.post('/api/zoho/sync', requireAuth, requireAdmin, async (req, res) => {
-    try {
-        const workspaceId = process.env.ZOHO_WORKSPACE_ID;
-        const viewId = process.env.ZOHO_VIEW_ID;
-        
-        if (!workspaceId) {
-            await pool.query("INSERT INTO sync_history (sync_type, status, error_message) VALUES ('zoho', 'failed', 'ZOHO_WORKSPACE_ID not configured')");
-            return res.json({ success: false, error: 'ZOHO_WORKSPACE_ID not configured in Railway variables' });
-        }
-        
-        if (!viewId) {
-            await pool.query("INSERT INTO sync_history (sync_type, status, error_message) VALUES ('zoho', 'failed', 'ZOHO_VIEW_ID not configured')");
-            return res.json({ success: false, error: 'ZOHO_VIEW_ID not configured in Railway variables' });
-        }
-        
-        if (!zohoAccessToken) {
-            const tokenResult = await refreshZohoToken();
-            if (!tokenResult.success) {
-                await pool.query("INSERT INTO sync_history (sync_type, status, error_message) VALUES ('zoho', 'failed', $1)", [tokenResult.error]);
-                return res.json({ success: false, error: tokenResult.error });
-            }
-        }
-        
-        // Use the correct Zoho Analytics API endpoint
-        const apiUrl = `https://analyticsapi.zoho.com/restapi/v2/workspaces/${workspaceId}/views/${viewId}/data?CONFIG={"responseFormat":"json"}`;
-        
-        console.log('Fetching from Zoho:', apiUrl);
-        
-        let response = await fetch(apiUrl, {
-            headers: { 'Authorization': `Zoho-oauthtoken ${zohoAccessToken}` }
-        });
-        
-        // If 401, try refreshing token
-        if (response.status === 401) {
-            const tokenResult = await refreshZohoToken();
-            if (!tokenResult.success) {
-                await pool.query("INSERT INTO sync_history (sync_type, status, error_message) VALUES ('zoho', 'failed', $1)", [tokenResult.error]);
-                return res.json({ success: false, error: tokenResult.error });
-            }
-            
-            response = await fetch(apiUrl, {
-                headers: { 'Authorization': `Zoho-oauthtoken ${zohoAccessToken}` }
-            });
-        }
-        
-        if (!response.ok) {
-            const errorText = await response.text();
-            console.error('Zoho API error:', response.status, errorText);
-            await pool.query("INSERT INTO sync_history (sync_type, status, error_message) VALUES ('zoho', 'failed', $1)", [`API error: ${response.status} - ${errorText}`]);
-            return res.json({ success: false, error: `API error: ${response.status} - ${errorText}` });
-        }
-        
-        const data = await response.json();
-        console.log('Zoho response keys:', Object.keys(data));
-        
-        // Parse the Zoho Analytics response
-        const rows = data.data || data.rows || [];
-        const columns = data.column_order || data.columns || [];
-        
-        if (rows.length === 0) {
-            await pool.query("INSERT INTO sync_history (sync_type, status, error_message) VALUES ('zoho', 'failed', 'No data returned from Zoho')");
-            return res.json({ success: false, error: 'No data returned from Zoho Analytics' });
-        }
-        
-        // Process the data - find column indices
-        const colMap = {};
-        columns.forEach((col, idx) => {
-            colMap[col.toLowerCase().replace(/\s+/g, '_')] = idx;
-        });
-        
-        console.log('Column map:', colMap);
-        console.log('Sample row:', rows[0]);
-        
-        // Clear existing data and insert new
-        await pool.query('DELETE FROM product_colors');
-        await pool.query('DELETE FROM products');
-        
-        const productMap = new Map();
-        let recordCount = 0;
-        
-        for (const row of rows) {
-            // Try to find the style name column
-            const styleIdx = colMap['style_name'] ?? colMap['style'] ?? colMap['name'] ?? 0;
-            const colorIdx = colMap['color'] ?? colMap['color_name'] ?? 1;
-            const categoryIdx = colMap['commodity'] ?? colMap['category'] ?? colMap['type'] ?? 2;
-            const qtyIdx = colMap['left_to_sell'] ?? colMap['available'] ?? colMap['qty'] ?? colMap['quantity'] ?? 3;
-            
-            const styleName = row[styleIdx] || 'Unknown Style';
-            const color = row[colorIdx] || 'Default';
-            const category = row[categoryIdx] || 'Uncategorized';
-            const qty = parseInt(row[qtyIdx]) || 0;
-            
-            // Create base style key
-            const baseStyle = styleName.replace(/\s*-\s*\d+$/, '').trim();
-            
-            if (!productMap.has(baseStyle)) {
-                const result = await pool.query(
-                    'INSERT INTO products (style_id, base_style, name, category) VALUES ($1, $2, $3, $4) RETURNING id',
-                    [styleName, baseStyle, baseStyle, category]
-                );
-                productMap.set(baseStyle, result.rows[0].id);
-            }
-            
-            const productId = productMap.get(baseStyle);
-            
-            await pool.query(
-                'INSERT INTO product_colors (product_id, color_name, available_qty) VALUES ($1, $2, $3)',
-                [productId, color, qty]
-            );
-            
-            recordCount++;
-        }
-        
-        await pool.query("INSERT INTO sync_history (sync_type, status, records_synced) VALUES ('zoho', 'success', $1)", [recordCount]);
-        
-        res.json({ success: true, message: `Synced ${recordCount} records from ${productMap.size} products` });
-    } catch (err) {
-        console.error('Sync error:', err);
-        await pool.query("INSERT INTO sync_history (sync_type, status, error_message) VALUES ('zoho', 'failed', $1)", [err.message]);
-        res.json({ success: false, error: err.message });
-    }
-});
-
-app.get('/api/sync-history', requireAuth, async (req, res) => {
-    try {
-        const result = await pool.query('SELECT * FROM sync_history ORDER BY created_at DESC LIMIT 20');
-        res.json(result.rows);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// CSV Import
-app.post('/api/import', requireAuth, requireAdmin, upload.single('file'), async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.json({ success: false, error: 'No file uploaded' });
-        }
-        
-        const content = req.file.buffer.toString('utf-8');
-        const lines = content.split('\n').filter(line => line.trim());
-        
-        if (lines.length < 2) {
-            return res.json({ success: false, error: 'File appears empty' });
-        }
-        
-        // Parse header
-        const header = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/"/g, ''));
-        
-        // Find column indices
-        const styleIdx = header.findIndex(h => h.includes('style'));
-        const colorIdx = header.findIndex(h => h.includes('color'));
-        const categoryIdx = header.findIndex(h => h.includes('commodity') || h.includes('category'));
-        const qtyIdx = header.findIndex(h => h.includes('left') || h.includes('sell') || h.includes('available'));
-        
-        if (styleIdx === -1) {
-            return res.json({ success: false, error: 'Could not find Style column' });
-        }
-        
-        // Clear existing data
-        await pool.query('DELETE FROM product_colors');
-        await pool.query('DELETE FROM products');
-        
-        const productMap = new Map();
-        let imported = 0;
-        
-        for (let i = 1; i < lines.length; i++) {
-            const values = lines[i].split(',').map(v => v.trim().replace(/"/g, ''));
-            
-            const styleName = values[styleIdx] || '';
-            if (!styleName) continue;
-            
-            const color = colorIdx >= 0 ? values[colorIdx] : 'Default';
-            const category = categoryIdx >= 0 ? values[categoryIdx] : 'Uncategorized';
-            const qty = qtyIdx >= 0 ? parseInt(values[qtyIdx]) || 0 : 0;
-            
-            const baseStyle = styleName.replace(/\s*-\s*\d+$/, '').trim();
-            
-            if (!productMap.has(baseStyle)) {
-                const result = await pool.query(
-                    'INSERT INTO products (style_id, base_style, name, category) VALUES ($1, $2, $3, $4) RETURNING id',
-                    [styleName, baseStyle, baseStyle, category]
-                );
-                productMap.set(baseStyle, result.rows[0].id);
-            }
-            
-            const productId = productMap.get(baseStyle);
-            
-            await pool.query(
-                'INSERT INTO product_colors (product_id, color_name, available_qty) VALUES ($1, $2, $3)',
-                [productId, color, qty]
-            );
-            
-            imported++;
-        }
-        
-        await pool.query("INSERT INTO sync_history (sync_type, status, records_synced) VALUES ('csv', 'success', $1)", [imported]);
-        
-        res.json({ success: true, imported });
-    } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-// Token refresh job
-function startTokenRefreshJob() {
-    setInterval(async () => {
-        if (process.env.ZOHO_REFRESH_TOKEN) {
-            console.log('Running scheduled token refresh...');
-            await refreshZohoToken();
-        }
-    }, 30 * 60 * 1000); // Every 30 minutes
-}
-
-// Serve frontend
-app.get('/', (req, res) => {
+app.get('*', (req, res) => {
     res.send(getHTML());
 });
 
@@ -513,981 +217,416 @@ function getHTML() {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Product Catalog</title>
-    <style>
-        :root {
-            --primary: #2563eb;
-            --primary-dark: #1d4ed8;
-            --success: #16a34a;
-            --danger: #dc2626;
-            --warning: #f59e0b;
-            --gray-50: #f9fafb;
-            --gray-100: #f3f4f6;
-            --gray-200: #e5e7eb;
-            --gray-300: #d1d5db;
-            --gray-500: #6b7280;
-            --gray-700: #374151;
-            --gray-900: #111827;
-        }
-        
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: var(--gray-50);
-            color: var(--gray-900);
-            line-height: 1.5;
-        }
-        
-        .container { max-width: 1400px; margin: 0 auto; padding: 1rem; }
-        
-        /* Login */
-        .login-container {
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
-        }
-        
-        .login-box {
-            background: white;
-            padding: 2.5rem;
-            border-radius: 12px;
-            box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25);
-            width: 100%;
-            max-width: 400px;
-        }
-        
-        .login-box h1 {
-            text-align: center;
-            margin-bottom: 1.5rem;
-            color: var(--gray-900);
-        }
-        
-        .form-group { margin-bottom: 1rem; }
-        
-        .form-group label {
-            display: block;
-            margin-bottom: 0.5rem;
-            font-weight: 500;
-            color: var(--gray-700);
-        }
-        
-        .form-group input {
-            width: 100%;
-            padding: 0.75rem;
-            border: 1px solid var(--gray-300);
-            border-radius: 6px;
-            font-size: 1rem;
-        }
-        
-        .form-group input:focus {
-            outline: none;
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-        }
-        
-        .btn {
-            display: inline-block;
-            padding: 0.75rem 1.5rem;
-            border: none;
-            border-radius: 6px;
-            font-size: 1rem;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        
-        .btn-primary {
-            background: var(--primary);
-            color: white;
-        }
-        
-        .btn-primary:hover { background: var(--primary-dark); }
-        
-        .btn-success {
-            background: var(--success);
-            color: white;
-        }
-        
-        .btn-danger {
-            background: var(--danger);
-            color: white;
-        }
-        
-        .btn-block { width: 100%; }
-        
-        /* Header */
-        .header {
-            background: white;
-            border-bottom: 1px solid var(--gray-200);
-            padding: 1rem 0;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }
-        
-        .header-content {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 0 1rem;
-        }
-        
-        .header h1 {
-            font-size: 1.5rem;
-            color: var(--primary);
-        }
-        
-        .header-actions {
-            display: flex;
-            gap: 1rem;
-            align-items: center;
-        }
-        
-        /* Tabs */
-        .tabs {
-            display: flex;
-            gap: 0.5rem;
-            margin-bottom: 1.5rem;
-            border-bottom: 1px solid var(--gray-200);
-            padding-bottom: 0.5rem;
-        }
-        
-        .tab {
-            padding: 0.5rem 1rem;
-            border: none;
-            background: none;
-            cursor: pointer;
-            font-size: 1rem;
-            color: var(--gray-500);
-            border-radius: 6px;
-        }
-        
-        .tab.active {
-            background: var(--primary);
-            color: white;
-        }
-        
-        /* Search */
-        .search-bar {
-            margin-bottom: 1.5rem;
-        }
-        
-        .search-bar input {
-            width: 100%;
-            max-width: 400px;
-            padding: 0.75rem 1rem;
-            border: 1px solid var(--gray-300);
-            border-radius: 6px;
-            font-size: 1rem;
-        }
-        
-        /* Category Filters */
-        .category-filters {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.5rem;
-            margin-bottom: 1.5rem;
-        }
-        
-        .filter-pill {
-            padding: 0.5rem 1rem;
-            border: 1px solid var(--gray-300);
-            border-radius: 9999px;
-            background: white;
-            cursor: pointer;
-            font-size: 0.875rem;
-            transition: all 0.2s;
-        }
-        
-        .filter-pill:hover {
-            border-color: var(--primary);
-        }
-        
-        .filter-pill.active {
-            background: var(--primary);
-            color: white;
-            border-color: var(--primary);
-        }
-        
-        /* Products Grid */
-        .product-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-            gap: 1.5rem;
-        }
-        
-        .product-card {
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            overflow: hidden;
-        }
-        
-        .product-header {
-            padding: 1rem;
-            border-bottom: 1px solid var(--gray-100);
-        }
-        
-        .product-name {
-            font-weight: 600;
-            font-size: 1.125rem;
-            color: var(--gray-900);
-        }
-        
-        .product-style {
-            font-size: 0.875rem;
-            color: var(--gray-500);
-        }
-        
-        .product-colors {
-            padding: 1rem;
-        }
-        
-        .color-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 0.5rem 0;
-            border-bottom: 1px solid var(--gray-100);
-        }
-        
-        .color-row:last-child {
-            border-bottom: none;
-        }
-        
-        .color-info {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-        }
-        
-        .color-swatch {
-            width: 24px;
-            height: 24px;
-            border-radius: 50%;
-            border: 1px solid var(--gray-300);
-        }
-        
-        .color-name {
-            font-size: 0.875rem;
-        }
-        
-        .color-qty {
-            font-weight: 600;
-            font-size: 0.875rem;
-        }
-        
-        .color-qty.low {
-            color: var(--warning);
-        }
-        
-        .color-qty.out {
-            color: var(--danger);
-        }
-        
-        .total-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 0.75rem 1rem;
-            background: var(--gray-50);
-            font-weight: 600;
-        }
-        
-        /* Category Section */
-        .category-section {
-            margin-bottom: 2rem;
-        }
-        
-        .category-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1rem;
-        }
-        
-        .category-title {
-            font-size: 1.25rem;
-            color: var(--gray-900);
-        }
-        
-        .category-count {
-            color: var(--gray-500);
-            font-size: 0.875rem;
-        }
-        
-        /* Admin Panel */
-        .admin-section {
-            background: white;
-            border-radius: 12px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }
-        
-        .admin-section h2 {
-            margin-bottom: 1rem;
-            font-size: 1.125rem;
-        }
-        
-        .status-badge {
-            display: inline-block;
-            padding: 0.25rem 0.75rem;
-            border-radius: 9999px;
-            font-size: 0.75rem;
-            font-weight: 500;
-        }
-        
-        .status-badge.success {
-            background: #dcfce7;
-            color: #166534;
-        }
-        
-        .status-badge.error {
-            background: #fef2f2;
-            color: #dc2626;
-        }
-        
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        
-        th, td {
-            padding: 0.75rem;
-            text-align: left;
-            border-bottom: 1px solid var(--gray-200);
-        }
-        
-        th {
-            font-weight: 600;
-            color: var(--gray-700);
-        }
-        
-        .hidden { display: none !important; }
-        
-        .error-message { color: var(--danger); margin-top: 0.5rem; }
-        .success-message { color: var(--success); margin-top: 0.5rem; }
-        
-        @media (max-width: 768px) {
-            .product-grid {
-                grid-template-columns: 1fr;
-            }
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Product Catalog</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #f5f5f5; }
+.login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+.login-box { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); width: 100%; max-width: 360px; }
+.login-box h1 { margin-bottom: 1.5rem; font-size: 1.5rem; text-align: center; }
+.form-group { margin-bottom: 1rem; }
+.form-group label { display: block; margin-bottom: 0.5rem; font-weight: 500; }
+.form-group input { width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 4px; font-size: 1rem; }
+.btn { padding: 0.75rem 1.5rem; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+.btn-primary { background: #2c5545; color: white; width: 100%; }
+.btn-secondary { background: #eee; color: #333; }
+.btn-danger { background: #c4553d; color: white; }
+.error { color: #c4553d; margin-top: 1rem; text-align: center; }
+.success { color: #2e7d32; }
+.hidden { display: none !important; }
+.header { background: white; padding: 1rem 2rem; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
+.header h1 { font-size: 1.25rem; }
+.header-right { display: flex; gap: 1rem; align-items: center; }
+.search-box input { padding: 0.5rem 1rem; border: 1px solid #ddd; border-radius: 4px; width: 250px; }
+.main { max-width: 1400px; margin: 0 auto; padding: 2rem; }
+.admin-panel { background: white; padding: 1.5rem; border-radius: 8px; margin-bottom: 2rem; }
+.admin-panel h2 { margin-bottom: 1rem; }
+.tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+.tab { padding: 0.5rem 1rem; border: none; background: #eee; cursor: pointer; border-radius: 4px; }
+.tab.active { background: #2c5545; color: white; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.upload-area { border: 2px dashed #ddd; padding: 2rem; text-align: center; border-radius: 4px; margin-bottom: 1rem; }
+.upload-area input { display: none; }
+.upload-area label { color: #2c5545; cursor: pointer; }
+.stats { display: flex; gap: 2rem; margin-bottom: 1rem; padding: 1rem; background: white; border-radius: 8px; }
+.stat-value { font-size: 1.5rem; font-weight: bold; }
+.stat-label { color: #666; font-size: 0.875rem; }
+.filters { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.filter-btn { padding: 0.5rem 1rem; border: 1px solid #ddd; background: white; border-radius: 20px; cursor: pointer; }
+.filter-btn.active { background: #2c5545; color: white; border-color: #2c5545; }
+.product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.5rem; }
+.product-card { background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); cursor: pointer; transition: transform 0.2s; }
+.product-card:hover { transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0,0,0,0.15); }
+.product-image { height: 200px; background: #f0f0f0; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.product-image img { width: 100%; height: 100%; object-fit: cover; }
+.product-info { padding: 1rem; }
+.product-style { font-size: 0.75rem; color: #666; text-transform: uppercase; }
+.product-name { font-size: 1.1rem; font-weight: 600; margin: 0.25rem 0; }
+.color-list { margin-top: 0.75rem; }
+.color-row { display: flex; justify-content: space-between; padding: 0.25rem 0; font-size: 0.875rem; }
+.total-row { margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #eee; font-weight: bold; display: flex; justify-content: space-between; }
+.empty { text-align: center; padding: 3rem; color: #666; }
+.modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; z-index: 1000; }
+.modal.active { display: flex; }
+.modal-content { background: white; border-radius: 8px; max-width: 800px; width: 90%; max-height: 90vh; overflow: auto; position: relative; }
+.modal-body { display: flex; }
+.modal-image { width: 50%; background: #f0f0f0; min-height: 300px; }
+.modal-image img { width: 100%; height: 100%; object-fit: cover; }
+.modal-details { width: 50%; padding: 2rem; }
+.modal-close { position: absolute; top: 1rem; right: 1rem; background: white; border: none; font-size: 1.5rem; cursor: pointer; border-radius: 50%; width: 36px; height: 36px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #eee; }
+.add-form { display: flex; gap: 0.5rem; margin-top: 1rem; flex-wrap: wrap; }
+.add-form input, .add-form select { padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; }
+</style>
 </head>
 <body>
-    <!-- Login Screen -->
-    <div id="loginScreen" class="login-container">
-        <div class="login-box">
-            <h1>Product Catalog</h1>
-            <form id="loginForm">
-                <div class="form-group">
-                    <label>Username</label>
-                    <input type="text" id="loginUsername" required>
-                </div>
-                <div class="form-group">
-                    <label>Password</label>
-                    <input type="password" id="loginPassword" required>
-                </div>
-                <button type="submit" class="btn btn-primary btn-block">Login</button>
-                <p id="loginError" class="error-message hidden"></p>
-            </form>
-        </div>
-    </div>
-    
-    <!-- Main App -->
-    <div id="appScreen" class="hidden">
-        <header class="header">
-            <div class="header-content">
-                <h1>Product Catalog</h1>
-                <div class="header-actions">
-                    <span id="userDisplay"></span>
-                    <button id="logoutBtn" class="btn">Logout</button>
-                </div>
-            </div>
-        </header>
-        
-        <div class="container">
-            <div class="tabs">
-                <button class="tab active" data-tab="catalog">Catalog</button>
-                <button class="tab" data-tab="admin" id="adminTab">Admin</button>
-            </div>
-            
-            <!-- Catalog Tab -->
-            <div id="catalogTab">
-                <div class="search-bar">
-                    <input type="text" id="searchInput" placeholder="Search by style, color, or category...">
-                </div>
-                
-                <div class="category-filters" id="categoryFilters"></div>
-                
-                <div id="productsContainer"></div>
-            </div>
-            
-            <!-- Admin Tab -->
-            <div id="adminTabContent" class="hidden">
-                <!-- Zoho Integration -->
-                <div class="admin-section">
-                    <h2>Zoho Analytics Integration</h2>
-                    <div id="zohoStatus" style="margin-bottom: 1rem;"></div>
-                    
-                    <div style="display: grid; gap: 1rem; max-width: 500px;">
-                        <div class="form-group">
-                            <label>Client ID</label>
-                            <input type="text" id="zohoClientId" placeholder="From Zoho API Console">
-                        </div>
-                        <div class="form-group">
-                            <label>Client Secret</label>
-                            <input type="password" id="zohoClientSecret" placeholder="From Zoho API Console">
-                        </div>
-                        <div class="form-group">
-                            <label>Refresh Token</label>
-                            <input type="text" id="zohoRefreshToken" placeholder="From OAuth flow">
-                        </div>
-                        <div style="display: flex; gap: 1rem;">
-                            <button id="saveZohoBtn" class="btn btn-primary">Save Credentials</button>
-                            <button id="testZohoBtn" class="btn">Test Connection</button>
-                            <button id="syncZohoBtn" class="btn btn-success">Sync Now</button>
-                        </div>
-                        <p id="zohoMessage"></p>
-                    </div>
-                </div>
-                
-                <!-- CSV Import -->
-                <div class="admin-section">
-                    <h2>CSV Import</h2>
-                    <p style="margin-bottom: 1rem; color: var(--gray-500);">Import from Zoho Analytics CSV export</p>
-                    <input type="file" id="csvFile" accept=".csv">
-                    <button id="importBtn" class="btn btn-primary" style="margin-left: 1rem;">Import</button>
-                    <div id="importStatus"></div>
-                </div>
-                
-                <!-- Sync History -->
-                <div class="admin-section">
-                    <h2>Sync History</h2>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Type</th>
-                                <th>Status</th>
-                                <th>Records</th>
-                                <th>Error</th>
-                            </tr>
-                        </thead>
-                        <tbody id="syncHistoryBody"></tbody>
-                    </table>
-                </div>
-                
-                <!-- User Management -->
-                <div class="admin-section">
-                    <h2>User Management</h2>
-                    <div style="display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;">
-                        <input type="text" id="newUsername" placeholder="Username" style="padding: 0.5rem;">
-                        <input type="password" id="newPassword" placeholder="Password" style="padding: 0.5rem;">
-                        <select id="newRole" style="padding: 0.5rem;">
-                            <option value="sales_rep">Sales Rep</option>
-                            <option value="admin">Admin</option>
-                        </select>
-                        <button id="addUserBtn" class="btn btn-primary">Add User</button>
-                    </div>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Username</th>
-                                <th>Role</th>
-                                <th>Created</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="userTableBody"></tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        let products = [];
-        let currentCategory = 'all';
-        let currentUser = null;
-        
-        // Check session on load - DISABLED, go straight to app
-        async function checkSession() {
-            currentUser = { username: 'admin', role: 'admin' };
-            showApp();
-        }
-        
-        function showLogin() {
-            showApp(); // Skip login, go to app
-        }
-        
-        function showApp() {
-            document.getElementById('loginScreen').classList.add('hidden');
-            document.getElementById('appScreen').classList.remove('hidden');
-            document.getElementById('userDisplay').textContent = 'Admin Mode';
-            document.getElementById('adminTab').classList.remove('hidden');
-            
-            loadProducts();
-            loadZohoStatus();
-            loadSyncHistory();
-            loadUsers();
-        }
-        
-        // Login form
-        document.getElementById('loginForm').addEventListener('submit', async function(e) {
-            e.preventDefault();
-            const username = document.getElementById('loginUsername').value;
-            const password = document.getElementById('loginPassword').value;
-            
-            try {
-                const res = await fetch('/api/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: username, password: password })
-                });
-                const data = await res.json();
-                
-                if (data.success) {
-                    currentUser = data.user;
-                    showApp();
-                } else {
-                    document.getElementById('loginError').textContent = data.error;
-                    document.getElementById('loginError').classList.remove('hidden');
-                }
-            } catch (err) {
-                document.getElementById('loginError').textContent = 'Login failed';
-                document.getElementById('loginError').classList.remove('hidden');
+
+<div id="loginPage" class="login-page">
+<div class="login-box">
+<h1>Product Catalog</h1>
+<form id="loginForm">
+<div class="form-group"><label>Username</label><input type="text" id="username" required></div>
+<div class="form-group"><label>Password</label><input type="password" id="password" required></div>
+<button type="submit" class="btn btn-primary">Sign In</button>
+<div id="loginError" class="error hidden"></div>
+</form>
+</div>
+</div>
+
+<div id="mainApp" class="hidden">
+<header class="header">
+<h1>Product Catalog</h1>
+<div class="search-box"><input type="text" id="searchInput" placeholder="Search products..."></div>
+<div class="header-right">
+<span id="userInfo"></span>
+<button class="btn btn-secondary" id="adminBtn" style="display:none">Admin</button>
+<button class="btn btn-secondary" id="logoutBtn">Sign Out</button>
+</div>
+</header>
+
+<main class="main">
+<div id="adminPanel" class="admin-panel hidden">
+<h2>Admin Panel</h2>
+<div class="tabs">
+<button class="tab active" data-tab="import">Import CSV</button>
+<button class="tab" data-tab="users">Users</button>
+<button class="tab" data-tab="history">History</button>
+</div>
+
+<div id="importTab" class="tab-content active">
+<div class="upload-area">
+<input type="file" id="csvFile" accept=".csv">
+<label for="csvFile">Click to upload CSV file</label>
+</div>
+<div id="importStatus"></div>
+<button class="btn btn-danger" id="clearBtn" style="margin-top:1rem">Clear All Products</button>
+</div>
+
+<div id="usersTab" class="tab-content">
+<table><thead><tr><th>Username</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table>
+<div class="add-form">
+<input type="text" id="newUser" placeholder="Username">
+<input type="password" id="newPass" placeholder="Password">
+<select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select>
+<button class="btn btn-primary" id="addUserBtn">Add</button>
+</div>
+</div>
+
+<div id="historyTab" class="tab-content">
+<table><thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Records</th></tr></thead><tbody id="historyTable"></tbody></table>
+</div>
+</div>
+
+<div class="stats">
+<div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div>
+<div><div class="stat-value" id="totalUnits">0</div><div class="stat-label">Units Available</div></div>
+</div>
+
+<div class="filters" id="filters"></div>
+<div class="product-grid" id="productGrid"></div>
+<div class="empty hidden" id="emptyState">No products found. Import a CSV to get started.</div>
+</main>
+</div>
+
+<div class="modal" id="modal">
+<div class="modal-content">
+<button class="modal-close" id="modalClose">&times;</button>
+<div class="modal-body">
+<div class="modal-image"><img id="modalImage" src="" alt=""></div>
+<div class="modal-details">
+<div class="product-style" id="modalStyle"></div>
+<h2 id="modalName"></h2>
+<p id="modalCategory" style="color:#666;margin-bottom:1rem"></p>
+<div id="modalColors"></div>
+<div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div>
+</div>
+</div>
+</div>
+</div>
+
+<script>
+var products = [];
+var currentFilter = "all";
+
+function checkSession() {
+    fetch("/api/session")
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data.loggedIn) {
+                showApp(data.username, data.role);
+                loadProducts();
+                if (data.role === "admin") { loadUsers(); loadHistory(); }
+            } else {
+                document.getElementById("loginPage").classList.remove("hidden");
+                document.getElementById("mainApp").classList.add("hidden");
             }
         });
-        
-        // Logout
-        document.getElementById('logoutBtn').addEventListener('click', async function() {
-            await fetch('/api/logout', { method: 'POST' });
-            currentUser = null;
-            showLogin();
-        });
-        
-        // Tabs
-        document.querySelectorAll('.tab').forEach(function(tab) {
-            tab.addEventListener('click', function() {
-                document.querySelectorAll('.tab').forEach(function(t) {
-                    t.classList.remove('active');
-                });
-                this.classList.add('active');
-                
-                const tabName = this.dataset.tab;
-                if (tabName === 'catalog') {
-                    document.getElementById('catalogTab').classList.remove('hidden');
-                    document.getElementById('adminTabContent').classList.add('hidden');
-                } else {
-                    document.getElementById('catalogTab').classList.add('hidden');
-                    document.getElementById('adminTabContent').classList.remove('hidden');
-                }
-            });
-        });
-        
-        // Search
-        document.getElementById('searchInput').addEventListener('input', function() {
+}
+
+function showApp(username, role) {
+    document.getElementById("loginPage").classList.add("hidden");
+    document.getElementById("mainApp").classList.remove("hidden");
+    document.getElementById("userInfo").textContent = "Welcome, " + username;
+    if (role === "admin") document.getElementById("adminBtn").style.display = "block";
+}
+
+document.getElementById("loginForm").addEventListener("submit", function(e) {
+    e.preventDefault();
+    var username = document.getElementById("username").value;
+    var password = document.getElementById("password").value;
+    fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username, password: password })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.success) {
+            showApp(data.username, data.role);
+            loadProducts();
+            if (data.role === "admin") { loadUsers(); loadHistory(); }
+        } else {
+            document.getElementById("loginError").textContent = data.error;
+            document.getElementById("loginError").classList.remove("hidden");
+        }
+    });
+});
+
+document.getElementById("logoutBtn").addEventListener("click", function() {
+    fetch("/api/logout", { method: "POST" }).then(function() { location.reload(); });
+});
+
+document.getElementById("adminBtn").addEventListener("click", function() {
+    document.getElementById("adminPanel").classList.toggle("hidden");
+});
+
+var tabs = document.querySelectorAll(".tab");
+for (var i = 0; i < tabs.length; i++) {
+    tabs[i].addEventListener("click", function(e) {
+        var allTabs = document.querySelectorAll(".tab");
+        var allContents = document.querySelectorAll(".tab-content");
+        for (var j = 0; j < allTabs.length; j++) { allTabs[j].classList.remove("active"); }
+        for (var k = 0; k < allContents.length; k++) { allContents[k].classList.remove("active"); }
+        e.target.classList.add("active");
+        document.getElementById(e.target.getAttribute("data-tab") + "Tab").classList.add("active");
+    });
+}
+
+function loadProducts() {
+    fetch("/api/products")
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            products = data;
+            renderFilters();
             renderProducts();
         });
-        
-        // Load products
-        async function loadProducts() {
-            try {
-                const res = await fetch('/api/products');
-                products = await res.json();
-                updateCategoryFilters();
-                renderProducts();
-            } catch (err) {
-                console.error('Failed to load products:', err);
+}
+
+function renderFilters() {
+    var cats = [];
+    for (var i = 0; i < products.length; i++) {
+        if (products[i].category && cats.indexOf(products[i].category) === -1) {
+            cats.push(products[i].category);
+        }
+    }
+    cats.sort();
+    var html = "<button class=\"filter-btn active\" data-cat=\"all\">All</button>";
+    for (var j = 0; j < cats.length; j++) {
+        html += "<button class=\"filter-btn\" data-cat=\"" + cats[j] + "\">" + cats[j] + "</button>";
+    }
+    document.getElementById("filters").innerHTML = html;
+    var btns = document.querySelectorAll(".filter-btn");
+    for (var k = 0; k < btns.length; k++) {
+        btns[k].addEventListener("click", function(e) {
+            var allBtns = document.querySelectorAll(".filter-btn");
+            for (var m = 0; m < allBtns.length; m++) { allBtns[m].classList.remove("active"); }
+            e.target.classList.add("active");
+            currentFilter = e.target.getAttribute("data-cat");
+            renderProducts();
+        });
+    }
+}
+
+function renderProducts() {
+    var search = document.getElementById("searchInput").value.toLowerCase();
+    var filtered = [];
+    for (var i = 0; i < products.length; i++) {
+        var p = products[i];
+        var matchSearch = !search || p.style_id.toLowerCase().indexOf(search) !== -1 || p.name.toLowerCase().indexOf(search) !== -1;
+        var matchCat = currentFilter === "all" || p.category === currentFilter;
+        if (matchSearch && matchCat) filtered.push(p);
+    }
+
+    if (filtered.length === 0) {
+        document.getElementById("productGrid").innerHTML = "";
+        document.getElementById("emptyState").classList.remove("hidden");
+    } else {
+        document.getElementById("emptyState").classList.add("hidden");
+        var html = "";
+        for (var j = 0; j < filtered.length; j++) {
+            var prod = filtered[j];
+            var colors = prod.colors || [];
+            var total = 0;
+            for (var c = 0; c < colors.length; c++) { total += colors[c].available_qty || 0; }
+            var colorHtml = "";
+            var maxColors = Math.min(colors.length, 3);
+            for (var d = 0; d < maxColors; d++) {
+                colorHtml += "<div class=\"color-row\"><span>" + colors[d].color_name + "</span><span>" + (colors[d].available_qty || 0).toLocaleString() + "</span></div>";
             }
-        }
-        
-        function updateCategoryFilters() {
-            var cats = [];
-            products.forEach(function(p) {
-                if (p.category && cats.indexOf(p.category) === -1) {
-                    cats.push(p.category);
-                }
-            });
-            cats.sort();
-            
-            var c = document.getElementById('categoryFilters');
-            c.innerHTML = '<button class="filter-pill active" data-category="all">All</button>';
-            
-            cats.forEach(function(cat) {
-                c.innerHTML += '<button class="filter-pill" data-category="' + cat + '">' + cat + '</button>';
-            });
-            
-            document.querySelectorAll('.filter-pill').forEach(function(pill) {
-                pill.addEventListener('click', function(e) {
-                    document.querySelectorAll('.filter-pill').forEach(function(p) {
-                        p.classList.remove('active');
-                    });
-                    e.target.classList.add('active');
-                    currentCategory = e.target.dataset.category;
-                    renderProducts();
-                });
-            });
-        }
-        
-        function formatNumber(n) {
-            return (n || 0).toLocaleString();
-        }
-        
-        function getSwatchStyle(colorName) {
-            var colors = {
-                'black': '#1A1A1A',
-                'white': '#FFFFFF',
-                'ivory': 'linear-gradient(145deg, #FFFFF0, #F5F5DC)',
-                'cream': 'linear-gradient(145deg, #FFFDD0, #F5E6C8)',
-                'heather grey': 'linear-gradient(145deg, #9CA3AF, #6B7280)',
-                'grey': '#808080',
-                'gray': '#808080',
-                'charcoal': '#36454F',
-                'navy': '#1E3A5F',
-                'blue': '#2563EB',
-                'pink': 'linear-gradient(145deg, #F9A8D4, #EC4899)',
-                'red': '#DC2626',
-                'burgundy': '#722F37',
-                'brown': 'linear-gradient(145deg, #A78B71, #78583A)',
-                'olive': '#556B2F',
-                'green': '#16A34A',
-                'yellow': '#EAB308',
-                'purple': '#9333EA',
-                'orange': '#F97316',
-                'beige': '#D4C4A8',
-                'silver': '#C0C0C0',
-                'gold': '#FFD700',
-                'sage': '#9CAF88'
-            };
-            var key = (colorName || '').toLowerCase();
-            return colors[key] || '#CCCCCC';
-        }
-        
-        function renderProducts() {
-            var searchTerm = document.getElementById('searchInput').value.toLowerCase();
-            
-            var filtered = products.filter(function(p) {
-                var matchesSearch = !searchTerm ||
-                    (p.style_id || '').toLowerCase().indexOf(searchTerm) !== -1 ||
-                    (p.name || '').toLowerCase().indexOf(searchTerm) !== -1 ||
-                    (p.category || '').toLowerCase().indexOf(searchTerm) !== -1 ||
-                    (p.colors || []).some(function(c) {
-                        return (c.color_name || '').toLowerCase().indexOf(searchTerm) !== -1;
-                    });
-                
-                var matchesCategory = currentCategory === 'all' || p.category === currentCategory;
-                
-                return matchesSearch && matchesCategory;
-            });
-            
-            // Group by category
-            var byCategory = {};
-            filtered.forEach(function(p) {
-                var cat = p.category || 'Uncategorized';
-                if (!byCategory[cat]) {
-                    byCategory[cat] = [];
-                }
-                byCategory[cat].push(p);
-            });
-            
-            var html = '';
-            var catKeys = Object.keys(byCategory).sort();
-            
-            catKeys.forEach(function(cat) {
-                var catProducts = byCategory[cat];
-                html += '<section class="category-section">';
-                html += '<div class="category-header">';
-                html += '<h2 class="category-title">' + cat + '</h2>';
-                html += '<span class="category-count">' + catProducts.length + ' style' + (catProducts.length !== 1 ? 's' : '') + '</span>';
-                html += '</div>';
-                html += '<div class="product-grid">';
-                
-                catProducts.forEach(function(p) {
-                    var colors = p.colors || [];
-                    var total = colors.reduce(function(sum, c) {
-                        return sum + (c.available_qty || 0);
-                    }, 0);
-                    
-                    html += '<div class="product-card">';
-                    html += '<div class="product-header">';
-                    html += '<div class="product-name">' + (p.name || 'Unknown') + '</div>';
-                    html += '<div class="product-style">' + (p.style_id || '') + '</div>';
-                    html += '</div>';
-                    html += '<div class="product-colors">';
-                    
-                    colors.forEach(function(c) {
-                        var qtyClass = '';
-                        if (c.available_qty === 0) {
-                            qtyClass = ' out';
-                        } else if (c.available_qty < 100) {
-                            qtyClass = ' low';
-                        }
-                        
-                        html += '<div class="color-row">';
-                        html += '<div class="color-info">';
-                        html += '<div class="color-swatch" style="background: ' + getSwatchStyle(c.color_name) + '"></div>';
-                        html += '<span class="color-name">' + (c.color_name || 'Unknown') + '</span>';
-                        html += '</div>';
-                        html += '<span class="color-qty' + qtyClass + '">' + formatNumber(c.available_qty) + '</span>';
-                        html += '</div>';
-                    });
-                    
-                    html += '</div>';
-                    html += '<div class="total-row">';
-                    html += '<span>Total Available</span>';
-                    html += '<span>' + formatNumber(total) + '</span>';
-                    html += '</div>';
-                    html += '</div>';
-                });
-                
-                html += '</div></section>';
-            });
-            
-            document.getElementById('productsContainer').innerHTML = html;
-        }
-        
-        // Zoho functions
-        async function loadZohoStatus() {
-            try {
-                var res = await fetch('/api/zoho/status');
-                var data = await res.json();
-                
-                var statusHtml = '<p>Status: ';
-                if (data.connected) {
-                    statusHtml += '<span class="status-badge success">Connected</span>';
-                } else if (data.configured) {
-                    statusHtml += '<span class="status-badge" style="background:#fef3c7;color:#92400e;">Configured - Not Connected</span>';
-                } else {
-                    statusHtml += '<span class="status-badge error">Not Configured</span>';
-                }
-                
-                if (data.viewId) {
-                    statusHtml += ' | View ID: ' + data.viewId;
-                } else {
-                    statusHtml += ' | <span style="color:var(--warning);">View ID not set</span>';
-                }
-                
-                statusHtml += '</p>';
-                document.getElementById('zohoStatus').innerHTML = statusHtml;
-            } catch (err) {
-                console.error('Failed to load Zoho status:', err);
+            if (colors.length > 3) {
+                colorHtml += "<div class=\"color-row\" style=\"color:#999\">+" + (colors.length - 3) + " more</div>";
             }
+            var imgHtml = prod.image_url ? "<img src=\"" + prod.image_url + "\" onerror=\"this.parentElement.innerHTML='No Image'\">" : "No Image";
+            html += "<div class=\"product-card\" onclick=\"openModal(" + prod.id + ")\">" +
+                "<div class=\"product-image\">" + imgHtml + "</div>" +
+                "<div class=\"product-info\"><div class=\"product-style\">" + prod.style_id + "</div>" +
+                "<div class=\"product-name\">" + prod.name + "</div>" +
+                "<div class=\"color-list\">" + colorHtml + "</div>" +
+                "<div class=\"total-row\"><span>Total</span><span>" + total.toLocaleString() + "</span></div></div></div>";
         }
-        
-        document.getElementById('saveZohoBtn').addEventListener('click', async function() {
-            var clientId = document.getElementById('zohoClientId').value;
-            var clientSecret = document.getElementById('zohoClientSecret').value;
-            var refreshToken = document.getElementById('zohoRefreshToken').value;
-            
-            if (!clientId || !clientSecret || !refreshToken) {
-                document.getElementById('zohoMessage').innerHTML = '<span class="error-message">Please fill all fields</span>';
-                return;
-            }
-            
-            try {
-                var res = await fetch('/api/zoho/save-credentials', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        clientId: clientId,
-                        clientSecret: clientSecret,
-                        refreshToken: refreshToken
-                    })
-                });
-                var data = await res.json();
-                
-                if (data.success) {
-                    document.getElementById('zohoMessage').innerHTML = '<span class="success-message">Credentials saved!</span>';
-                    loadZohoStatus();
-                } else {
-                    document.getElementById('zohoMessage').innerHTML = '<span class="error-message">' + data.error + '</span>';
-                }
-            } catch (err) {
-                document.getElementById('zohoMessage').innerHTML = '<span class="error-message">Failed to save</span>';
+        document.getElementById("productGrid").innerHTML = html;
+    }
+
+    document.getElementById("totalStyles").textContent = filtered.length;
+    var totalUnits = 0;
+    for (var t = 0; t < filtered.length; t++) {
+        var cols = filtered[t].colors || [];
+        for (var u = 0; u < cols.length; u++) { totalUnits += cols[u].available_qty || 0; }
+    }
+    document.getElementById("totalUnits").textContent = totalUnits.toLocaleString();
+}
+
+document.getElementById("searchInput").addEventListener("input", renderProducts);
+
+function openModal(id) {
+    var p = null;
+    for (var i = 0; i < products.length; i++) { if (products[i].id === id) { p = products[i]; break; } }
+    if (!p) return;
+    var colors = p.colors || [];
+    var total = 0;
+    for (var c = 0; c < colors.length; c++) { total += colors[c].available_qty || 0; }
+    var img = document.getElementById("modalImage");
+    if (p.image_url) { img.src = p.image_url; img.style.display = "block"; }
+    else { img.style.display = "none"; }
+    document.getElementById("modalStyle").textContent = p.style_id;
+    document.getElementById("modalName").textContent = p.name;
+    document.getElementById("modalCategory").textContent = p.category || "";
+    var colorHtml = "";
+    for (var d = 0; d < colors.length; d++) {
+        colorHtml += "<div class=\"color-row\"><span>" + colors[d].color_name + "</span><span>" + (colors[d].available_qty || 0).toLocaleString() + "</span></div>";
+    }
+    document.getElementById("modalColors").innerHTML = colorHtml;
+    document.getElementById("modalTotal").textContent = total.toLocaleString();
+    document.getElementById("modal").classList.add("active");
+}
+
+document.getElementById("modalClose").addEventListener("click", function() {
+    document.getElementById("modal").classList.remove("active");
+});
+
+document.getElementById("modal").addEventListener("click", function(e) {
+    if (e.target.id === "modal") document.getElementById("modal").classList.remove("active");
+});
+
+document.getElementById("csvFile").addEventListener("change", function(e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    var formData = new FormData();
+    formData.append("file", file);
+    document.getElementById("importStatus").innerHTML = "Importing...";
+    fetch("/api/import", { method: "POST", body: formData })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data.success) {
+                document.getElementById("importStatus").innerHTML = "<span class=\"success\">Imported " + data.imported + " products</span>";
+                loadProducts();
+                loadHistory();
+            } else {
+                document.getElementById("importStatus").innerHTML = "<span class=\"error\">" + data.error + "</span>";
             }
         });
-        
-        document.getElementById('testZohoBtn').addEventListener('click', async function() {
-            try {
-                document.getElementById('zohoMessage').innerHTML = 'Testing...';
-                var res = await fetch('/api/zoho/test-connection', { method: 'POST' });
-                var data = await res.json();
-                
-                if (data.success) {
-                    document.getElementById('zohoMessage').innerHTML = '<span class="success-message">Connection successful!</span>';
-                    loadZohoStatus();
-                } else {
-                    document.getElementById('zohoMessage').innerHTML = '<span class="error-message">' + data.error + '</span>';
-                }
-            } catch (err) {
-                document.getElementById('zohoMessage').innerHTML = '<span class="error-message">Test failed</span>';
+});
+
+document.getElementById("clearBtn").addEventListener("click", function() {
+    if (!confirm("Delete all products?")) return;
+    fetch("/api/products/clear", { method: "POST" }).then(function() { loadProducts(); });
+});
+
+function loadUsers() {
+    fetch("/api/users")
+        .then(function(res) { return res.json(); })
+        .then(function(users) {
+            var html = "";
+            for (var i = 0; i < users.length; i++) {
+                html += "<tr><td>" + users[i].username + "</td><td>" + users[i].role + "</td><td><button class=\"btn btn-danger\" onclick=\"deleteUser(" + users[i].id + ")\">Delete</button></td></tr>";
             }
+            document.getElementById("usersTable").innerHTML = html;
         });
-        
-        document.getElementById('syncZohoBtn').addEventListener('click', async function() {
-            try {
-                document.getElementById('zohoMessage').innerHTML = 'Syncing...';
-                var res = await fetch('/api/zoho/sync', { method: 'POST' });
-                var data = await res.json();
-                
-                if (data.success) {
-                    document.getElementById('zohoMessage').innerHTML = '<span class="success-message">' + data.message + '</span>';
-                    loadProducts();
-                    loadSyncHistory();
-                } else {
-                    document.getElementById('zohoMessage').innerHTML = '<span class="error-message">' + data.error + '</span>';
-                    loadSyncHistory();
-                }
-            } catch (err) {
-                document.getElementById('zohoMessage').innerHTML = '<span class="error-message">Sync failed</span>';
+}
+
+document.getElementById("addUserBtn").addEventListener("click", function() {
+    var username = document.getElementById("newUser").value;
+    var password = document.getElementById("newPass").value;
+    var role = document.getElementById("newRole").value;
+    if (!username || !password) { alert("Enter username and password"); return; }
+    fetch("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username, password: password, role: role })
+    }).then(function() {
+        document.getElementById("newUser").value = "";
+        document.getElementById("newPass").value = "";
+        loadUsers();
+    });
+});
+
+function deleteUser(id) {
+    if (!confirm("Delete this user?")) return;
+    fetch("/api/users/" + id, { method: "DELETE" }).then(function() { loadUsers(); });
+}
+
+function loadHistory() {
+    fetch("/api/zoho/sync-history")
+        .then(function(res) { return res.json(); })
+        .then(function(history) {
+            var html = "";
+            for (var i = 0; i < history.length; i++) {
+                html += "<tr><td>" + new Date(history[i].created_at).toLocaleString() + "</td><td>" + history[i].sync_type + "</td><td>" + history[i].status + "</td><td>" + (history[i].records_synced || "-") + "</td></tr>";
             }
+            document.getElementById("historyTable").innerHTML = html;
         });
-        
-        // Sync history
-        async function loadSyncHistory() {
-            try {
-                var res = await fetch('/api/sync-history');
-                var history = await res.json();
-                
-                var html = '';
-                history.forEach(function(h) {
-                    html += '<tr>';
-                    html += '<td>' + new Date(h.created_at).toLocaleString() + '</td>';
-                    html += '<td>' + h.sync_type + '</td>';
-                    html += '<td style="color:' + (h.status === 'success' ? 'var(--success)' : 'var(--danger)') + '">' + h.status + '</td>';
-                    html += '<td>' + (h.records_synced || '-') + '</td>';
-                    html += '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (h.error_message || '-') + '</td>';
-                    html += '</tr>';
-                });
-                
-                document.getElementById('syncHistoryBody').innerHTML = html;
-            } catch (err) {
-                console.error('Failed to load sync history:', err);
-            }
-        }
-        
-        // CSV Import
-        document.getElementById('importBtn').addEventListener('click', async function() {
-            var fileInput = document.getElementById('csvFile');
-            if (!fileInput.files[0]) {
-                document.getElementById('importStatus').innerHTML = '<p class="error-message">Please select a file</p>';
-                return;
-            }
-            
-            var formData = new FormData();
-            formData.append('file', fileInput.files[0]);
-            
-            try {
-                var res = await fetch('/api/import', {
-                    method: 'POST',
-                    body: formData
-                });
-                var data = await res.json();
-                
-                if (data.success) {
-                    document.getElementById('importStatus').innerHTML = '<p class="success-message">Imported ' + data.imported + ' records</p>';
-                    loadProducts();
-                    loadSyncHistory();
-                } else {
-                    document.getElementById('importStatus').innerHTML = '<p class="error-message">' + data.error + '</p>';
-                }
-            } catch (err) {
-                document.getElementById('importStatus').innerHTML = '<p class="error-message">Upload failed</p>';
-            }
-        });
-        
-        // User management
-        async function loadUsers() {
-            try {
-                var res = await fetch('/api/users');
-                var users = await res.json();
-                
-                var html = '';
-                users.forEach(function(u) {
-                    html += '<tr>';
-                    html += '<td>' + u.username + '</td>';
-                    html += '<td>' + u.role + '</td>';
-                    html += '<td>' + new Date(u.created_at).toLocaleDateString() + '</td>';
-                    html += '<td><button class="btn btn-danger" onclick="deleteUser(' + u.id + ')" style="padding:0.5rem 1rem;font-size:0.8125rem">Delete</button></td>';
-                    html += '</tr>';
-                });
-                
-                document.getElementById('userTableBody').innerHTML = html;
-            } catch (err) {
-                console.error('Failed to load users:', err);
-            }
-        }
-        
-        document.getElementById('addUserBtn').addEventListener('click', async function() {
-            var username = document.getElementById('newUsername').value;
-            var password = document.getElementById('newPassword').value;
-            var role = document.getElementById('newRole').value;
-            
-            if (!username || !password) {
-                alert('Please enter username and password');
-                return;
-            }
-            
-            try {
-                var res = await fetch('/api/users', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: username, password: password, role: role })
-                });
-                var data = await res.json();
-                
-                if (data.success) {
-                    document.getElementById('newUsername').value = '';
-                    document.getElementById('newPassword').value = '';
-                    loadUsers();
-                } else {
-                    alert(data.error || 'Failed to add user');
-                }
-            } catch (err) {
-                alert('Error: ' + err.message);
-            }
-        });
-        
-        async function deleteUser(id) {
-            if (!confirm('Delete this user?')) return;
-            
-            try {
-                var res = await fetch('/api/users/' + id, { method: 'DELETE' });
-                var data = await res.json();
-                
-                if (data.success) {
-                    loadUsers();
-                } else {
-                    alert(data.error || 'Failed to delete');
-                }
-            } catch (err) {
-                alert('Error: ' + err.message);
-            }
-        }
-        
-        // Initialize
-        checkSession();
-    </script>
+}
+
+checkSession();
+</script>
 </body>
 </html>`;
 }
 
-// Start server
 initDB().then(function() {
-    app.listen(PORT, function() {
-        console.log('Product Catalog running on port ' + PORT);
-    });
-    setTimeout(function() {
-        startTokenRefreshJob();
-    }, 5000);
+    app.listen(PORT, function() { console.log("Product Catalog running on port " + PORT); });
 });

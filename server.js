@@ -210,7 +210,11 @@ app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
 });
 
 app.get('*', (req, res) => {
-    res.send(`<!DOCTYPE html>
+    res.send(getHTML());
+});
+
+function getHTML() {
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -218,7 +222,7 @@ app.get('*', (req, res) => {
 <title>Product Catalog</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; }
+body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #f5f5f5; }
 .login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
 .login-box { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); width: 100%; max-width: 360px; }
 .login-box h1 { margin-bottom: 1.5rem; font-size: 1.5rem; text-align: center; }
@@ -254,7 +258,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .filter-btn { padding: 0.5rem 1rem; border: 1px solid #ddd; background: white; border-radius: 20px; cursor: pointer; }
 .filter-btn.active { background: #2c5545; color: white; border-color: #2c5545; }
 .product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.5rem; }
-.product-card { background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); cursor: pointer; }
+.product-card { background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); cursor: pointer; transition: transform 0.2s; }
 .product-card:hover { transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0,0,0,0.15); }
 .product-image { height: 200px; background: #f0f0f0; display: flex; align-items: center; justify-content: center; overflow: hidden; }
 .product-image img { width: 100%; height: 100%; object-fit: cover; }
@@ -267,8 +271,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .empty { text-align: center; padding: 3rem; color: #666; }
 .modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; z-index: 1000; }
 .modal.active { display: flex; }
-.modal-content { background: white; border-radius: 8px; max-width: 800px; width: 90%; max-height: 90vh; overflow: auto; display: flex; }
-.modal-image { width: 50%; background: #f0f0f0; display: flex; align-items: center; justify-content: center; }
+.modal-content { background: white; border-radius: 8px; max-width: 800px; width: 90%; max-height: 90vh; overflow: auto; position: relative; }
+.modal-body { display: flex; }
+.modal-image { width: 50%; background: #f0f0f0; min-height: 300px; }
 .modal-image img { width: 100%; height: 100%; object-fit: cover; }
 .modal-details { width: 50%; padding: 2rem; }
 .modal-close { position: absolute; top: 1rem; right: 1rem; background: white; border: none; font-size: 1.5rem; cursor: pointer; border-radius: 50%; width: 36px; height: 36px; }
@@ -276,7 +281,6 @@ table { width: 100%; border-collapse: collapse; }
 th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #eee; }
 .add-form { display: flex; gap: 0.5rem; margin-top: 1rem; flex-wrap: wrap; }
 .add-form input, .add-form select { padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; }
-@media (max-width: 768px) { .modal-content { flex-direction: column; } .modal-image, .modal-details { width: 100%; } }
 </style>
 </head>
 <body>
@@ -349,8 +353,9 @@ th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #eee; }
 </div>
 
 <div class="modal" id="modal">
-<button class="modal-close" onclick="closeModal()">&times;</button>
 <div class="modal-content">
+<button class="modal-close" id="modalClose">&times;</button>
+<div class="modal-body">
 <div class="modal-image"><img id="modalImage" src="" alt=""></div>
 <div class="modal-details">
 <div class="product-style" id="modalStyle"></div>
@@ -361,212 +366,267 @@ th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #eee; }
 </div>
 </div>
 </div>
+</div>
 
 <script>
-let products = [];
-let currentFilter = 'all';
+var products = [];
+var currentFilter = "all";
 
-async function checkSession() {
-    const res = await fetch('/api/session');
-    const data = await res.json();
-    if (data.loggedIn) {
-        showApp(data.username, data.role);
-        loadProducts();
-        if (data.role === 'admin') { loadUsers(); loadHistory(); }
-    } else {
-        document.getElementById('loginPage').classList.remove('hidden');
-        document.getElementById('mainApp').classList.add('hidden');
-    }
+function checkSession() {
+    fetch("/api/session")
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data.loggedIn) {
+                showApp(data.username, data.role);
+                loadProducts();
+                if (data.role === "admin") { loadUsers(); loadHistory(); }
+            } else {
+                document.getElementById("loginPage").classList.remove("hidden");
+                document.getElementById("mainApp").classList.add("hidden");
+            }
+        });
 }
 
 function showApp(username, role) {
-    document.getElementById('loginPage').classList.add('hidden');
-    document.getElementById('mainApp').classList.remove('hidden');
-    document.getElementById('userInfo').textContent = 'Welcome, ' + username;
-    if (role === 'admin') document.getElementById('adminBtn').style.display = 'block';
+    document.getElementById("loginPage").classList.add("hidden");
+    document.getElementById("mainApp").classList.remove("hidden");
+    document.getElementById("userInfo").textContent = "Welcome, " + username;
+    if (role === "admin") document.getElementById("adminBtn").style.display = "block";
 }
 
-document.getElementById('loginForm').addEventListener('submit', async (e) => {
+document.getElementById("loginForm").addEventListener("submit", function(e) {
     e.preventDefault();
-    const username = document.getElementById('username').value;
-    const password = document.getElementById('password').value;
-    const res = await fetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
-    });
-    const data = await res.json();
-    if (data.success) {
-        showApp(data.username, data.role);
-        loadProducts();
-        if (data.role === 'admin') { loadUsers(); loadHistory(); }
-    } else {
-        document.getElementById('loginError').textContent = data.error;
-        document.getElementById('loginError').classList.remove('hidden');
-    }
-});
-
-document.getElementById('logoutBtn').addEventListener('click', async () => {
-    await fetch('/api/logout', { method: 'POST' });
-    location.reload();
-});
-
-document.getElementById('adminBtn').addEventListener('click', () => {
-    document.getElementById('adminPanel').classList.toggle('hidden');
-});
-
-document.querySelectorAll('.tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-        tab.classList.add('active');
-        document.getElementById(tab.dataset.tab + 'Tab').classList.add('active');
+    var username = document.getElementById("username").value;
+    var password = document.getElementById("password").value;
+    fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username, password: password })
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        if (data.success) {
+            showApp(data.username, data.role);
+            loadProducts();
+            if (data.role === "admin") { loadUsers(); loadHistory(); }
+        } else {
+            document.getElementById("loginError").textContent = data.error;
+            document.getElementById("loginError").classList.remove("hidden");
+        }
     });
 });
 
-async function loadProducts() {
-    const res = await fetch('/api/products');
-    products = await res.json();
-    renderFilters();
-    renderProducts();
+document.getElementById("logoutBtn").addEventListener("click", function() {
+    fetch("/api/logout", { method: "POST" }).then(function() { location.reload(); });
+});
+
+document.getElementById("adminBtn").addEventListener("click", function() {
+    document.getElementById("adminPanel").classList.toggle("hidden");
+});
+
+var tabs = document.querySelectorAll(".tab");
+for (var i = 0; i < tabs.length; i++) {
+    tabs[i].addEventListener("click", function(e) {
+        var allTabs = document.querySelectorAll(".tab");
+        var allContents = document.querySelectorAll(".tab-content");
+        for (var j = 0; j < allTabs.length; j++) { allTabs[j].classList.remove("active"); }
+        for (var k = 0; k < allContents.length; k++) { allContents[k].classList.remove("active"); }
+        e.target.classList.add("active");
+        document.getElementById(e.target.getAttribute("data-tab") + "Tab").classList.add("active");
+    });
+}
+
+function loadProducts() {
+    fetch("/api/products")
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            products = data;
+            renderFilters();
+            renderProducts();
+        });
 }
 
 function renderFilters() {
-    const cats = [...new Set(products.map(p => p.category).filter(Boolean))];
-    const html = '<button class="filter-btn active" data-cat="all">All</button>' +
-        cats.sort().map(c => '<button class="filter-btn" data-cat="' + c + '">' + c + '</button>').join('');
-    document.getElementById('filters').innerHTML = html;
-    document.querySelectorAll('.filter-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            currentFilter = btn.dataset.cat;
+    var cats = [];
+    for (var i = 0; i < products.length; i++) {
+        if (products[i].category && cats.indexOf(products[i].category) === -1) {
+            cats.push(products[i].category);
+        }
+    }
+    cats.sort();
+    var html = "<button class=\"filter-btn active\" data-cat=\"all\">All</button>";
+    for (var j = 0; j < cats.length; j++) {
+        html += "<button class=\"filter-btn\" data-cat=\"" + cats[j] + "\">" + cats[j] + "</button>";
+    }
+    document.getElementById("filters").innerHTML = html;
+    var btns = document.querySelectorAll(".filter-btn");
+    for (var k = 0; k < btns.length; k++) {
+        btns[k].addEventListener("click", function(e) {
+            var allBtns = document.querySelectorAll(".filter-btn");
+            for (var m = 0; m < allBtns.length; m++) { allBtns[m].classList.remove("active"); }
+            e.target.classList.add("active");
+            currentFilter = e.target.getAttribute("data-cat");
             renderProducts();
         });
-    });
+    }
 }
 
 function renderProducts() {
-    const search = document.getElementById('searchInput').value.toLowerCase();
-    let filtered = products.filter(p => {
-        const matchSearch = !search || p.style_id.toLowerCase().includes(search) || p.name.toLowerCase().includes(search) ||
-            (p.colors || []).some(c => c.color_name.toLowerCase().includes(search));
-        const matchCat = currentFilter === 'all' || p.category === currentFilter;
-        return matchSearch && matchCat;
-    });
+    var search = document.getElementById("searchInput").value.toLowerCase();
+    var filtered = [];
+    for (var i = 0; i < products.length; i++) {
+        var p = products[i];
+        var matchSearch = !search || p.style_id.toLowerCase().indexOf(search) !== -1 || p.name.toLowerCase().indexOf(search) !== -1;
+        var matchCat = currentFilter === "all" || p.category === currentFilter;
+        if (matchSearch && matchCat) filtered.push(p);
+    }
 
     if (filtered.length === 0) {
-        document.getElementById('productGrid').innerHTML = '';
-        document.getElementById('emptyState').classList.remove('hidden');
+        document.getElementById("productGrid").innerHTML = "";
+        document.getElementById("emptyState").classList.remove("hidden");
     } else {
-        document.getElementById('emptyState').classList.add('hidden');
-        document.getElementById('productGrid').innerHTML = filtered.map(p => {
-            const colors = p.colors || [];
-            const total = colors.reduce((s, c) => s + (c.available_qty || 0), 0);
-            const colorHtml = colors.slice(0, 3).map(c =>
-                '<div class="color-row"><span>' + c.color_name + '</span><span>' + (c.available_qty || 0).toLocaleString() + '</span></div>'
-            ).join('') + (colors.length > 3 ? '<div class="color-row" style="color:#999">+' + (colors.length - 3) + ' more</div>' : '');
-            return '<div class="product-card" onclick="openModal(' + p.id + ')">' +
-                '<div class="product-image">' + (p.image_url ? '<img src="' + p.image_url + '" onerror="this.style.display=\'none\'">' : 'No Image') + '</div>' +
-                '<div class="product-info"><div class="product-style">' + p.style_id + '</div>' +
-                '<div class="product-name">' + p.name + '</div>' +
-                '<div class="color-list">' + colorHtml + '</div>' +
-                '<div class="total-row"><span>Total</span><span>' + total.toLocaleString() + '</span></div></div></div>';
-        }).join('');
+        document.getElementById("emptyState").classList.add("hidden");
+        var html = "";
+        for (var j = 0; j < filtered.length; j++) {
+            var prod = filtered[j];
+            var colors = prod.colors || [];
+            var total = 0;
+            for (var c = 0; c < colors.length; c++) { total += colors[c].available_qty || 0; }
+            var colorHtml = "";
+            var maxColors = Math.min(colors.length, 3);
+            for (var d = 0; d < maxColors; d++) {
+                colorHtml += "<div class=\"color-row\"><span>" + colors[d].color_name + "</span><span>" + (colors[d].available_qty || 0).toLocaleString() + "</span></div>";
+            }
+            if (colors.length > 3) {
+                colorHtml += "<div class=\"color-row\" style=\"color:#999\">+" + (colors.length - 3) + " more</div>";
+            }
+            var imgHtml = prod.image_url ? "<img src=\"" + prod.image_url + "\" onerror=\"this.parentElement.innerHTML='No Image'\">" : "No Image";
+            html += "<div class=\"product-card\" onclick=\"openModal(" + prod.id + ")\">" +
+                "<div class=\"product-image\">" + imgHtml + "</div>" +
+                "<div class=\"product-info\"><div class=\"product-style\">" + prod.style_id + "</div>" +
+                "<div class=\"product-name\">" + prod.name + "</div>" +
+                "<div class=\"color-list\">" + colorHtml + "</div>" +
+                "<div class=\"total-row\"><span>Total</span><span>" + total.toLocaleString() + "</span></div></div></div>";
+        }
+        document.getElementById("productGrid").innerHTML = html;
     }
 
-    document.getElementById('totalStyles').textContent = filtered.length;
-    document.getElementById('totalUnits').textContent = filtered.reduce((s, p) => s + (p.colors || []).reduce((x, c) => x + (c.available_qty || 0), 0), 0).toLocaleString();
+    document.getElementById("totalStyles").textContent = filtered.length;
+    var totalUnits = 0;
+    for (var t = 0; t < filtered.length; t++) {
+        var cols = filtered[t].colors || [];
+        for (var u = 0; u < cols.length; u++) { totalUnits += cols[u].available_qty || 0; }
+    }
+    document.getElementById("totalUnits").textContent = totalUnits.toLocaleString();
 }
 
-document.getElementById('searchInput').addEventListener('input', renderProducts);
+document.getElementById("searchInput").addEventListener("input", renderProducts);
 
 function openModal(id) {
-    const p = products.find(x => x.id === id);
+    var p = null;
+    for (var i = 0; i < products.length; i++) { if (products[i].id === id) { p = products[i]; break; } }
     if (!p) return;
-    const colors = p.colors || [];
-    const total = colors.reduce((s, c) => s + (c.available_qty || 0), 0);
-    document.getElementById('modalImage').src = p.image_url || '';
-    document.getElementById('modalImage').style.display = p.image_url ? 'block' : 'none';
-    document.getElementById('modalStyle').textContent = p.style_id;
-    document.getElementById('modalName').textContent = p.name;
-    document.getElementById('modalCategory').textContent = p.category || '';
-    document.getElementById('modalColors').innerHTML = colors.map(c =>
-        '<div class="color-row"><span>' + c.color_name + '</span><span>' + (c.available_qty || 0).toLocaleString() + '</span></div>'
-    ).join('');
-    document.getElementById('modalTotal').textContent = total.toLocaleString();
-    document.getElementById('modal').classList.add('active');
-}
-
-function closeModal() { document.getElementById('modal').classList.remove('active'); }
-document.getElementById('modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
-
-document.getElementById('csvFile').addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const formData = new FormData();
-    formData.append('file', file);
-    document.getElementById('importStatus').innerHTML = 'Importing...';
-    const res = await fetch('/api/import', { method: 'POST', body: formData });
-    const data = await res.json();
-    if (data.success) {
-        document.getElementById('importStatus').innerHTML = '<span class="success">Imported ' + data.imported + ' products</span>';
-        loadProducts();
-        loadHistory();
-    } else {
-        document.getElementById('importStatus').innerHTML = '<span class="error">' + data.error + '</span>';
+    var colors = p.colors || [];
+    var total = 0;
+    for (var c = 0; c < colors.length; c++) { total += colors[c].available_qty || 0; }
+    var img = document.getElementById("modalImage");
+    if (p.image_url) { img.src = p.image_url; img.style.display = "block"; }
+    else { img.style.display = "none"; }
+    document.getElementById("modalStyle").textContent = p.style_id;
+    document.getElementById("modalName").textContent = p.name;
+    document.getElementById("modalCategory").textContent = p.category || "";
+    var colorHtml = "";
+    for (var d = 0; d < colors.length; d++) {
+        colorHtml += "<div class=\"color-row\"><span>" + colors[d].color_name + "</span><span>" + (colors[d].available_qty || 0).toLocaleString() + "</span></div>";
     }
-});
-
-document.getElementById('clearBtn').addEventListener('click', async () => {
-    if (!confirm('Delete all products?')) return;
-    await fetch('/api/products/clear', { method: 'POST' });
-    loadProducts();
-});
-
-async function loadUsers() {
-    const res = await fetch('/api/users');
-    const users = await res.json();
-    document.getElementById('usersTable').innerHTML = users.map(u =>
-        '<tr><td>' + u.username + '</td><td>' + u.role + '</td><td><button class="btn btn-danger" onclick="deleteUser(' + u.id + ')">Delete</button></td></tr>'
-    ).join('');
+    document.getElementById("modalColors").innerHTML = colorHtml;
+    document.getElementById("modalTotal").textContent = total.toLocaleString();
+    document.getElementById("modal").classList.add("active");
 }
 
-document.getElementById('addUserBtn').addEventListener('click', async () => {
-    const username = document.getElementById('newUser').value;
-    const password = document.getElementById('newPass').value;
-    const role = document.getElementById('newRole').value;
-    if (!username || !password) return alert('Enter username and password');
-    await fetch('/api/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password, role })
+document.getElementById("modalClose").addEventListener("click", function() {
+    document.getElementById("modal").classList.remove("active");
+});
+
+document.getElementById("modal").addEventListener("click", function(e) {
+    if (e.target.id === "modal") document.getElementById("modal").classList.remove("active");
+});
+
+document.getElementById("csvFile").addEventListener("change", function(e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    var formData = new FormData();
+    formData.append("file", file);
+    document.getElementById("importStatus").innerHTML = "Importing...";
+    fetch("/api/import", { method: "POST", body: formData })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data.success) {
+                document.getElementById("importStatus").innerHTML = "<span class=\"success\">Imported " + data.imported + " products</span>";
+                loadProducts();
+                loadHistory();
+            } else {
+                document.getElementById("importStatus").innerHTML = "<span class=\"error\">" + data.error + "</span>";
+            }
+        });
+});
+
+document.getElementById("clearBtn").addEventListener("click", function() {
+    if (!confirm("Delete all products?")) return;
+    fetch("/api/products/clear", { method: "POST" }).then(function() { loadProducts(); });
+});
+
+function loadUsers() {
+    fetch("/api/users")
+        .then(function(res) { return res.json(); })
+        .then(function(users) {
+            var html = "";
+            for (var i = 0; i < users.length; i++) {
+                html += "<tr><td>" + users[i].username + "</td><td>" + users[i].role + "</td><td><button class=\"btn btn-danger\" onclick=\"deleteUser(" + users[i].id + ")\">Delete</button></td></tr>";
+            }
+            document.getElementById("usersTable").innerHTML = html;
+        });
+}
+
+document.getElementById("addUserBtn").addEventListener("click", function() {
+    var username = document.getElementById("newUser").value;
+    var password = document.getElementById("newPass").value;
+    var role = document.getElementById("newRole").value;
+    if (!username || !password) { alert("Enter username and password"); return; }
+    fetch("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username, password: password, role: role })
+    }).then(function() {
+        document.getElementById("newUser").value = "";
+        document.getElementById("newPass").value = "";
+        loadUsers();
     });
-    document.getElementById('newUser').value = '';
-    document.getElementById('newPass').value = '';
-    loadUsers();
 });
 
-async function deleteUser(id) {
-    if (!confirm('Delete this user?')) return;
-    await fetch('/api/users/' + id, { method: 'DELETE' });
-    loadUsers();
+function deleteUser(id) {
+    if (!confirm("Delete this user?")) return;
+    fetch("/api/users/" + id, { method: "DELETE" }).then(function() { loadUsers(); });
 }
 
-async function loadHistory() {
-    const res = await fetch('/api/zoho/sync-history');
-    const history = await res.json();
-    document.getElementById('historyTable').innerHTML = history.map(h =>
-        '<tr><td>' + new Date(h.created_at).toLocaleString() + '</td><td>' + h.sync_type + '</td><td>' + h.status + '</td><td>' + (h.records_synced || '-') + '</td></tr>'
-    ).join('');
+function loadHistory() {
+    fetch("/api/zoho/sync-history")
+        .then(function(res) { return res.json(); })
+        .then(function(history) {
+            var html = "";
+            for (var i = 0; i < history.length; i++) {
+                html += "<tr><td>" + new Date(history[i].created_at).toLocaleString() + "</td><td>" + history[i].sync_type + "</td><td>" + history[i].status + "</td><td>" + (history[i].records_synced || "-") + "</td></tr>";
+            }
+            document.getElementById("historyTable").innerHTML = html;
+        });
 }
 
 checkSession();
 </script>
 </body>
-</html>`);
-});
+</html>`;
+}
 
-initDB().then(() => {
-    app.listen(PORT, () => console.log('Product Catalog running on port ' + PORT));
+initDB().then(function() {
+    app.listen(PORT, function() { console.log("Product Catalog running on port " + PORT); });
 });

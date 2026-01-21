@@ -40,7 +40,7 @@ async function initDB() {
     } catch (err) { console.error('Database initialization error:', err); }
 }
 
-// Auth disabled for now - just pass through
+// AUTH BYPASS - Remove these two lines to restore login requirement
 function requireAuth(req, res, next) { next(); }
 function requireAdmin(req, res, next) { next(); }
 
@@ -61,7 +61,7 @@ app.post('/api/login', async (req, res) => {
 
 app.post('/api/logout', (req, res) => { req.session.destroy(); res.json({ success: true }); });
 app.get('/api/session', (req, res) => {
-    // Auto-login as admin when auth is disabled
+    // AUTH BYPASS - Always return logged in as admin
     res.json({ loggedIn: true, username: 'admin', role: 'admin' });
 });
 
@@ -286,7 +286,7 @@ th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #eee; }
 </head>
 <body>
 
-<div id="loginPage" class="login-page hidden">
+<div id="loginPage" class="login-page">
 <div class="login-box">
 <h1>Product Catalog</h1>
 <form id="loginForm">
@@ -298,14 +298,14 @@ th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #eee; }
 </div>
 </div>
 
-<div id="mainApp">
+<div id="mainApp" class="hidden">
 <header class="header">
 <h1>Product Catalog</h1>
 <div class="search-box"><input type="text" id="searchInput" placeholder="Search products..."></div>
 <div class="header-right">
 <span id="userInfo"></span>
-<button class="btn btn-secondary" id="adminBtn">Admin</button>
-<button class="btn btn-secondary" id="logoutBtn" style="display:none">Sign Out</button>
+<button class="btn btn-secondary" id="adminBtn" style="display:none">Admin</button>
+<button class="btn btn-secondary" id="logoutBtn">Sign Out</button>
 </div>
 </header>
 

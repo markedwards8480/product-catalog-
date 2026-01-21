@@ -25,20 +25,22 @@ app.use(session({
 const upload = multer({ storage: multer.memoryStorage() });
 
 var zohoAccessToken = null;
+var lastImportId = null;
 
 async function initDB() {
     try {
         await pool.query('CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, username VARCHAR(255) UNIQUE NOT NULL, password VARCHAR(255) NOT NULL, role VARCHAR(50) DEFAULT \'sales_rep\', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
-        await pool.query('CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, style_id VARCHAR(100) NOT NULL, base_style VARCHAR(100), name VARCHAR(255) NOT NULL, category VARCHAR(100), image_url TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
+        await pool.query('CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, style_id VARCHAR(100) NOT NULL, base_style VARCHAR(100), name VARCHAR(255) NOT NULL, category VARCHAR(100), image_url TEXT, first_seen_import INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         await pool.query('CREATE TABLE IF NOT EXISTS product_colors (id SERIAL PRIMARY KEY, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE, color_name VARCHAR(100) NOT NULL, available_qty INTEGER DEFAULT 0, on_hand INTEGER DEFAULT 0, open_order INTEGER DEFAULT 0, to_come INTEGER DEFAULT 0, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         await pool.query('CREATE TABLE IF NOT EXISTS sync_history (id SERIAL PRIMARY KEY, sync_type VARCHAR(50), status VARCHAR(50), records_synced INTEGER DEFAULT 0, error_message TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         await pool.query('CREATE TABLE IF NOT EXISTS zoho_tokens (id SERIAL PRIMARY KEY, access_token TEXT, refresh_token TEXT, expires_at TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         await pool.query('CREATE TABLE IF NOT EXISTS selections (id SERIAL PRIMARY KEY, share_id VARCHAR(50) UNIQUE NOT NULL, name VARCHAR(255), product_ids INTEGER[], created_by VARCHAR(255), share_type VARCHAR(50) DEFAULT \'link\', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
+        await pool.query('CREATE TABLE IF NOT EXISTS user_picks (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, product_id))');
+        await pool.query('CREATE TABLE IF NOT EXISTS user_notes (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE, note TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, product_id))');
         
-        // Add share_type column if it doesn't exist (for existing databases)
-        try {
-            await pool.query('ALTER TABLE selections ADD COLUMN IF NOT EXISTS share_type VARCHAR(50) DEFAULT \'link\'');
-        } catch (e) { /* column may already exist */ }
+        // Add columns if they don't exist (for existing databases)
+        try { await pool.query('ALTER TABLE selections ADD COLUMN IF NOT EXISTS share_type VARCHAR(50) DEFAULT \'link\''); } catch (e) {}
+        try { await pool.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS first_seen_import INTEGER'); } catch (e) {}
         
         var userCheck = await pool.query('SELECT COUNT(*) FROM users');
         if (parseInt(userCheck.rows[0].count) === 0) {
@@ -51,6 +53,12 @@ async function initDB() {
         if (tokenResult.rows.length > 0) {
             zohoAccessToken = tokenResult.rows[0].access_token;
             console.log('Loaded stored Zoho access token');
+        }
+        
+        // Get last import ID for new arrivals tracking
+        var importResult = await pool.query("SELECT id FROM sync_history WHERE sync_type = 'csv_import' AND status = 'success' ORDER BY id DESC LIMIT 1");
+        if (importResult.rows.length > 0) {
+            lastImportId = importResult.rows[0].id;
         }
         
         console.log('Database initialized successfully');
@@ -79,13 +87,65 @@ app.post('/api/login', async function(req, res) {
 app.post('/api/logout', function(req, res) { req.session.destroy(); res.json({ success: true }); });
 
 app.get('/api/session', function(req, res) {
-    res.json({ loggedIn: true, username: req.session.username || 'admin', role: req.session.role || 'admin' });
+    res.json({ loggedIn: true, username: req.session.username || 'admin', role: req.session.role || 'admin', userId: req.session.userId || 1 });
 });
 
 app.get('/api/products', requireAuth, async function(req, res) {
     try {
-        var result = await pool.query('SELECT p.id, p.style_id, p.base_style, p.name, p.category, p.image_url, json_agg(json_build_object(\'id\', pc.id, \'color_name\', pc.color_name, \'available_qty\', pc.available_qty, \'on_hand\', pc.on_hand)) FILTER (WHERE pc.id IS NOT NULL) as colors FROM products p LEFT JOIN product_colors pc ON p.id = pc.product_id GROUP BY p.id ORDER BY p.category, p.name');
-        res.json(result.rows);
+        var result = await pool.query('SELECT p.id, p.style_id, p.base_style, p.name, p.category, p.image_url, p.first_seen_import, json_agg(json_build_object(\'id\', pc.id, \'color_name\', pc.color_name, \'available_qty\', pc.available_qty, \'on_hand\', pc.on_hand)) FILTER (WHERE pc.id IS NOT NULL) as colors FROM products p LEFT JOIN product_colors pc ON p.id = pc.product_id GROUP BY p.id ORDER BY p.category, p.name');
+        res.json({ products: result.rows, lastImportId: lastImportId });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// User picks (My Picks / wishlist)
+app.get('/api/picks', requireAuth, async function(req, res) {
+    try {
+        var userId = req.session.userId || 1;
+        var result = await pool.query('SELECT product_id FROM user_picks WHERE user_id = $1', [userId]);
+        res.json(result.rows.map(function(r) { return r.product_id; }));
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/picks/:productId', requireAuth, async function(req, res) {
+    try {
+        var userId = req.session.userId || 1;
+        var productId = parseInt(req.params.productId);
+        await pool.query('INSERT INTO user_picks (user_id, product_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, productId]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/picks/:productId', requireAuth, async function(req, res) {
+    try {
+        var userId = req.session.userId || 1;
+        var productId = parseInt(req.params.productId);
+        await pool.query('DELETE FROM user_picks WHERE user_id = $1 AND product_id = $2', [userId, productId]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// User notes
+app.get('/api/notes', requireAuth, async function(req, res) {
+    try {
+        var userId = req.session.userId || 1;
+        var result = await pool.query('SELECT product_id, note FROM user_notes WHERE user_id = $1', [userId]);
+        var notes = {};
+        result.rows.forEach(function(r) { notes[r.product_id] = r.note; });
+        res.json(notes);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/notes/:productId', requireAuth, async function(req, res) {
+    try {
+        var userId = req.session.userId || 1;
+        var productId = parseInt(req.params.productId);
+        var note = req.body.note || '';
+        if (note.trim() === '') {
+            await pool.query('DELETE FROM user_notes WHERE user_id = $1 AND product_id = $2', [userId, productId]);
+        } else {
+            await pool.query('INSERT INTO user_notes (user_id, product_id, note, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (user_id, product_id) DO UPDATE SET note = $3, updated_at = NOW()', [userId, productId, note]);
+        }
+        res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -173,13 +233,41 @@ function parseNumber(val) { if (!val) return 0; return parseInt(val.toString().r
 app.post('/api/import', requireAuth, requireAdmin, upload.single('file'), async function(req, res) {
     try {
         if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+        
+        // Create sync history entry first to get the import ID
+        var syncResult = await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1, $2, $3) RETURNING id', ['csv_import', 'success', 0]);
+        var currentImportId = syncResult.rows[0].id;
+        
+        // Get existing style_ids before import to track new arrivals
+        var existingStyles = await pool.query('SELECT DISTINCT style_id FROM products');
+        var existingStyleSet = {};
+        existingStyles.rows.forEach(function(r) { existingStyleSet[r.style_id] = true; });
+        
         var content = req.file.buffer.toString('utf-8'); var allLines = content.split('\n'); var lines = []; for (var i = 0; i < allLines.length; i++) { if (allLines[i].trim()) lines.push(allLines[i]); } if (lines.length < 2) return res.status(400).json({ error: 'File appears empty' });
         var headerLine = lines[0]; if (headerLine.charCodeAt(0) === 0xFEFF) headerLine = headerLine.slice(1); var headersRaw = parseCSVLine(headerLine); var headers = []; for (var h = 0; h < headersRaw.length; h++) { headers.push(headersRaw[h].toLowerCase().replace(/[^\w\s]/g, '').trim()); }
         var headerMap = {}; for (var hi = 0; hi < headers.length; hi++) { headerMap[headers[hi]] = hi; }
-        var imported = 0, skipped = 0; var lastStyleId = null, lastImageUrl = null, lastCategory = null;
-        for (var li = 1; li < lines.length; li++) { try { var values = parseCSVLine(lines[li]); if (values[0] && values[0].indexOf('Grand Summary') !== -1) { skipped++; continue; } var styleId = values[headerMap['style name']] || values[0]; var imageUrl = values[headerMap['style image']] || values[1]; var color = values[headerMap['color']] || values[2]; var category = values[headerMap['commodity']] || values[3]; var onHand = parseNumber(values[headerMap['on hand']] || values[4]); var available = parseNumber(values[headerMap['available now']] || values[headerMap['left to sell']] || values[7]); if (!styleId && color) { styleId = lastStyleId; if (!imageUrl || imageUrl === '-No Value-') imageUrl = lastImageUrl; if (!category || category === '-No Value-') category = lastCategory; } if (!styleId) { skipped++; continue; } lastStyleId = styleId; if (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) lastImageUrl = imageUrl; if (category && category !== '-No Value-') lastCategory = category; var baseStyle = styleId.split('-')[0]; var validCategory = (category && category !== '-No Value-') ? category : 'Uncategorized'; var name = validCategory + ' - ' + baseStyle; var validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) ? imageUrl : lastImageUrl; var productResult = await pool.query('SELECT id, image_url FROM products WHERE style_id = $1', [styleId]); var productId; if (productResult.rows.length > 0) { productId = productResult.rows[0].id; var finalImage = validImageUrl || productResult.rows[0].image_url; await pool.query('UPDATE products SET name=$1, category=$2, base_style=$3, image_url=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5', [name, validCategory, baseStyle, finalImage, productId]); } else { var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url) VALUES ($1,$2,$3,$4,$5) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl]); productId = ins.rows[0].id; } if (color && color !== '-No Value-') { var colorResult = await pool.query('SELECT id FROM product_colors WHERE product_id=$1 AND color_name=$2', [productId, color]); if (colorResult.rows.length > 0) { await pool.query('UPDATE product_colors SET available_qty=$1, on_hand=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3', [available, onHand, colorResult.rows[0].id]); } else { await pool.query('INSERT INTO product_colors (product_id, color_name, available_qty, on_hand) VALUES ($1,$2,$3,$4)', [productId, color, available, onHand]); } } imported++; } catch (rowErr) { skipped++; } }
-        await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1,$2,$3)', ['csv_import', 'success', imported]);
-        res.json({ success: true, imported: imported, skipped: skipped });
+        var imported = 0, skipped = 0, newArrivals = 0; var lastStyleId = null, lastImageUrl = null, lastCategory = null;
+        for (var li = 1; li < lines.length; li++) { try { var values = parseCSVLine(lines[li]); if (values[0] && values[0].indexOf('Grand Summary') !== -1) { skipped++; continue; } var styleId = values[headerMap['style name']] || values[0]; var imageUrl = values[headerMap['style image']] || values[1]; var color = values[headerMap['color']] || values[2]; var category = values[headerMap['commodity']] || values[3]; var onHand = parseNumber(values[headerMap['on hand']] || values[4]); var available = parseNumber(values[headerMap['available now']] || values[headerMap['left to sell']] || values[7]); if (!styleId && color) { styleId = lastStyleId; if (!imageUrl || imageUrl === '-No Value-') imageUrl = lastImageUrl; if (!category || category === '-No Value-') category = lastCategory; } if (!styleId) { skipped++; continue; } lastStyleId = styleId; if (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) lastImageUrl = imageUrl; if (category && category !== '-No Value-') lastCategory = category; var baseStyle = styleId.split('-')[0]; var validCategory = (category && category !== '-No Value-') ? category : 'Uncategorized'; var name = validCategory + ' - ' + baseStyle; var validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) ? imageUrl : lastImageUrl; 
+            var isNewStyle = !existingStyleSet[styleId];
+            var productResult = await pool.query('SELECT id, image_url FROM products WHERE style_id = $1', [styleId]); 
+            var productId; 
+            if (productResult.rows.length > 0) { 
+                productId = productResult.rows[0].id; 
+                var finalImage = validImageUrl || productResult.rows[0].image_url; 
+                await pool.query('UPDATE products SET name=$1, category=$2, base_style=$3, image_url=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5', [name, validCategory, baseStyle, finalImage, productId]); 
+            } else { 
+                var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url, first_seen_import) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl, currentImportId]); 
+                productId = ins.rows[0].id;
+                if (isNewStyle) newArrivals++;
+                existingStyleSet[styleId] = true;
+            } 
+            if (color && color !== '-No Value-') { var colorResult = await pool.query('SELECT id FROM product_colors WHERE product_id=$1 AND color_name=$2', [productId, color]); if (colorResult.rows.length > 0) { await pool.query('UPDATE product_colors SET available_qty=$1, on_hand=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3', [available, onHand, colorResult.rows[0].id]); } else { await pool.query('INSERT INTO product_colors (product_id, color_name, available_qty, on_hand) VALUES ($1,$2,$3,$4)', [productId, color, available, onHand]); } } imported++; } catch (rowErr) { skipped++; } }
+        
+        // Update sync history with actual count
+        await pool.query('UPDATE sync_history SET records_synced = $1 WHERE id = $2', [imported, currentImportId]);
+        lastImportId = currentImportId;
+        
+        res.json({ success: true, imported: imported, skipped: skipped, newArrivals: newArrivals });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -313,15 +401,23 @@ function getHTML() {
     html += '.upload-area{border:2px dashed #ddd;padding:2rem;text-align:center;border-radius:4px;margin-bottom:1rem}.upload-area input{display:none}.upload-area label{color:#2c5545;cursor:pointer}';
     html += '.stats{display:flex;gap:2rem;margin-bottom:1rem;padding:1rem;background:white;border-radius:8px}.stat-value{font-size:1.5rem;font-weight:bold}.stat-label{color:#666;font-size:0.875rem}';
     html += '.filters{display:flex;gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap}.filter-btn{padding:0.5rem 1rem;border:1px solid #ddd;background:white;border-radius:20px;cursor:pointer}.filter-btn.active{background:#2c5545;color:white;border-color:#2c5545}';
-    html += '.product-grid{display:grid;gap:1.5rem}.product-grid.size-small{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}.product-grid.size-medium{grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}.product-grid.size-large{grid-template-columns:repeat(auto-fill,minmax(400px,1fr))}';
+    html += '.product-grid{display:grid;gap:1.5rem}.product-grid.size-small{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}.product-grid.size-medium{grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}.product-grid.size-large{grid-template-columns:repeat(auto-fill,minmax(400px,1fr))}.product-grid.size-list{display:flex;flex-direction:column;gap:0.5rem}';
+    html += '.product-card.list-view{display:flex;flex-direction:row;height:auto}.product-card.list-view .product-image{width:80px;height:80px;min-height:80px}.product-card.list-view .product-info{flex:1;padding:0.75rem;display:flex;align-items:center;gap:1rem}.product-card.list-view .product-name{margin:0}.product-card.list-view .product-style{margin:0}.product-card.list-view .color-list{display:none}.product-card.list-view .total-row{margin:0;padding:0;border:none}.product-card.list-view .list-colors{display:flex;gap:0.5rem;flex-wrap:wrap;font-size:0.8rem;color:#666}';
     html += '.product-card{background:white;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);cursor:pointer;transition:transform 0.2s;position:relative}.product-card:hover{transform:translateY(-2px);box-shadow:0 4px 16px rgba(0,0,0,0.15)}';
     html += '.product-card.selected{outline:3px solid #2c5545;outline-offset:-3px}';
     html += '.product-card.selection-mode:hover{outline:2px dashed #2c5545;outline-offset:-2px}';
-    html += '.select-badge{position:absolute;top:10px;right:10px;width:28px;height:28px;background:#2c5545;color:white;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;opacity:0;transition:opacity 0.2s}.product-card.selection-mode:hover .select-badge{opacity:0.7}.product-card.selected .select-badge{opacity:1}';
+    html += '.product-card.focused{outline:2px solid #1976d2;outline-offset:2px}';
+    html += '.select-badge{position:absolute;top:10px;right:10px;width:28px;height:28px;background:#2c5545;color:white;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;opacity:0;transition:opacity 0.2s;z-index:5}.product-card.selection-mode:hover .select-badge{opacity:0.7}.product-card.selected .select-badge{opacity:1}';
+    html += '.pick-badge{position:absolute;top:10px;left:10px;width:28px;height:28px;background:#ff9800;color:white;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;cursor:pointer;opacity:0;transition:opacity 0.2s;z-index:5}.product-card:hover .pick-badge{opacity:0.7}.product-card .pick-badge.active{opacity:1}';
+    html += '.note-badge{position:absolute;top:10px;left:44px;width:28px;height:28px;background:#2196f3;color:white;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;z-index:5;opacity:0}.product-card .note-badge.has-note{opacity:1}';
     html += '.product-image{height:220px;background:#f8f8f8;display:flex;align-items:center;justify-content:center;overflow:hidden}.product-image img{max-width:100%;max-height:100%;object-fit:contain}';
     html += '.product-info{padding:1rem}.product-style{font-size:0.75rem;color:#666;text-transform:uppercase}.product-name{font-size:1.1rem;font-weight:600;margin:0.25rem 0}.color-list{margin-top:0.75rem}.color-row{display:flex;justify-content:space-between;padding:0.25rem 0;font-size:0.875rem}.total-row{margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid #eee;font-weight:bold;display:flex;justify-content:space-between}';
     html += '.empty{text-align:center;padding:3rem;color:#666}';
     html += '.modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:none;align-items:center;justify-content:center;z-index:1000}.modal.active{display:flex}.modal-content{background:white;border-radius:8px;max-width:95vw;width:1200px;max-height:95vh;overflow:auto;position:relative}.modal-body{display:flex;min-height:600px}.modal-image{width:60%;background:#f0f0f0;min-height:600px;display:flex;align-items:center;justify-content:center;padding:1rem}.modal-image img{max-width:100%;max-height:700px;object-fit:contain}.modal-details{width:40%;padding:2rem}.modal-close{position:absolute;top:1rem;right:1rem;background:white;border:none;font-size:1.5rem;cursor:pointer;border-radius:50%;width:36px;height:36px}';
+    html += '.modal-actions{margin-top:1.5rem;padding-top:1rem;border-top:1px solid #eee;display:flex;gap:0.5rem;flex-wrap:wrap}';
+    html += '.note-section{margin-top:1rem;padding-top:1rem;border-top:1px solid #eee}.note-section textarea{width:100%;height:80px;margin-top:0.5rem;padding:0.5rem;border:1px solid #ddd;border-radius:4px;font-family:inherit;resize:vertical}';
+    html += '.compare-modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:none;align-items:center;justify-content:center;z-index:1001}.compare-modal.active{display:flex}.compare-content{background:white;border-radius:8px;max-width:95vw;width:1000px;max-height:95vh;overflow:auto;padding:2rem}.compare-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1.5rem}.compare-item{text-align:center}.compare-item img{max-width:100%;max-height:250px;object-fit:contain;margin-bottom:1rem}.compare-item h3{font-size:1rem;margin-bottom:0.5rem}.compare-colors{font-size:0.875rem;text-align:left}';
+    html += '.compare-bar{position:fixed;bottom:60px;left:0;right:0;background:#1976d2;color:white;padding:0.75rem 2rem;display:flex;justify-content:space-between;align-items:center;z-index:99;transform:translateY(calc(100% + 60px));transition:transform 0.3s}.compare-bar.visible{transform:translateY(0)}.selection-bar.visible ~ .compare-bar.visible{transform:translateY(0)}';
     html += 'table{width:100%;border-collapse:collapse}th,td{padding:0.75rem;text-align:left;border-bottom:1px solid #eee}';
     html += '.add-form{display:flex;gap:0.5rem;margin-top:1rem;flex-wrap:wrap}.add-form input,.add-form select{padding:0.5rem;border:1px solid #ddd;border-radius:4px}';
     html += '.status-box{padding:1rem;background:#f9f9f9;border-radius:4px;margin-bottom:1rem}.status-item{margin-bottom:0.5rem}.status-label{font-weight:500}.status-value{color:#666}.status-value.connected{color:#2e7d32}.status-value.disconnected{color:#c4553d}';
@@ -349,32 +445,42 @@ function getHTML() {
     html += '<div id="sharesTab" class="tab-content"><table class="share-history-table"><thead><tr><th>Date</th><th>Name</th><th>Sales Rep</th><th>Type</th><th>Items</th><th>Actions</th></tr></thead><tbody id="sharesTable"></tbody></table></div></div>';
     
     html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div><div class="stat-value" id="totalUnits">0</div><div class="stat-label">Units Available</div></div></div>';
-    html += '<div class="view-controls"><label>Tile Size:</label><button class="size-btn" data-size="small">Small</button><button class="size-btn active" data-size="medium">Medium</button><button class="size-btn" data-size="large">Large</button><span style="margin-left:1rem"></span><label>Qty:</label><input type="number" id="minQty" placeholder="Min" style="width:70px;padding:0.4rem;border:1px solid #ddd;border-radius:4px"><span style="margin:0 0.25rem">-</span><input type="number" id="maxQty" placeholder="Max" style="width:70px;padding:0.4rem;border:1px solid #ddd;border-radius:4px"><button id="resetQtyBtn" style="margin-left:0.5rem;padding:0.4rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.875rem">Reset</button><span style="margin-left:auto"></span><button class="select-mode-btn" id="selectModeBtn">Select for Sharing</button></div>';
-    html += '<div class="filters" id="filters"></div><div class="product-grid size-medium" id="productGrid"></div><div class="empty hidden" id="emptyState">No products found.</div></main></div>';
+    html += '<div class="view-controls"><label>View:</label><button class="size-btn" data-size="list">List</button><button class="size-btn" data-size="small">Small</button><button class="size-btn active" data-size="medium">Medium</button><button class="size-btn" data-size="large">Large</button><span style="margin-left:1rem"></span><label>Sort:</label><select id="sortSelect" style="padding:0.4rem;border:1px solid #ddd;border-radius:4px"><option value="name-asc">Name A-Z</option><option value="name-desc">Name Z-A</option><option value="qty-high">Qty High→Low</option><option value="qty-low">Qty Low→High</option><option value="newest">Newest First</option></select><span style="margin-left:1rem"></span><label>Qty:</label><input type="number" id="minQty" placeholder="Min" style="width:70px;padding:0.4rem;border:1px solid #ddd;border-radius:4px"><span style="margin:0 0.25rem">-</span><input type="number" id="maxQty" placeholder="Max" style="width:70px;padding:0.4rem;border:1px solid #ddd;border-radius:4px"><button id="resetQtyBtn" style="margin-left:0.5rem;padding:0.4rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.875rem">Reset</button><span style="margin-left:auto"></span><button class="btn btn-secondary btn-sm" id="compareBtn" disabled style="padding:0.4rem 0.75rem">Compare (0)</button><button class="select-mode-btn" id="selectModeBtn">Select for Sharing</button></div>';
+    html += '<div class="filters"><button class="filter-btn" data-special="new">New Arrivals</button><button class="filter-btn" data-special="picks">My Picks</button><button class="filter-btn" data-special="notes">Has Notes</button><span style="margin:0 0.5rem;color:#ccc">|</span><span id="categoryFilters"></span></div>';
+    html += '<div class="product-grid size-medium" id="productGrid"></div><div class="empty hidden" id="emptyState">No products found.</div></main></div>';
     
     // Selection bar
     html += '<div class="selection-bar" id="selectionBar"><span class="selection-count"><span id="selectedCount">0</span> items selected</span><div class="selection-actions"><button class="btn btn-secondary" id="clearSelectionBtn">Clear</button><button class="btn btn-secondary" id="exitSelectionBtn">Exit Selection Mode</button><button class="btn btn-primary" id="shareSelectionBtn">Share / Download</button></div></div>';
+    
+    // Compare bar
+    html += '<div class="compare-bar" id="compareBar"><span><span id="compareCount">0</span> items to compare</span><div><button class="btn btn-secondary btn-sm" id="clearCompareBtn" style="margin-right:0.5rem">Clear</button><button class="btn btn-primary btn-sm" id="showCompareBtn">Compare Now</button></div></div>';
     
     // Share modal
     html += '<div class="share-modal" id="shareModal"><div class="share-modal-content"><h3>Share Selection</h3><input type="text" id="selectionName" placeholder="Name this selection (e.g. Spring Collection for Acme Co)"><div class="share-modal-actions"><button class="btn btn-secondary" id="cancelShareBtn">Cancel</button><button class="btn btn-primary" id="createShareBtn">Create Link</button></div><div class="share-result hidden" id="shareResult"><p><strong>Share Link:</strong></p><p><a id="shareLink" href="" target="_blank"></a></p><p style="margin-top:0.5rem"><a id="pdfLink" href="" target="_blank" id="pdfDownloadLink">Download PDF</a></p></div></div></div>';
     
     // Product modal
-    html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button><div class="modal-body"><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div class="product-style" id="modalStyle"></div><h2 id="modalName"></h2><p id="modalCategory" style="color:#666;margin-bottom:1rem"></p><div id="modalColors"></div><div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div></div></div></div></div>';
+    html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button><div class="modal-body"><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div class="product-style" id="modalStyle"></div><h2 id="modalName"></h2><p id="modalCategory" style="color:#666;margin-bottom:1rem"></p><div id="modalColors"></div><div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div><div class="modal-actions"><button class="btn btn-secondary btn-sm" id="modalPickBtn">♡ Add to My Picks</button><button class="btn btn-secondary btn-sm" id="modalCompareBtn">+ Add to Compare</button></div><div class="note-section"><label><strong>My Notes:</strong></label><textarea id="modalNote" placeholder="Add private notes about this product..."></textarea><button class="btn btn-sm btn-primary" id="saveNoteBtn">Save Note</button></div></div></div></div></div>';
+    
+    // Compare modal
+    html += '<div class="compare-modal" id="compareModal"><div class="compare-content"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem"><h2>Compare Products</h2><button class="btn btn-secondary" id="closeCompareBtn">Close</button></div><div class="compare-grid" id="compareGrid"></div></div></div>';
     
     html += '<script>';
-    html += 'var products=[];var currentFilter="all";var currentSize="medium";var selectedProducts=[];var selectionMode=false;var currentShareId=null;';
+    html += 'var products=[];var allProducts=[];var lastImportId=null;var currentFilter="all";var specialFilter=null;var currentSort="name-asc";var currentSize="medium";var selectedProducts=[];var compareProducts=[];var selectionMode=false;var currentShareId=null;var userPicks=[];var userNotes={};var currentModalProductId=null;var focusedIndex=-1;';
     
-    html += 'function checkSession(){fetch("/api/session").then(function(r){return r.json()}).then(function(d){if(d.loggedIn){showApp(d.username,d.role);loadProducts();loadZohoStatus();loadDataFreshness();if(d.role==="admin"){loadUsers();loadHistory();loadShares()}}})}';
+    html += 'function checkSession(){fetch("/api/session").then(function(r){return r.json()}).then(function(d){if(d.loggedIn){showApp(d.username,d.role);loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();if(d.role==="admin"){loadUsers();loadHistory();loadShares()}}})}';
     html += 'function showApp(u,r){document.getElementById("loginPage").classList.add("hidden");document.getElementById("mainApp").classList.remove("hidden");document.getElementById("userInfo").textContent="Welcome, "+u;if(r==="admin")document.getElementById("adminBtn").style.display="block"}';
     
-    html += 'document.getElementById("loginForm").addEventListener("submit",function(e){e.preventDefault();fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("username").value,password:document.getElementById("password").value})}).then(function(r){return r.json()}).then(function(d){if(d.success){showApp(d.username,d.role);loadProducts();loadZohoStatus();loadDataFreshness();if(d.role==="admin"){loadUsers();loadHistory();loadShares()}}else{document.getElementById("loginError").textContent=d.error;document.getElementById("loginError").classList.remove("hidden")}})});';
+    html += 'document.getElementById("loginForm").addEventListener("submit",function(e){e.preventDefault();fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("username").value,password:document.getElementById("password").value})}).then(function(r){return r.json()}).then(function(d){if(d.success){showApp(d.username,d.role);loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();if(d.role==="admin"){loadUsers();loadHistory();loadShares()}}else{document.getElementById("loginError").textContent=d.error;document.getElementById("loginError").classList.remove("hidden")}})});';
     
     html += 'document.getElementById("logoutBtn").addEventListener("click",function(){fetch("/api/logout",{method:"POST"}).then(function(){location.reload()})});';
     html += 'document.getElementById("adminBtn").addEventListener("click",function(){document.getElementById("adminPanel").classList.toggle("hidden")});';
     
     html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){document.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});document.querySelectorAll(".tab-content").forEach(function(c){c.classList.remove("active")});e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active")})}';
     
-    html += 'var sizeBtns=document.querySelectorAll(".size-btn");sizeBtns.forEach(function(btn){btn.addEventListener("click",function(e){sizeBtns.forEach(function(b){b.classList.remove("active")});e.target.classList.add("active");currentSize=e.target.getAttribute("data-size");document.getElementById("productGrid").className="product-grid size-"+currentSize})});';
+    html += 'var sizeBtns=document.querySelectorAll(".size-btn");sizeBtns.forEach(function(btn){btn.addEventListener("click",function(e){sizeBtns.forEach(function(b){b.classList.remove("active")});e.target.classList.add("active");currentSize=e.target.getAttribute("data-size");document.getElementById("productGrid").className="product-grid size-"+currentSize;renderProducts()})});';
+    
+    // Sort handler
+    html += 'document.getElementById("sortSelect").addEventListener("change",function(e){currentSort=e.target.value;renderProducts()});';
     
     html += 'function loadZohoStatus(){fetch("/api/zoho/status").then(function(r){return r.json()}).then(function(d){var st=document.getElementById("zohoStatusText");if(d.connected){st.textContent="Connected";st.className="status-value connected"}else{st.textContent="Not connected";st.className="status-value disconnected"}document.getElementById("zohoWorkspaceId").textContent=d.workspaceId||"Not set";document.getElementById("zohoViewId").textContent=d.viewId||"Not set"})}';
     
@@ -386,22 +492,31 @@ function getHTML() {
     html += 'document.getElementById("syncZohoBtn").addEventListener("click",function(){document.getElementById("zohoMessage").innerHTML="Syncing...";fetch("/api/zoho/sync",{method:"POST"}).then(function(r){return r.json()}).then(function(d){document.getElementById("zohoMessage").innerHTML=d.success?"<span class=success>"+d.message+"</span>":"<span class=error>"+d.error+"</span>";loadProducts();loadHistory();loadDataFreshness()})});';
     
     html += 'function getImageUrl(url){if(!url)return null;if(url.indexOf("download-accl.zoho.com")!==-1){return"/api/image/"+url.split("/").pop()}return url}';
-    html += 'function loadProducts(){fetch("/api/products").then(function(r){return r.json()}).then(function(d){products=d;renderFilters();renderProducts()})}';
+    html += 'function loadProducts(){fetch("/api/products").then(function(r){return r.json()}).then(function(d){allProducts=d.products||d;lastImportId=d.lastImportId;products=allProducts;renderFilters();renderProducts()})}';
     
-    html += 'function renderFilters(){var cats=[];products.forEach(function(p){if(p.category&&cats.indexOf(p.category)===-1)cats.push(p.category)});cats.sort();var h="<button class=\\"filter-btn active\\" data-cat=\\"all\\">All</button>";cats.forEach(function(c){h+="<button class=\\"filter-btn\\" data-cat=\\""+c+"\\">"+c+"</button>"});document.getElementById("filters").innerHTML=h;document.querySelectorAll(".filter-btn").forEach(function(btn){btn.addEventListener("click",function(e){document.querySelectorAll(".filter-btn").forEach(function(b){b.classList.remove("active")});e.target.classList.add("active");currentFilter=e.target.getAttribute("data-cat");renderProducts()})})}';
+    html += 'function loadPicks(){fetch("/api/picks").then(function(r){return r.json()}).then(function(p){userPicks=p;renderProducts()})}';
+    html += 'function loadNotes(){fetch("/api/notes").then(function(r){return r.json()}).then(function(n){userNotes=n;renderProducts()})}';
+    
+    html += 'function renderFilters(){var cats=[];allProducts.forEach(function(p){if(p.category&&cats.indexOf(p.category)===-1)cats.push(p.category)});cats.sort();var h="<button class=\\"filter-btn active\\" data-cat=\\"all\\">All</button>";cats.forEach(function(c){h+="<button class=\\"filter-btn\\" data-cat=\\""+c+"\\">"+c+"</button>"});document.getElementById("categoryFilters").innerHTML=h;document.querySelectorAll("[data-cat]").forEach(function(btn){btn.addEventListener("click",function(e){document.querySelectorAll("[data-cat]").forEach(function(b){b.classList.remove("active")});e.target.classList.add("active");currentFilter=e.target.getAttribute("data-cat");renderProducts()})});document.querySelectorAll("[data-special]").forEach(function(btn){btn.addEventListener("click",function(e){var sp=e.target.getAttribute("data-special");if(specialFilter===sp){specialFilter=null;e.target.classList.remove("active")}else{document.querySelectorAll("[data-special]").forEach(function(b){b.classList.remove("active")});specialFilter=sp;e.target.classList.add("active")}renderProducts()})})}';
     
     // Selection mode toggle
     html += 'document.getElementById("selectModeBtn").addEventListener("click",function(){selectionMode=!selectionMode;this.classList.toggle("active",selectionMode);if(!selectionMode){selectedProducts=[];updateSelectionUI()}renderProducts()});';
     
     html += 'document.getElementById("exitSelectionBtn").addEventListener("click",function(){selectionMode=false;selectedProducts=[];document.getElementById("selectModeBtn").classList.remove("active");updateSelectionUI();renderProducts()});';
     
-    html += 'function handleCardClick(id,e){if(selectionMode){e.stopPropagation();var idx=selectedProducts.indexOf(id);if(idx===-1){selectedProducts.push(id)}else{selectedProducts.splice(idx,1)}updateSelectionUI();renderProducts()}else{showProductModal(id)}}';
+    html += 'function handleCardClick(id,e){if(e.target.classList.contains("pick-badge")){togglePick(id,e);return}if(selectionMode){e.stopPropagation();var idx=selectedProducts.indexOf(id);if(idx===-1){selectedProducts.push(id)}else{selectedProducts.splice(idx,1)}updateSelectionUI();renderProducts()}else{showProductModal(id)}}';
     
-    html += 'function showProductModal(id){var pr=products.find(function(p){return p.id===id});if(!pr)return;var imgUrl=getImageUrl(pr.image_url);document.getElementById("modalImage").src=imgUrl||"";document.getElementById("modalStyle").textContent=pr.style_id;document.getElementById("modalName").textContent=pr.name;document.getElementById("modalCategory").textContent=pr.category||"";var cols=pr.colors||[];var tot=0;var ch="";cols.forEach(function(c){tot+=c.available_qty||0;ch+="<div class=\\"color-row\\"><span>"+c.color_name+"</span><span>"+(c.available_qty||0).toLocaleString()+"</span></div>"});document.getElementById("modalColors").innerHTML=ch;document.getElementById("modalTotal").textContent=tot.toLocaleString();document.getElementById("modal").classList.add("active")}';
+    html += 'function togglePick(id,e){e.stopPropagation();var idx=userPicks.indexOf(id);if(idx===-1){fetch("/api/picks/"+id,{method:"POST"}).then(function(){userPicks.push(id);renderProducts()})}else{fetch("/api/picks/"+id,{method:"DELETE"}).then(function(){userPicks.splice(idx,1);renderProducts()})}}';
+    
+    html += 'function toggleCompare(id){var idx=compareProducts.indexOf(id);if(idx===-1&&compareProducts.length<3){compareProducts.push(id)}else if(idx!==-1){compareProducts.splice(idx,1)}updateCompareUI()}';
+    
+    html += 'function updateCompareUI(){document.getElementById("compareCount").textContent=compareProducts.length;document.getElementById("compareBtn").disabled=compareProducts.length===0;document.getElementById("compareBtn").textContent="Compare ("+compareProducts.length+")";document.getElementById("compareBar").classList.toggle("visible",compareProducts.length>0)}';
+    
+    html += 'function showProductModal(id){currentModalProductId=id;var pr=products.find(function(p){return p.id===id});if(!pr)return;var imgUrl=getImageUrl(pr.image_url);document.getElementById("modalImage").src=imgUrl||"";document.getElementById("modalStyle").textContent=pr.style_id;document.getElementById("modalName").textContent=pr.name;document.getElementById("modalCategory").textContent=pr.category||"";var cols=pr.colors||[];var tot=0;var ch="";cols.forEach(function(c){tot+=c.available_qty||0;ch+="<div class=\\"color-row\\"><span>"+c.color_name+"</span><span>"+(c.available_qty||0).toLocaleString()+"</span></div>"});document.getElementById("modalColors").innerHTML=ch;document.getElementById("modalTotal").textContent=tot.toLocaleString();document.getElementById("modalNote").value=userNotes[id]||"";var isPicked=userPicks.indexOf(id)!==-1;document.getElementById("modalPickBtn").textContent=isPicked?"♥ In My Picks":"♡ Add to My Picks";document.getElementById("modal").classList.add("active")}';
     
     html += 'function updateSelectionUI(){document.getElementById("selectedCount").textContent=selectedProducts.length;var bar=document.getElementById("selectionBar");if(selectedProducts.length>0&&selectionMode){bar.classList.add("visible")}else{bar.classList.remove("visible")}}';
     
-    html += 'function renderProducts(){var s=document.getElementById("searchInput").value.toLowerCase();var minQ=parseInt(document.getElementById("minQty").value)||0;var maxQ=parseInt(document.getElementById("maxQty").value)||999999999;var f=products.filter(function(p){var ms=!s||p.style_id.toLowerCase().indexOf(s)!==-1||p.name.toLowerCase().indexOf(s)!==-1;var mc=currentFilter==="all"||p.category===currentFilter;var tot=0;(p.colors||[]).forEach(function(c){tot+=c.available_qty||0});var mq=tot>=minQ&&tot<=maxQ;return ms&&mc&&mq});if(f.length===0){document.getElementById("productGrid").innerHTML="";document.getElementById("emptyState").classList.remove("hidden")}else{document.getElementById("emptyState").classList.add("hidden");var h="";f.forEach(function(pr){var cols=pr.colors||[];var tot=0;cols.forEach(function(c){tot+=c.available_qty||0});var ch="";var mx=Math.min(cols.length,3);for(var d=0;d<mx;d++){ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+(cols[d].available_qty||0).toLocaleString()+"</span></div>"}if(cols.length>3)ch+="<div class=\\"color-row\\" style=\\"color:#999\\">+"+(cols.length-3)+" more</div>";var imgUrl=getImageUrl(pr.image_url);var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";var sel=selectedProducts.indexOf(pr.id)!==-1?"selected":"";var selModeClass=selectionMode?"selection-mode":"";h+="<div class=\\"product-card "+sel+" "+selModeClass+"\\" onclick=\\"handleCardClick("+pr.id+",event)\\"><div class=\\"select-badge\\">✓</div><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+pr.style_id+"</div><div class=\\"product-name\\">"+pr.name+"</div><div class=\\"color-list\\">"+ch+"</div><div class=\\"total-row\\"><span>Total</span><span>"+tot.toLocaleString()+"</span></div></div></div>"});document.getElementById("productGrid").innerHTML=h}document.getElementById("totalStyles").textContent=f.length;var tu=0;f.forEach(function(p){(p.colors||[]).forEach(function(c){tu+=c.available_qty||0})});document.getElementById("totalUnits").textContent=tu.toLocaleString()}';
+    html += 'function renderProducts(){var s=document.getElementById("searchInput").value.toLowerCase();var minQ=parseInt(document.getElementById("minQty").value)||0;var maxQ=parseInt(document.getElementById("maxQty").value)||999999999;var f=allProducts.filter(function(p){var ms=!s||p.style_id.toLowerCase().indexOf(s)!==-1||p.name.toLowerCase().indexOf(s)!==-1;var mc=currentFilter==="all"||p.category===currentFilter;var tot=0;(p.colors||[]).forEach(function(c){tot+=c.available_qty||0});var mq=tot>=minQ&&tot<=maxQ;var msp=true;if(specialFilter==="new"){msp=p.first_seen_import===lastImportId}else if(specialFilter==="picks"){msp=userPicks.indexOf(p.id)!==-1}else if(specialFilter==="notes"){msp=!!userNotes[p.id]}return ms&&mc&&mq&&msp});f.sort(function(a,b){var ta=0,tb=0;(a.colors||[]).forEach(function(c){ta+=c.available_qty||0});(b.colors||[]).forEach(function(c){tb+=c.available_qty||0});if(currentSort==="qty-high")return tb-ta;if(currentSort==="qty-low")return ta-tb;if(currentSort==="name-desc")return b.name.localeCompare(a.name);if(currentSort==="newest")return(b.first_seen_import||0)-(a.first_seen_import||0);return a.name.localeCompare(b.name)});products=f;if(f.length===0){document.getElementById("productGrid").innerHTML="";document.getElementById("emptyState").classList.remove("hidden")}else{document.getElementById("emptyState").classList.add("hidden");var h="";var isListView=currentSize==="list";f.forEach(function(pr,idx){var cols=pr.colors||[];var tot=0;cols.forEach(function(c){tot+=c.available_qty||0});var ch="";if(!isListView){var mx=Math.min(cols.length,3);for(var d=0;d<mx;d++){ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+(cols[d].available_qty||0).toLocaleString()+"</span></div>"}if(cols.length>3)ch+="<div class=\\"color-row\\" style=\\"color:#999\\">+"+(cols.length-3)+" more</div>"}var listCols="";if(isListView){cols.slice(0,5).forEach(function(c){listCols+=c.color_name+": "+(c.available_qty||0).toLocaleString()+"; "});if(cols.length>5)listCols+="+"+(cols.length-5)+" more"}var imgUrl=getImageUrl(pr.image_url);var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";var sel=selectedProducts.indexOf(pr.id)!==-1?"selected":"";var selModeClass=selectionMode?"selection-mode":"";var listClass=isListView?"list-view":"";var isPicked=userPicks.indexOf(pr.id)!==-1;var hasNote=!!userNotes[pr.id];h+="<div class=\\"product-card "+sel+" "+selModeClass+" "+listClass+"\\" data-idx=\\""+idx+"\\" onclick=\\"handleCardClick("+pr.id+",event)\\"><div class=\\"select-badge\\">✓</div><div class=\\"pick-badge "+(isPicked?"active":"")+"\\">"+(isPicked?"♥":"♡")+"</div><div class=\\"note-badge "+(hasNote?"has-note":"")+"\\">📝</div><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+pr.style_id+"</div><div class=\\"product-name\\">"+pr.name+"</div>"+(isListView?"<div class=\\"list-colors\\">"+listCols+"</div>":"<div class=\\"color-list\\">"+ch+"</div>")+"<div class=\\"total-row\\"><span>Total</span><span>"+tot.toLocaleString()+"</span></div></div></div>"});document.getElementById("productGrid").innerHTML=h}document.getElementById("totalStyles").textContent=f.length;var tu=0;f.forEach(function(p){(p.colors||[]).forEach(function(c){tu+=c.available_qty||0})});document.getElementById("totalUnits").textContent=tu.toLocaleString();focusedIndex=-1}';
     
     html += 'document.getElementById("searchInput").addEventListener("input",renderProducts);';
     html += 'document.getElementById("minQty").addEventListener("input",renderProducts);';
@@ -418,7 +533,7 @@ function getHTML() {
     // Record PDF download
     html += 'document.getElementById("pdfLink").addEventListener("click",function(){if(currentShareId){fetch("/api/selections/"+currentShareId+"/record-pdf",{method:"POST"}).then(function(){loadShares()})}});';
     
-    html += 'document.getElementById("csvFile").addEventListener("change",function(e){var f=e.target.files[0];if(!f)return;var fd=new FormData();fd.append("file",f);document.getElementById("importStatus").innerHTML="Importing...";fetch("/api/import",{method:"POST",body:fd}).then(function(r){return r.json()}).then(function(d){document.getElementById("importStatus").innerHTML=d.success?"<span class=success>Imported "+d.imported+" products</span>":"<span class=error>"+d.error+"</span>";loadProducts();loadHistory();loadDataFreshness()})});';
+    html += 'document.getElementById("csvFile").addEventListener("change",function(e){var f=e.target.files[0];if(!f)return;var fd=new FormData();fd.append("file",f);document.getElementById("importStatus").innerHTML="Importing...";fetch("/api/import",{method:"POST",body:fd}).then(function(r){return r.json()}).then(function(d){document.getElementById("importStatus").innerHTML=d.success?"<span class=success>Imported "+d.imported+" products"+(d.newArrivals?" ("+d.newArrivals+" new)":"")+"</span>":"<span class=error>"+d.error+"</span>";loadProducts();loadHistory();loadDataFreshness()})});';
     html += 'document.getElementById("clearBtn").addEventListener("click",function(){if(!confirm("Delete all products?"))return;fetch("/api/products/clear",{method:"POST"}).then(function(){loadProducts()})});';
     
     html += 'function loadUsers(){fetch("/api/users").then(function(r){return r.json()}).then(function(u){var h="";u.forEach(function(x){h+="<tr><td>"+x.username+"</td><td>"+x.role+"</td><td><button class=\\"btn btn-danger\\" onclick=\\"deleteUser("+x.id+")\\">Delete</button></td></tr>"});document.getElementById("usersTable").innerHTML=h})}';
@@ -429,6 +544,28 @@ function getHTML() {
     
     html += 'document.getElementById("modalClose").addEventListener("click",function(){document.getElementById("modal").classList.remove("active")});';
     html += 'document.getElementById("modal").addEventListener("click",function(e){if(e.target.id==="modal")document.getElementById("modal").classList.remove("active")});';
+    
+    // Modal pick button
+    html += 'document.getElementById("modalPickBtn").addEventListener("click",function(){if(currentModalProductId){togglePick(currentModalProductId,{stopPropagation:function(){}});var isPicked=userPicks.indexOf(currentModalProductId)!==-1;this.textContent=isPicked?"♥ In My Picks":"♡ Add to My Picks"}});';
+    
+    // Modal compare button
+    html += 'document.getElementById("modalCompareBtn").addEventListener("click",function(){if(currentModalProductId){toggleCompare(currentModalProductId)}});';
+    
+    // Save note button
+    html += 'document.getElementById("saveNoteBtn").addEventListener("click",function(){if(currentModalProductId){var note=document.getElementById("modalNote").value;fetch("/api/notes/"+currentModalProductId,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({note:note})}).then(function(){if(note.trim()){userNotes[currentModalProductId]=note}else{delete userNotes[currentModalProductId]}renderProducts()})}});';
+    
+    // Compare functionality
+    html += 'document.getElementById("compareBtn").addEventListener("click",showCompare);';
+    html += 'document.getElementById("showCompareBtn").addEventListener("click",showCompare);';
+    html += 'document.getElementById("clearCompareBtn").addEventListener("click",function(){compareProducts=[];updateCompareUI();renderProducts()});';
+    html += 'document.getElementById("closeCompareBtn").addEventListener("click",function(){document.getElementById("compareModal").classList.remove("active")});';
+    
+    html += 'function showCompare(){if(compareProducts.length===0)return;var h="";compareProducts.forEach(function(id){var pr=allProducts.find(function(p){return p.id===id});if(!pr)return;var imgUrl=getImageUrl(pr.image_url);var cols=pr.colors||[];var tot=0;var ch="";cols.forEach(function(c){tot+=c.available_qty||0;ch+="<div class=\\"color-row\\"><span>"+c.color_name+"</span><span>"+(c.available_qty||0).toLocaleString()+"</span></div>"});h+="<div class=\\"compare-item\\"><img src=\\""+imgUrl+"\\" onerror=\\"this.style.display=\'none\'\\"><h3>"+pr.name+"</h3><p style=\\"color:#666;font-size:0.875rem\\">"+pr.style_id+"</p><p style=\\"font-weight:bold;margin:0.5rem 0\\">Total: "+tot.toLocaleString()+"</p><div class=\\"compare-colors\\">"+ch+"</div></div>"});document.getElementById("compareGrid").innerHTML=h;document.getElementById("compareModal").classList.add("active")}';
+    
+    // Keyboard navigation
+    html += 'document.addEventListener("keydown",function(e){if(document.getElementById("modal").classList.contains("active")){if(e.key==="Escape"){document.getElementById("modal").classList.remove("active")}return}if(document.getElementById("compareModal").classList.contains("active")){if(e.key==="Escape"){document.getElementById("compareModal").classList.remove("active")}return}if(document.activeElement.tagName==="INPUT"||document.activeElement.tagName==="TEXTAREA")return;var cards=document.querySelectorAll(".product-card");if(cards.length===0)return;if(e.key==="ArrowRight"||e.key==="ArrowDown"){e.preventDefault();focusedIndex=Math.min(focusedIndex+1,cards.length-1);updateFocus(cards)}else if(e.key==="ArrowLeft"||e.key==="ArrowUp"){e.preventDefault();focusedIndex=Math.max(focusedIndex-1,0);updateFocus(cards)}else if(e.key==="Enter"&&focusedIndex>=0){e.preventDefault();var id=parseInt(products[focusedIndex].id);showProductModal(id)}});';
+    
+    html += 'function updateFocus(cards){cards.forEach(function(c,i){c.classList.toggle("focused",i===focusedIndex)});if(focusedIndex>=0&&cards[focusedIndex]){cards[focusedIndex].scrollIntoView({block:"nearest",behavior:"smooth"})}}';
     
     html += 'checkSession();';
     html += '</script></body></html>';

@@ -96,21 +96,13 @@ async function initDB() {
     }
 }
 
-// Auth middleware
+// Auth middleware - DISABLED for now
 function requireAuth(req, res, next) {
-    if (req.session && req.session.userId) {
-        next();
-    } else {
-        res.status(401).json({ error: 'Not authenticated' });
-    }
+    next(); // Skip auth check
 }
 
 function requireAdmin(req, res, next) {
-    if (req.session && req.session.role === 'admin') {
-        next();
-    } else {
-        res.status(403).json({ error: 'Admin access required' });
-    }
+    next(); // Skip admin check
 }
 
 // Auth routes
@@ -1027,38 +1019,21 @@ function getHTML() {
         let currentCategory = 'all';
         let currentUser = null;
         
-        // Check session on load
+        // Check session on load - DISABLED, go straight to app
         async function checkSession() {
-            try {
-                const res = await fetch('/api/session');
-                const data = await res.json();
-                
-                if (data.authenticated) {
-                    currentUser = data.user;
-                    showApp();
-                } else {
-                    showLogin();
-                }
-            } catch (err) {
-                showLogin();
-            }
+            currentUser = { username: 'admin', role: 'admin' };
+            showApp();
         }
         
         function showLogin() {
-            document.getElementById('loginScreen').classList.remove('hidden');
-            document.getElementById('appScreen').classList.add('hidden');
+            showApp(); // Skip login, go to app
         }
         
         function showApp() {
             document.getElementById('loginScreen').classList.add('hidden');
             document.getElementById('appScreen').classList.remove('hidden');
-            document.getElementById('userDisplay').textContent = currentUser.username + ' (' + currentUser.role + ')';
-            
-            if (currentUser.role !== 'admin') {
-                document.getElementById('adminTab').classList.add('hidden');
-            } else {
-                document.getElementById('adminTab').classList.remove('hidden');
-            }
+            document.getElementById('userDisplay').textContent = 'Admin Mode';
+            document.getElementById('adminTab').classList.remove('hidden');
             
             loadProducts();
             loadZohoStatus();

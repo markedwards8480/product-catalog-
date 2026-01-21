@@ -365,142 +365,313 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
         var styleId = req.params.styleId;
         var orgId = process.env.ZOHO_BOOKS_ORG_ID || process.env.ZOHO_ORGANIZATION_ID || '677681121';
         
+        console.log('Sales History Request - Style:', styleId, 'Org:', orgId);
+        
         if (!zohoAccessToken) {
             var tokenResult = await refreshZohoToken();
             if (!tokenResult.success) {
-                return res.json({ success: false, error: 'Failed to get Zoho token' });
+                console.log('Token refresh failed:', tokenResult.error);
+                return res.json({ success: false, error: 'Failed to get Zoho token: ' + tokenResult.error });
             }
         }
         
         var results = [];
         var seenIds = {};
+        var debugInfo = { invoiceSearches: [], soSearches: [], errors: [] };
         
         // Helper function to make Zoho Books API calls with retry
-        async function zohoApiCall(url) {
-            var response = await fetch(url, {
-                headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
-            });
-            if (response.status === 401) {
-                await refreshZohoToken();
-                response = await fetch(url, {
+        async function zohoApiCall(url, label) {
+            console.log('API Call [' + label + ']:', url);
+            try {
+                var response = await fetch(url, {
                     headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
                 });
+                console.log('Response status [' + label + ']:', response.status);
+                
+                if (response.status === 401) {
+                    console.log('401 - Refreshing token...');
+                    await refreshZohoToken();
+                    response = await fetch(url, {
+                        headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
+                    });
+                    console.log('Retry status [' + label + ']:', response.status);
+                }
+                
+                if (!response.ok) {
+                    var errorText = await response.text();
+                    console.log('Error response [' + label + ']:', errorText);
+                    debugInfo.errors.push({ label: label, status: response.status, error: errorText });
+                    return null;
+                }
+                
+                var data = await response.json();
+                return data;
+            } catch (err) {
+                console.log('Fetch error [' + label + ']:', err.message);
+                debugInfo.errors.push({ label: label, error: err.message });
+                return null;
             }
-            if (!response.ok) return null;
-            return response.json();
         }
         
-        // Search invoices - use item_name search
-        // The styleId might be "85715J-AB" and items are "85715J-AB-BLUE-XS"
-        try {
-            var invoiceUrl = 'https://www.zohoapis.com/books/v3/invoices?organization_id=' + orgId + '&item_name_contains=' + encodeURIComponent(styleId);
-            var invoiceData = await zohoApiCall(invoiceUrl);
-            
-            if (invoiceData && invoiceData.invoices) {
-                for (var i = 0; i < invoiceData.invoices.length; i++) {
-                    var inv = invoiceData.invoices[i];
-                    if (seenIds['inv-' + inv.invoice_id]) continue;
-                    seenIds['inv-' + inv.invoice_id] = true;
+        // Extract base style for broader search (e.g., "71187Y-AB" -> "71187Y")
+        var baseStyle = styleId.split('-')[0];
+        var searchTerms = [styleId];
+        if (baseStyle !== styleId) {
+            searchTerms.push(baseStyle);
+        }
+        
+        // Search invoices with multiple strategies
+        for (var st = 0; st < searchTerms.length; st++) {
+            var searchTerm = searchTerms[st];
+            try {
+                // Strategy 1: item_name_contains
+                var invoiceUrl = 'https://www.zohoapis.com/books/v3/invoices?organization_id=' + orgId + '&item_name_contains=' + encodeURIComponent(searchTerm);
+                debugInfo.invoiceSearches.push({ term: searchTerm, strategy: 'item_name_contains' });
+                var invoiceData = await zohoApiCall(invoiceUrl, 'invoice-item-' + searchTerm);
+                
+                if (invoiceData && invoiceData.invoices && invoiceData.invoices.length > 0) {
+                    console.log('Found', invoiceData.invoices.length, 'invoices for', searchTerm);
                     
-                    // Get full invoice details to get line items
-                    var detailUrl = 'https://www.zohoapis.com/books/v3/invoices/' + inv.invoice_id + '?organization_id=' + orgId;
-                    var detailData = await zohoApiCall(detailUrl);
-                    
-                    if (detailData && detailData.invoice && detailData.invoice.line_items) {
-                        var totalQty = 0;
-                        var matchingItems = [];
+                    for (var i = 0; i < invoiceData.invoices.length; i++) {
+                        var inv = invoiceData.invoices[i];
+                        if (seenIds['inv-' + inv.invoice_id]) continue;
+                        seenIds['inv-' + inv.invoice_id] = true;
                         
-                        for (var j = 0; j < detailData.invoice.line_items.length; j++) {
-                            var item = detailData.invoice.line_items[j];
-                            var itemName = (item.name || item.item_name || '').toUpperCase();
-                            var itemSku = (item.sku || '').toUpperCase();
-                            var searchStyle = styleId.toUpperCase();
+                        // Get full invoice details to get line items
+                        var detailUrl = 'https://www.zohoapis.com/books/v3/invoices/' + inv.invoice_id + '?organization_id=' + orgId;
+                        var detailData = await zohoApiCall(detailUrl, 'invoice-detail-' + inv.invoice_id);
+                        
+                        if (detailData && detailData.invoice && detailData.invoice.line_items) {
+                            var totalQty = 0;
+                            var totalAmount = 0;
+                            var matchingItems = [];
                             
-                            // Check if item name or SKU starts with the style ID
-                            if (itemName.indexOf(searchStyle) === 0 || itemSku.indexOf(searchStyle) === 0) {
-                                totalQty += item.quantity || 0;
-                                matchingItems.push({
-                                    name: item.name || item.item_name,
-                                    quantity: item.quantity,
-                                    rate: item.rate,
-                                    amount: item.item_total
+                            for (var j = 0; j < detailData.invoice.line_items.length; j++) {
+                                var item = detailData.invoice.line_items[j];
+                                var itemName = (item.name || item.item_name || '').toUpperCase();
+                                var itemSku = (item.sku || '').toUpperCase();
+                                var searchStyleUpper = styleId.toUpperCase();
+                                var baseStyleUpper = baseStyle.toUpperCase();
+                                
+                                // Check if item name or SKU contains the style ID or base style
+                                if (itemName.indexOf(searchStyleUpper) !== -1 || itemSku.indexOf(searchStyleUpper) !== -1 ||
+                                    itemName.indexOf(baseStyleUpper) !== -1 || itemSku.indexOf(baseStyleUpper) !== -1) {
+                                    totalQty += item.quantity || 0;
+                                    totalAmount += item.item_total || 0;
+                                    matchingItems.push({
+                                        name: item.name || item.item_name,
+                                        quantity: item.quantity,
+                                        rate: item.rate,
+                                        amount: item.item_total
+                                    });
+                                }
+                            }
+                            
+                            if (totalQty > 0) {
+                                results.push({
+                                    type: 'invoice',
+                                    documentNumber: inv.invoice_number,
+                                    date: inv.date,
+                                    customerName: inv.customer_name,
+                                    status: inv.status,
+                                    quantity: totalQty,
+                                    amount: totalAmount,
+                                    total: inv.total,
+                                    items: matchingItems
                                 });
                             }
                         }
-                        
-                        if (totalQty > 0) {
-                            results.push({
-                                type: 'invoice',
-                                documentNumber: inv.invoice_number,
-                                date: inv.date,
-                                customerName: inv.customer_name,
-                                status: inv.status,
-                                quantity: totalQty,
-                                total: inv.total,
-                                items: matchingItems
-                            });
-                        }
                     }
                 }
-            }
-        } catch (invErr) {
-            console.error('Invoice search error:', invErr.message);
-        }
-        
-        // Search sales orders
-        try {
-            var soUrl = 'https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId + '&item_name_contains=' + encodeURIComponent(styleId);
-            var soData = await zohoApiCall(soUrl);
-            
-            if (soData && soData.salesorders) {
-                for (var k = 0; k < soData.salesorders.length; k++) {
-                    var so = soData.salesorders[k];
-                    if (seenIds['so-' + so.salesorder_id]) continue;
-                    seenIds['so-' + so.salesorder_id] = true;
+                
+                // Strategy 2: search_text (general search)
+                var searchUrl = 'https://www.zohoapis.com/books/v3/invoices?organization_id=' + orgId + '&search_text=' + encodeURIComponent(searchTerm);
+                debugInfo.invoiceSearches.push({ term: searchTerm, strategy: 'search_text' });
+                var searchData = await zohoApiCall(searchUrl, 'invoice-search-' + searchTerm);
+                
+                if (searchData && searchData.invoices && searchData.invoices.length > 0) {
+                    console.log('Search found', searchData.invoices.length, 'invoices for', searchTerm);
                     
-                    // Get full sales order details
-                    var soDetailUrl = 'https://www.zohoapis.com/books/v3/salesorders/' + so.salesorder_id + '?organization_id=' + orgId;
-                    var soDetailData = await zohoApiCall(soDetailUrl);
-                    
-                    if (soDetailData && soDetailData.salesorder && soDetailData.salesorder.line_items) {
-                        var soTotalQty = 0;
-                        var soMatchingItems = [];
+                    for (var i2 = 0; i2 < searchData.invoices.length; i2++) {
+                        var inv2 = searchData.invoices[i2];
+                        if (seenIds['inv-' + inv2.invoice_id]) continue;
+                        seenIds['inv-' + inv2.invoice_id] = true;
                         
-                        for (var m = 0; m < soDetailData.salesorder.line_items.length; m++) {
-                            var soItem = soDetailData.salesorder.line_items[m];
-                            var soItemName = (soItem.name || soItem.item_name || '').toUpperCase();
-                            var soItemSku = (soItem.sku || '').toUpperCase();
-                            var soSearchStyle = styleId.toUpperCase();
+                        var detailUrl2 = 'https://www.zohoapis.com/books/v3/invoices/' + inv2.invoice_id + '?organization_id=' + orgId;
+                        var detailData2 = await zohoApiCall(detailUrl2, 'invoice-detail2-' + inv2.invoice_id);
+                        
+                        if (detailData2 && detailData2.invoice && detailData2.invoice.line_items) {
+                            var totalQty2 = 0;
+                            var totalAmount2 = 0;
+                            var matchingItems2 = [];
                             
-                            if (soItemName.indexOf(soSearchStyle) === 0 || soItemSku.indexOf(soSearchStyle) === 0) {
-                                soTotalQty += soItem.quantity || 0;
-                                soMatchingItems.push({
-                                    name: soItem.name || soItem.item_name,
-                                    quantity: soItem.quantity,
-                                    rate: soItem.rate,
-                                    amount: soItem.item_total
+                            for (var j2 = 0; j2 < detailData2.invoice.line_items.length; j2++) {
+                                var item2 = detailData2.invoice.line_items[j2];
+                                var itemName2 = (item2.name || item2.item_name || '').toUpperCase();
+                                var itemSku2 = (item2.sku || '').toUpperCase();
+                                var searchStyleUpper2 = styleId.toUpperCase();
+                                var baseStyleUpper2 = baseStyle.toUpperCase();
+                                
+                                if (itemName2.indexOf(searchStyleUpper2) !== -1 || itemSku2.indexOf(searchStyleUpper2) !== -1 ||
+                                    itemName2.indexOf(baseStyleUpper2) !== -1 || itemSku2.indexOf(baseStyleUpper2) !== -1) {
+                                    totalQty2 += item2.quantity || 0;
+                                    totalAmount2 += item2.item_total || 0;
+                                    matchingItems2.push({
+                                        name: item2.name || item2.item_name,
+                                        quantity: item2.quantity,
+                                        rate: item2.rate,
+                                        amount: item2.item_total
+                                    });
+                                }
+                            }
+                            
+                            if (totalQty2 > 0) {
+                                results.push({
+                                    type: 'invoice',
+                                    documentNumber: inv2.invoice_number,
+                                    date: inv2.date,
+                                    customerName: inv2.customer_name,
+                                    status: inv2.status,
+                                    quantity: totalQty2,
+                                    amount: totalAmount2,
+                                    total: inv2.total,
+                                    items: matchingItems2
                                 });
                             }
                         }
+                    }
+                }
+            } catch (invErr) {
+                console.error('Invoice search error:', invErr.message);
+                debugInfo.errors.push({ type: 'invoice', term: searchTerm, error: invErr.message });
+            }
+        }
+        
+        // Search sales orders with multiple strategies
+        for (var st2 = 0; st2 < searchTerms.length; st2++) {
+            var searchTerm2 = searchTerms[st2];
+            try {
+                // Strategy 1: item_name_contains
+                var soUrl = 'https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId + '&item_name_contains=' + encodeURIComponent(searchTerm2);
+                debugInfo.soSearches.push({ term: searchTerm2, strategy: 'item_name_contains' });
+                var soData = await zohoApiCall(soUrl, 'so-item-' + searchTerm2);
+                
+                if (soData && soData.salesorders && soData.salesorders.length > 0) {
+                    console.log('Found', soData.salesorders.length, 'sales orders for', searchTerm2);
+                    
+                    for (var k = 0; k < soData.salesorders.length; k++) {
+                        var so = soData.salesorders[k];
+                        if (seenIds['so-' + so.salesorder_id]) continue;
+                        seenIds['so-' + so.salesorder_id] = true;
                         
-                        if (soTotalQty > 0) {
-                            results.push({
-                                type: 'salesorder',
-                                documentNumber: so.salesorder_number,
-                                date: so.date,
-                                customerName: so.customer_name,
-                                status: so.status,
-                                quantity: soTotalQty,
-                                total: so.total,
-                                items: soMatchingItems,
-                                isOpen: so.status === 'open' || so.status === 'pending'
-                            });
+                        var soDetailUrl = 'https://www.zohoapis.com/books/v3/salesorders/' + so.salesorder_id + '?organization_id=' + orgId;
+                        var soDetailData = await zohoApiCall(soDetailUrl, 'so-detail-' + so.salesorder_id);
+                        
+                        if (soDetailData && soDetailData.salesorder && soDetailData.salesorder.line_items) {
+                            var soTotalQty = 0;
+                            var soTotalAmount = 0;
+                            var soMatchingItems = [];
+                            
+                            for (var m = 0; m < soDetailData.salesorder.line_items.length; m++) {
+                                var soItem = soDetailData.salesorder.line_items[m];
+                                var soItemName = (soItem.name || soItem.item_name || '').toUpperCase();
+                                var soItemSku = (soItem.sku || '').toUpperCase();
+                                var soSearchStyleUpper = styleId.toUpperCase();
+                                var soBaseStyleUpper = baseStyle.toUpperCase();
+                                
+                                if (soItemName.indexOf(soSearchStyleUpper) !== -1 || soItemSku.indexOf(soSearchStyleUpper) !== -1 ||
+                                    soItemName.indexOf(soBaseStyleUpper) !== -1 || soItemSku.indexOf(soBaseStyleUpper) !== -1) {
+                                    soTotalQty += soItem.quantity || 0;
+                                    soTotalAmount += soItem.item_total || 0;
+                                    soMatchingItems.push({
+                                        name: soItem.name || soItem.item_name,
+                                        quantity: soItem.quantity,
+                                        rate: soItem.rate,
+                                        amount: soItem.item_total
+                                    });
+                                }
+                            }
+                            
+                            if (soTotalQty > 0) {
+                                results.push({
+                                    type: 'salesorder',
+                                    documentNumber: so.salesorder_number,
+                                    date: so.date,
+                                    customerName: so.customer_name,
+                                    status: so.status,
+                                    quantity: soTotalQty,
+                                    amount: soTotalAmount,
+                                    total: so.total,
+                                    items: soMatchingItems,
+                                    isOpen: so.status === 'open' || so.status === 'pending' || so.status === 'draft'
+                                });
+                            }
                         }
                     }
                 }
+                
+                // Strategy 2: search_text
+                var soSearchUrl = 'https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId + '&search_text=' + encodeURIComponent(searchTerm2);
+                debugInfo.soSearches.push({ term: searchTerm2, strategy: 'search_text' });
+                var soSearchData = await zohoApiCall(soSearchUrl, 'so-search-' + searchTerm2);
+                
+                if (soSearchData && soSearchData.salesorders && soSearchData.salesorders.length > 0) {
+                    console.log('Search found', soSearchData.salesorders.length, 'sales orders for', searchTerm2);
+                    
+                    for (var k2 = 0; k2 < soSearchData.salesorders.length; k2++) {
+                        var so2 = soSearchData.salesorders[k2];
+                        if (seenIds['so-' + so2.salesorder_id]) continue;
+                        seenIds['so-' + so2.salesorder_id] = true;
+                        
+                        var soDetailUrl2 = 'https://www.zohoapis.com/books/v3/salesorders/' + so2.salesorder_id + '?organization_id=' + orgId;
+                        var soDetailData2 = await zohoApiCall(soDetailUrl2, 'so-detail2-' + so2.salesorder_id);
+                        
+                        if (soDetailData2 && soDetailData2.salesorder && soDetailData2.salesorder.line_items) {
+                            var soTotalQty2 = 0;
+                            var soTotalAmount2 = 0;
+                            var soMatchingItems2 = [];
+                            
+                            for (var m2 = 0; m2 < soDetailData2.salesorder.line_items.length; m2++) {
+                                var soItem2 = soDetailData2.salesorder.line_items[m2];
+                                var soItemName2 = (soItem2.name || soItem2.item_name || '').toUpperCase();
+                                var soItemSku2 = (soItem2.sku || '').toUpperCase();
+                                var soSearchStyleUpper2 = styleId.toUpperCase();
+                                var soBaseStyleUpper2 = baseStyle.toUpperCase();
+                                
+                                if (soItemName2.indexOf(soSearchStyleUpper2) !== -1 || soItemSku2.indexOf(soSearchStyleUpper2) !== -1 ||
+                                    soItemName2.indexOf(soBaseStyleUpper2) !== -1 || soItemSku2.indexOf(soBaseStyleUpper2) !== -1) {
+                                    soTotalQty2 += soItem2.quantity || 0;
+                                    soTotalAmount2 += soItem2.item_total || 0;
+                                    soMatchingItems2.push({
+                                        name: soItem2.name || soItem2.item_name,
+                                        quantity: soItem2.quantity,
+                                        rate: soItem2.rate,
+                                        amount: soItem2.item_total
+                                    });
+                                }
+                            }
+                            
+                            if (soTotalQty2 > 0) {
+                                results.push({
+                                    type: 'salesorder',
+                                    documentNumber: so2.salesorder_number,
+                                    date: so2.date,
+                                    customerName: so2.customer_name,
+                                    status: so2.status,
+                                    quantity: soTotalQty2,
+                                    amount: soTotalAmount2,
+                                    total: so2.total,
+                                    items: soMatchingItems2,
+                                    isOpen: so2.status === 'open' || so2.status === 'pending' || so2.status === 'draft'
+                                });
+                            }
+                        }
+                    }
+                }
+            } catch (soErr) {
+                console.error('Sales order search error:', soErr.message);
+                debugInfo.errors.push({ type: 'salesorder', term: searchTerm2, error: soErr.message });
             }
-        } catch (soErr) {
-            console.error('Sales order search error:', soErr.message);
         }
         
         // Sort by date descending
@@ -509,31 +680,40 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
         });
         
         // Calculate summary
-        var totalInvoiced = 0;
-        var totalOpenOrders = 0;
+        var totalInvoicedQty = 0;
+        var totalInvoicedDollars = 0;
+        var totalOpenOrdersQty = 0;
+        var totalOpenOrdersDollars = 0;
         var invoiceCount = 0;
         var openOrderCount = 0;
         
         for (var n = 0; n < results.length; n++) {
             if (results[n].type === 'invoice') {
-                totalInvoiced += results[n].quantity;
+                totalInvoicedQty += results[n].quantity;
+                totalInvoicedDollars += results[n].amount || 0;
                 invoiceCount++;
             } else if (results[n].isOpen) {
-                totalOpenOrders += results[n].quantity;
+                totalOpenOrdersQty += results[n].quantity;
+                totalOpenOrdersDollars += results[n].amount || 0;
                 openOrderCount++;
             }
         }
+        
+        console.log('Sales History Results:', results.length, 'records found');
         
         res.json({
             success: true,
             styleId: styleId,
             summary: {
-                totalInvoiced: totalInvoiced,
+                totalInvoiced: totalInvoicedQty,
+                totalInvoicedDollars: totalInvoicedDollars,
                 invoiceCount: invoiceCount,
-                totalOpenOrders: totalOpenOrders,
+                totalOpenOrders: totalOpenOrdersQty,
+                totalOpenOrdersDollars: totalOpenOrdersDollars,
                 openOrderCount: openOrderCount
             },
-            history: results
+            history: results,
+            debug: debugInfo
         });
         
     } catch (err) {
@@ -950,8 +1130,7 @@ function getHTML() {
     
     html += 'function showProductModal(id){currentModalProductId=id;var pr=products.find(function(p){return p.id===id});if(!pr)return;var imgUrl=getImageUrl(pr.image_url);document.getElementById("modalImage").src=imgUrl||"";document.getElementById("modalStyle").textContent=pr.style_id;document.getElementById("modalName").textContent=pr.name;document.getElementById("modalCategory").textContent=pr.category||"";var cols=pr.colors||[];var totNow=0,totLts=0;var ch="";cols.forEach(function(c){var aNow=c.available_now||c.available_qty||0;var lts=c.left_to_sell||0;totNow+=aNow;totLts+=lts;ch+="<div class=\\"color-row\\" style=\\"display:grid;grid-template-columns:1fr auto auto;gap:1rem\\"><span>"+c.color_name+"</span><span style=\\"text-align:right\\">"+aNow.toLocaleString()+"</span><span style=\\"text-align:right;color:#666\\">"+lts.toLocaleString()+"</span></div>"});document.getElementById("modalColors").innerHTML="<div style=\\"display:grid;grid-template-columns:1fr auto auto;gap:1rem;font-weight:bold;padding-bottom:0.5rem;margin-bottom:0.5rem;border-bottom:1px solid #ddd;font-size:0.8rem;color:#666\\"><span>Color</span><span style=\\"text-align:right\\">Avail Now</span><span style=\\"text-align:right\\">Left to Sell</span></div>"+ch;document.getElementById("modalTotal").innerHTML="<span style=\\"margin-right:2rem\\">📦 Now: "+totNow.toLocaleString()+"</span><span>📊 LTS: "+totLts.toLocaleString()+"</span>";document.getElementById("modalNote").value=userNotes[id]||"";var isPicked=userPicks.indexOf(id)!==-1;document.getElementById("modalPickBtn").textContent=isPicked?"♥ In My Picks":"♡ Add to My Picks";document.getElementById("modal").classList.add("active");loadSalesHistory(pr.style_id)}';
     
-    html += 'function loadSalesHistory(styleId){document.getElementById("salesHistoryLoading").textContent="(loading...)";document.getElementById("salesHistorySummary").innerHTML="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#666;padding:0.5rem\\">Loading sales history...</div>";fetch("/api/sales-history/"+encodeURIComponent(styleId)).then(function(r){return r.json()}).then(function(d){document.getElementById("salesHistoryLoading").textContent="";if(!d.success){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">Unable to load sales history</div>";return}var sum=d.summary;document.getElementById("salesHistorySummary").innerHTML="<div style=\\"padding:0.5rem 0.75rem;background:#e8f5e9;border-radius:4px\\"><div style=\\"font-weight:bold;color:#2e7d32\\">"+sum.totalInvoiced.toLocaleString()+"</div><div style=\\"font-size:0.75rem;color:#666\\">Units Invoiced ("+sum.invoiceCount+" orders)</div></div><div style=\\"padding:0.5rem 0.75rem;background:#fff3e0;border-radius:4px\\"><div style=\\"font-weight:bold;color:#ef6c00\\">"+sum.totalOpenOrders.toLocaleString()+"</div><div style=\\"font-size:0.75rem;color:#666\\">Open Orders ("+sum.openOrderCount+")</div></div>";if(d.history.length===0){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">No sales history found for this style</div>";return}var h="<table style=\\"width:100%;border-collapse:collapse;font-size:0.8rem\\"><thead><tr style=\\"background:#f5f5f5\\"><th style=\\"text-align:left;padding:0.4rem\\">Date</th><th style=\\"text-align:left;padding:0.4rem\\">Customer</th><th style=\\"text-align:left;padding:0.4rem\\">Type</th><th style=\\"text-align:right;padding:0.4rem\\">Qty</th></tr></thead><tbody>";d.history.forEach(function(rec){var typeLabel=rec.type==="invoice"?"<span style=\\"color:#2e7d32\\">Invoice</span>":"<span style=\\"color:#ef6c00\\">SO"+(rec.isOpen?" (Open)":"")+"</span>";var dt=new Date(rec.date).toLocaleDateString();h+="<tr style=\\"border-bottom:1px solid #eee\\"><td style=\\"padding:0.4rem\\">"+dt+"</td><td style=\\"padding:0.4rem\\">"+rec.customerName+"</td><td style=\\"padding:0.4rem\\">"+typeLabel+"</td><td style=\\"padding:0.4rem;text-align:right\\">"+rec.quantity.toLocaleString()+"</td></tr>"});h+="</tbody></table>";document.getElementById("salesHistoryList").innerHTML=h}).catch(function(err){document.getElementById("salesHistoryLoading").textContent="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">Error loading sales history</div>"})}';
-    
+    html += 'function loadSalesHistory(styleId){document.getElementById("salesHistoryLoading").textContent="(loading...)";document.getElementById("salesHistorySummary").innerHTML="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#666;padding:0.5rem\\">Loading sales history...</div>";fetch("/api/sales-history/"+encodeURIComponent(styleId)).then(function(r){return r.json()}).then(function(d){document.getElementById("salesHistoryLoading").textContent="";if(!d.success){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">Unable to load sales history"+(d.error?": "+d.error:"")+"</div>";return}var sum=d.summary;var invDollars=sum.totalInvoicedDollars?"$"+sum.totalInvoicedDollars.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"";var openDollars=sum.totalOpenOrdersDollars?"$"+sum.totalOpenOrdersDollars.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"";document.getElementById("salesHistorySummary").innerHTML="<div style=\\"padding:0.5rem 0.75rem;background:#e8f5e9;border-radius:4px\\"><div style=\\"font-weight:bold;color:#2e7d32\\">"+sum.totalInvoiced.toLocaleString()+"</div><div style=\\"font-size:0.75rem;color:#666\\">Units Invoiced ("+sum.invoiceCount+" orders)</div>"+(invDollars?"<div style=\\"font-size:0.8rem;color:#2e7d32;margin-top:0.25rem\\">"+invDollars+"</div>":"")+"</div><div style=\\"padding:0.5rem 0.75rem;background:#fff3e0;border-radius:4px\\"><div style=\\"font-weight:bold;color:#ef6c00\\">"+sum.totalOpenOrders.toLocaleString()+"</div><div style=\\"font-size:0.75rem;color:#666\\">Open Orders ("+sum.openOrderCount+")</div>"+(openDollars?"<div style=\\"font-size:0.8rem;color:#ef6c00;margin-top:0.25rem\\">"+openDollars+"</div>":"")+"</div>";if(d.history.length===0){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">No sales history found for this style</div>";return}var h="<table style=\\"width:100%;border-collapse:collapse;font-size:0.8rem\\"><thead><tr style=\\"background:#f5f5f5\\"><th style=\\"text-align:left;padding:0.4rem\\">Date</th><th style=\\"text-align:left;padding:0.4rem\\">Customer</th><th style=\\"text-align:left;padding:0.4rem\\">Type</th><th style=\\"text-align:right;padding:0.4rem\\">Qty</th><th style=\\"text-align:right;padding:0.4rem\\">Amount</th></tr></thead><tbody>";d.history.forEach(function(rec){var typeLabel=rec.type==="invoice"?"<span style=\\"color:#2e7d32\\">INV "+rec.documentNumber+"</span>":"<span style=\\"color:#ef6c00\\">SO "+rec.documentNumber+(rec.isOpen?" (Open)":"")+"</span>";var dt=new Date(rec.date).toLocaleDateString();var amt=rec.amount?"$"+rec.amount.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"-";h+="<tr style=\\"border-bottom:1px solid #eee\\"><td style=\\"padding:0.4rem\\">"+dt+"</td><td style=\\"padding:0.4rem\\">"+rec.customerName+"</td><td style=\\"padding:0.4rem\\">"+typeLabel+"</td><td style=\\"padding:0.4rem;text-align:right\\">"+rec.quantity.toLocaleString()+"</td><td style=\\"padding:0.4rem;text-align:right\\">"+amt+"</td></tr>"});h+="</tbody></table>";document.getElementById("salesHistoryList").innerHTML=h}).catch(function(err){document.getElementById("salesHistoryLoading").textContent="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">Error loading sales history: "+err.message+"</div>"})}';    
     html += 'function updateSelectionUI(){document.getElementById("selectedCount").textContent=selectedProducts.length;var bar=document.getElementById("selectionBar");if(selectedProducts.length>0&&selectionMode){bar.classList.add("visible")}else{bar.classList.remove("visible")}}';
     
     html += 'function renderProducts(){var s=document.getElementById("searchInput").value.toLowerCase().trim();var searchWords=s?s.split(/\\s+/):[];var minQ=parseInt(document.getElementById("minQty").value)||0;var maxQ=parseInt(document.getElementById("maxQty").value)||999999999;var f=allProducts.filter(function(p){var searchText=p.style_id.toLowerCase()+" "+p.name.toLowerCase()+" "+(p.ai_tags||"").toLowerCase();var ms=searchWords.length===0||searchWords.every(function(word){return searchText.indexOf(word)!==-1});var mc=currentFilter==="all"||p.category===currentFilter;var colorNames=(p.colors||[]).map(function(c){return c.color_name});var mcolor=!colorFilter||colorNames.indexOf(colorFilter)!==-1;var tot=0;(p.colors||[]).forEach(function(c){tot+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))});var mq=tot>=minQ&&tot<=maxQ;var msp=true;if(specialFilter==="new"){msp=p.first_seen_import===lastImportId}else if(specialFilter==="picks"){msp=userPicks.indexOf(p.id)!==-1}else if(specialFilter==="notes"){msp=!!userNotes[p.id]}return ms&&mc&&mcolor&&mq&&msp});f.sort(function(a,b){var ta=0,tb=0;(a.colors||[]).forEach(function(c){ta+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))});(b.colors||[]).forEach(function(c){tb+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))});if(currentSort==="qty-high")return tb-ta;if(currentSort==="qty-low")return ta-tb;if(currentSort==="name-desc")return b.name.localeCompare(a.name);if(currentSort==="newest")return(b.first_seen_import||0)-(a.first_seen_import||0);return a.name.localeCompare(b.name)});products=f;if(f.length===0){document.getElementById("productGrid").innerHTML="";document.getElementById("emptyState").classList.remove("hidden")}else{document.getElementById("emptyState").classList.add("hidden");var h="";var isListView=currentSize==="list";f.forEach(function(pr,idx){var cols=pr.colors||[];var totNow=0,totLts=0;cols.forEach(function(c){totNow+=(c.available_now||c.available_qty||0);totLts+=(c.left_to_sell||0)});var primaryQty=qtyMode==="left_to_sell"?totLts:totNow;var secondaryQty=qtyMode==="left_to_sell"?totNow:totLts;var secondaryLabel=qtyMode==="left_to_sell"?"Now":"LTS";var ch="";if(!isListView){var mx=Math.min(cols.length,3);for(var d=0;d<mx;d++){var cq=qtyMode==="left_to_sell"?(cols[d].left_to_sell||0):(cols[d].available_now||cols[d].available_qty||0);ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+cq.toLocaleString()+"</span></div>"}if(cols.length>3)ch+="<div class=\\"color-row\\" style=\\"color:#999\\">+"+(cols.length-3)+" more</div>"}var listCols="";if(isListView){cols.slice(0,5).forEach(function(c){var cq=qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0);listCols+=c.color_name+": "+cq.toLocaleString()+"; "});if(cols.length>5)listCols+="+"+(cols.length-5)+" more"}var imgUrl=getImageUrl(pr.image_url);var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";var sel=selectedProducts.indexOf(pr.id)!==-1?"selected":"";var selModeClass=selectionMode?"selection-mode":"";var listClass=isListView?"list-view":"";var isPicked=userPicks.indexOf(pr.id)!==-1;var hasNote=!!userNotes[pr.id];h+="<div class=\\"product-card "+sel+" "+selModeClass+" "+listClass+"\\" data-idx=\\""+idx+"\\" onclick=\\"handleCardClick("+pr.id+",event)\\"><div class=\\"select-badge\\">✓</div><div class=\\"pick-badge "+(isPicked?"active":"")+"\\">"+(isPicked?"♥":"♡")+"</div><div class=\\"note-badge "+(hasNote?"has-note":"")+"\\">📝</div><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+pr.style_id+"</div><div class=\\"product-name\\">"+pr.name+"</div>"+(isListView?"<div class=\\"list-colors\\">"+listCols+"</div>":"<div class=\\"color-list\\">"+ch+"</div>")+"<div class=\\"total-row\\"><span>Total</span><span>"+primaryQty.toLocaleString()+"</span></div><div style=\\"font-size:0.75rem;color:#999;text-align:right\\">("+secondaryLabel+": "+secondaryQty.toLocaleString()+")</div></div></div>"});document.getElementById("productGrid").innerHTML=h}document.getElementById("totalStyles").textContent=f.length;var tu=0;f.forEach(function(p){(p.colors||[]).forEach(function(c){tu+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))})});document.getElementById("totalUnits").textContent=tu.toLocaleString();focusedIndex=-1}';

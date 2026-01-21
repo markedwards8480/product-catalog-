@@ -16,16 +16,13 @@ const pool = new Pool({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(session({
-    secret: process.env.SESSION_SECRET || 'catalog-secret-key-change-in-production',
+    secret: process.env.SESSION_SECRET || 'catalog-secret-key',
     resave: false,
     saveUninitialized: false,
     cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 }
 }));
 
-const storage = multer.memoryStorage();
-const upload = multer({ storage: storage });
-
-let zohoAccessToken = null;
+const upload = multer({ storage: multer.memoryStorage() });
 
 async function initDB() {
     try {
@@ -35,33 +32,14 @@ async function initDB() {
         await pool.query(`CREATE TABLE IF NOT EXISTS sync_history (id SERIAL PRIMARY KEY, sync_type VARCHAR(50), status VARCHAR(50), records_synced INTEGER DEFAULT 0, error_message TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
         const userCheck = await pool.query('SELECT COUNT(*) FROM users');
         if (parseInt(userCheck.rows[0].count) === 0) {
-            const hashedPassword = await bcrypt.hash('admin123', 10);
-            await pool.query('INSERT INTO users (username, password, role) VALUES ($1, $2, $3)', ['admin', hashedPassword, 'admin']);
+            const hash = await bcrypt.hash('admin123', 10);
+            await pool.query('INSERT INTO users (username, password, role) VALUES ($1, $2, $3)', ['admin', hash, 'admin']);
             console.log('Default admin user created (admin/admin123)');
         }
         console.log('Database initialized successfully');
     } catch (err) { console.error('Database initialization error:', err); }
 }
 
-async function refreshZohoToken() {
-    try {
-        const clientId = process.env.ZOHO_CLIENT_ID;
-        const clientSecret = process.env.ZOHO_CLIENT_SECRET;
-        const refreshToken = process.env.ZOHO_REFRESH_TOKEN;
-        if (!clientId || !clientSecret || !refreshToken) { console.log('Zoho credentials not configured'); return null; }
-        console.log('Refreshing Zoho access token...');
-        const response = await fetch('https://accounts.zoho.com/oauth/v2/token', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({ refresh_token: refreshToken, client_id: clientId, client_secret: clientSecret, grant_type: 'refresh_token' })
-        });
-        const data = await response.json();
-        if (data.access_token) { zohoAccessToken = data.access_token; console.log('Zoho access token refreshed successfully'); return data.access_token; }
-        else { console.error('Failed to refresh Zoho token:', data); return null; }
-    } catch (err) { console.error('Error refreshing Zoho token:', err); return null; }
-}
-
-function startTokenRefreshJob() { refreshZohoToken(); setInterval(async () => { await refreshZohoToken(); }, 30 * 60 * 1000); console.log('Background token refresh started (every 30 minutes)'); }
 function requireAuth(req, res, next) { if (req.session && req.session.userId) next(); else res.status(401).json({ error: 'Unauthorized' }); }
 function requireAdmin(req, res, next) { if (req.session && req.session.role === 'admin') next(); else res.status(403).json({ error: 'Admin access required' }); }
 
@@ -71,40 +49,55 @@ app.post('/api/login', async (req, res) => {
         const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
         if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
         const user = result.rows[0];
-        const validPassword = await bcrypt.compare(password, user.password);
-        if (!validPassword) return res.status(401).json({ error: 'Invalid credentials' });
-        req.session.userId = user.id; req.session.username = user.username; req.session.role = user.role;
+        const valid = await bcrypt.compare(password, user.password);
+        if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
+        req.session.userId = user.id;
+        req.session.username = user.username;
+        req.session.role = user.role;
         res.json({ success: true, username: user.username, role: user.role });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/logout', (req, res) => { req.session.destroy(); res.json({ success: true }); });
-app.get('/api/session', (req, res) => { if (req.session && req.session.userId) res.json({ loggedIn: true, username: req.session.username, role: req.session.role }); else res.json({ loggedIn: false }); });
-app.get('/api/zoho/status', requireAuth, requireAdmin, async (req, res) => {
-    const configured = !!(process.env.ZOHO_CLIENT_ID && process.env.ZOHO_CLIENT_SECRET && process.env.ZOHO_REFRESH_TOKEN);
-    const lastSync = await pool.query('SELECT created_at FROM sync_history WHERE status = $1 ORDER BY created_at DESC LIMIT 1', ['success']);
-    res.json({ configured, connected: !!zohoAccessToken, viewId: process.env.ZOHO_VIEW_ID || null, workspaceId: process.env.ZOHO_WORKSPACE_ID || null, lastSync: lastSync.rows.length > 0 ? lastSync.rows[0].created_at : null });
+app.get('/api/session', (req, res) => {
+    if (req.session && req.session.userId) res.json({ loggedIn: true, username: req.session.username, role: req.session.role });
+    else res.json({ loggedIn: false });
 });
-app.post('/api/zoho/test', requireAuth, requireAdmin, async (req, res) => { try { const token = await refreshZohoToken(); if (token) res.json({ success: true }); else res.status(400).json({ success: false, error: 'Failed' }); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.get('/api/zoho/sync-history', requireAuth, requireAdmin, async (req, res) => { try { const result = await pool.query('SELECT * FROM sync_history ORDER BY created_at DESC LIMIT 20'); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
+
 app.get('/api/products', requireAuth, async (req, res) => {
     try {
-        const result = await pool.query(`SELECT p.id, p.style_id, p.base_style, p.name, p.category, p.image_url, json_agg(json_build_object('id', pc.id, 'color_name', pc.color_name, 'available_qty', pc.available_qty, 'on_hand', pc.on_hand, 'open_order', pc.open_order, 'to_come', pc.to_come)) FILTER (WHERE pc.id IS NOT NULL) as colors FROM products p LEFT JOIN product_colors pc ON p.id = pc.product_id GROUP BY p.id ORDER BY p.category, p.name`);
+        const result = await pool.query(`
+            SELECT p.id, p.style_id, p.base_style, p.name, p.category, p.image_url,
+            json_agg(json_build_object('id', pc.id, 'color_name', pc.color_name, 'available_qty', pc.available_qty, 'on_hand', pc.on_hand)) FILTER (WHERE pc.id IS NOT NULL) as colors
+            FROM products p LEFT JOIN product_colors pc ON p.id = pc.product_id
+            GROUP BY p.id ORDER BY p.category, p.name`);
         res.json(result.rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.get('/api/zoho/sync-history', requireAuth, requireAdmin, async (req, res) => {
+    try { const result = await pool.query('SELECT * FROM sync_history ORDER BY created_at DESC LIMIT 20'); res.json(result.rows); }
+    catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 function parseCSVLine(line) {
-    const result = []; let current = ''; let inQuotes = false;
+    const result = [];
+    let current = '';
+    let inQuotes = false;
     for (let i = 0; i < line.length; i++) {
         const char = line[i];
-        if (char === '"') { if (inQuotes && line[i + 1] === '"') { current += '"'; i++; } else { inQuotes = !inQuotes; } }
+        if (char === '"') { inQuotes = !inQuotes; }
         else if (char === ',' && !inQuotes) { result.push(current.trim()); current = ''; }
         else { current += char; }
     }
-    result.push(current.trim()); return result;
+    result.push(current.trim());
+    return result;
 }
-function parseNumber(val) { if (!val) return 0; return parseInt(val.toString().replace(/,/g, '').replace(/"/g, '').trim()) || 0; }
+
+function parseNumber(val) {
+    if (!val) return 0;
+    return parseInt(val.toString().replace(/,/g, '').replace(/"/g, '').trim()) || 0;
+}
 
 app.post('/api/import', requireAuth, requireAdmin, upload.single('file'), async (req, res) => {
     try {
@@ -112,27 +105,38 @@ app.post('/api/import', requireAuth, requireAdmin, upload.single('file'), async 
         const content = req.file.buffer.toString('utf-8');
         const lines = content.split('\n').filter(line => line.trim());
         if (lines.length < 2) return res.status(400).json({ error: 'File appears empty' });
-        let headerLine = lines[0]; if (headerLine.charCodeAt(0) === 0xFEFF) headerLine = headerLine.slice(1);
+
+        let headerLine = lines[0];
+        if (headerLine.charCodeAt(0) === 0xFEFF) headerLine = headerLine.slice(1);
         const headers = parseCSVLine(headerLine).map(h => h.toLowerCase().replace(/[^\w\s]/g, '').trim());
         console.log('CSV Headers:', headers);
-        const headerMap = {}; headers.forEach((h, idx) => { headerMap[h] = idx; });
-        let imported = 0, skipped = 0, lastStyleId = null, lastImageUrl = null, lastCategory = null;
+
+        const headerMap = {};
+        headers.forEach((h, idx) => { headerMap[h] = idx; });
+
+        let imported = 0, skipped = 0;
+        let lastStyleId = null, lastImageUrl = null, lastCategory = null;
 
         for (let i = 1; i < lines.length; i++) {
             try {
                 const values = parseCSVLine(lines[i]);
                 if (values[0] && values[0].includes('Grand Summary')) { skipped++; continue; }
+
                 let styleId = values[headerMap['style name']] || values[0];
                 let imageUrl = values[headerMap['style image']] || values[1];
                 let color = values[headerMap['color']] || values[2];
                 let category = values[headerMap['commodity']] || values[3];
                 let onHand = parseNumber(values[headerMap['on hand']] || values[4]);
                 let allocated = parseNumber(values[headerMap['allocated on hand']] || values[5]);
-                let picked = parseNumber(values[headerMap['picked']] || values[6]);
                 let available = parseNumber(values[headerMap['available now']] || values[headerMap['left to sell']] || values[7]);
-                
-                if (!styleId && color) { styleId = lastStyleId; if (!imageUrl || imageUrl === '-No Value-') imageUrl = lastImageUrl; if (!category || category === '-No Value-') category = lastCategory; }
+
+                if (!styleId && color) {
+                    styleId = lastStyleId;
+                    if (!imageUrl || imageUrl === '-No Value-') imageUrl = lastImageUrl;
+                    if (!category || category === '-No Value-') category = lastCategory;
+                }
                 if (!styleId) { skipped++; continue; }
+
                 lastStyleId = styleId;
                 if (imageUrl && imageUrl !== '-No Value-' && imageUrl.startsWith('http')) lastImageUrl = imageUrl;
                 if (category && category !== '-No Value-') lastCategory = category;
@@ -140,50 +144,429 @@ app.post('/api/import', requireAuth, requireAdmin, upload.single('file'), async 
                 const baseStyle = styleId.split('-')[0];
                 const validCategory = (category && category !== '-No Value-') ? category : 'Uncategorized';
                 const name = validCategory + ' - ' + baseStyle;
-                const validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.startsWith('http')) ? imageUrl : (lastImageUrl || null);
+                const validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.startsWith('http')) ? imageUrl : lastImageUrl;
 
                 let productResult = await pool.query('SELECT id, image_url FROM products WHERE style_id = $1', [styleId]);
                 let productId;
+
                 if (productResult.rows.length > 0) {
                     productId = productResult.rows[0].id;
-                    const finalImageUrl = validImageUrl || productResult.rows[0].image_url;
-                    await pool.query('UPDATE products SET name=$1, category=$2, base_style=$3, image_url=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5', [name, validCategory, baseStyle, finalImageUrl, productId]);
+                    const finalImage = validImageUrl || productResult.rows[0].image_url;
+                    await pool.query('UPDATE products SET name=$1, category=$2, base_style=$3, image_url=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5',
+                        [name, validCategory, baseStyle, finalImage, productId]);
                 } else {
-                    const insertResult = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url) VALUES ($1,$2,$3,$4,$5) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl]);
-                    productId = insertResult.rows[0].id;
+                    const ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url) VALUES ($1,$2,$3,$4,$5) RETURNING id',
+                        [styleId, baseStyle, name, validCategory, validImageUrl]);
+                    productId = ins.rows[0].id;
                 }
+
                 if (color && color !== '-No Value-') {
                     const colorResult = await pool.query('SELECT id FROM product_colors WHERE product_id=$1 AND color_name=$2', [productId, color]);
-                    if (colorResult.rows.length > 0) { await pool.query('UPDATE product_colors SET available_qty=$1, on_hand=$2, open_order=$3, to_come=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5', [available, onHand, allocated, picked, colorResult.rows[0].id]); }
-                    else { await pool.query('INSERT INTO product_colors (product_id, color_name, available_qty, on_hand, open_order, to_come) VALUES ($1,$2,$3,$4,$5,$6)', [productId, color, available, onHand, allocated, picked]); }
+                    if (colorResult.rows.length > 0) {
+                        await pool.query('UPDATE product_colors SET available_qty=$1, on_hand=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3',
+                            [available, onHand, colorResult.rows[0].id]);
+                    } else {
+                        await pool.query('INSERT INTO product_colors (product_id, color_name, available_qty, on_hand) VALUES ($1,$2,$3,$4)',
+                            [productId, color, available, onHand]);
+                    }
                 }
                 imported++;
-            } catch (rowErr) { console.error('Error on row', i, ':', rowErr.message); skipped++; }
+            } catch (rowErr) { console.error('Row error:', rowErr.message); skipped++; }
         }
+
         await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1,$2,$3)', ['csv_import', 'success', imported]);
-        console.log('CSV Import complete:', imported, 'imported,', skipped, 'skipped');
         res.json({ success: true, imported, skipped });
     } catch (err) { console.error('Import error:', err); res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/products/clear', requireAuth, requireAdmin, async (req, res) => { try { await pool.query('DELETE FROM product_colors'); await pool.query('DELETE FROM products'); res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.get('/api/users', requireAuth, requireAdmin, async (req, res) => { try { const result = await pool.query('SELECT id, username, role, created_at FROM users ORDER BY created_at'); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
-app.post('/api/users', requireAuth, requireAdmin, async (req, res) => { try { const { username, password, role } = req.body; const hashedPassword = await bcrypt.hash(password, 10); await pool.query('INSERT INTO users (username, password, role) VALUES ($1,$2,$3)', [username, hashedPassword, role || 'sales_rep']); res.json({ success: true }); } catch (err) { if (err.code === '23505') res.status(400).json({ error: 'Username exists' }); else res.status(500).json({ error: err.message }); } });
-app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => { try { if (req.params.id == req.session.userId) return res.status(400).json({ error: 'Cannot delete yourself' }); await pool.query('DELETE FROM users WHERE id=$1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });
+app.post('/api/products/clear', requireAuth, requireAdmin, async (req, res) => {
+    try {
+        await pool.query('DELETE FROM product_colors');
+        await pool.query('DELETE FROM products');
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-app.get('*', (req, res) => { res.send(getHTML()); });
+app.get('/api/users', requireAuth, requireAdmin, async (req, res) => {
+    try { const result = await pool.query('SELECT id, username, role, created_at FROM users ORDER BY created_at'); res.json(result.rows); }
+    catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-function getHTML() {
-    return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Product Catalog</title><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Playfair+Display:wght@500;600&display=swap" rel="stylesheet"><style>*{margin:0;padding:0;box-sizing:border-box}:root{--bg:#FAFAF8;--card:#FFF;--text:#1A1A1A;--muted:#999;--border:#E8E8E6;--accent:#2C5545;--accent-light:#E8F0EC;--danger:#C4553D;--success:#2E7D32}body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}.login-container{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem;background:linear-gradient(135deg,#f5f5f3,#e8e8e6)}.login-box{background:var(--card);padding:3rem;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.06);width:100%;max-width:400px}.login-logo{font-family:'Playfair Display',serif;font-size:1.75rem;font-weight:600;text-align:center;margin-bottom:2rem}.login-logo span{color:var(--accent)}.form-group{margin-bottom:1.25rem}.form-group label{display:block;font-size:.875rem;font-weight:500;margin-bottom:.5rem;color:#666}.form-group input{width:100%;padding:.875rem 1rem;border:1px solid var(--border);border-radius:8px;font-size:1rem}.form-group input:focus{outline:none;border-color:var(--accent)}.btn{padding:.875rem 1.5rem;border:none;border-radius:8px;font-size:.9375rem;font-weight:500;cursor:pointer}.btn-primary{background:var(--accent);color:#fff;width:100%}.btn-secondary{background:var(--bg);color:var(--text);border:1px solid var(--border)}.btn-danger{background:var(--danger);color:#fff}.btn-success{background:var(--success);color:#fff}.error-message{color:var(--danger);font-size:.875rem;margin-top:1rem;text-align:center}.success-message{color:var(--success);font-size:.875rem;margin-top:1rem}.header{background:var(--card);border-bottom:1px solid var(--border);padding:1.25rem 2rem;position:sticky;top:0;z-index:100}.header-inner{max-width:1600px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:2rem;flex-wrap:wrap}.logo{font-family:'Playfair Display',serif;font-size:1.5rem;font-weight:600}.logo span{color:var(--accent)}.header-right{display:flex;align-items:center;gap:1rem}.user-info{font-size:.875rem;color:#666}.controls{display:flex;align-items:center;gap:1rem;flex:1;max-width:600px}.search-box{flex:1;position:relative}.search-box input{width:100%;padding:.75rem 1rem .75rem 2.75rem;border:1px solid var(--border);border-radius:8px;font-size:.9375rem;background:var(--bg)}.search-box input:focus{outline:none;border-color:var(--accent);background:var(--card)}.search-box::before{content:'';position:absolute;left:1rem;top:50%;transform:translateY(-50%);width:18px;height:18px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%23999'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z'/%3E%3C/svg%3E") center/contain no-repeat}.filter-pills{display:flex;gap:.5rem;flex-wrap:wrap}.filter-pill{padding:.5rem 1rem;border:1px solid var(--border);border-radius:20px;background:var(--card);font-size:.8125rem;font-weight:500;color:#666;cursor:pointer}.filter-pill.active{background:var(--accent);border-color:var(--accent);color:#fff}.stats-bar{background:var(--card);padding:1rem 2rem;border-bottom:1px solid var(--border)}.stats-inner{max-width:1600px;margin:0 auto;display:flex;align-items:center;gap:2rem;flex-wrap:wrap}.stat{display:flex;align-items:baseline;gap:.5rem}.stat-value{font-size:1.5rem;font-weight:600}.stat-label{font-size:.875rem;color:var(--muted)}.sync-info{margin-left:auto;font-size:.8125rem;color:var(--muted)}.main{max-width:1600px;margin:0 auto;padding:2rem}.admin-panel{background:var(--card);border-radius:12px;padding:2rem;margin-bottom:2rem;box-shadow:0 4px 24px rgba(0,0,0,.06)}.admin-panel h2{font-family:'Playfair Display',serif;font-size:1.5rem;margin-bottom:1.5rem}.admin-tabs{display:flex;gap:.5rem;margin-bottom:1.5rem;border-bottom:1px solid var(--border);padding-bottom:1rem}.admin-tab{padding:.625rem 1.25rem;border:none;background:none;font-size:.9375rem;font-weight:500;color:#666;cursor:pointer;border-radius:6px}.admin-tab.active{background:var(--accent);color:#fff}.admin-section{display:none}.admin-section.active{display:block}.file-upload-area{border:2px dashed var(--border);border-radius:8px;padding:2rem;text-align:center}.file-upload-area input[type="file"]{display:none}.file-upload-area label{cursor:pointer;color:var(--accent);font-weight:500}.user-table,.sync-table{width:100%;border-collapse:collapse}.user-table th,.user-table td,.sync-table th,.sync-table td{padding:.875rem;text-align:left;border-bottom:1px solid var(--border)}.user-table th,.sync-table th{font-weight:600;color:#666;font-size:.8125rem;text-transform:uppercase}.add-user-form{display:flex;gap:1rem;margin-top:1.5rem;flex-wrap:wrap}.add-user-form input,.add-user-form select{padding:.75rem 1rem;border:1px solid var(--border);border-radius:6px}.category-section{margin-bottom:3rem}.category-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;padding-bottom:.75rem;border-bottom:2px solid var(--text)}.category-title{font-family:'Playfair Display',serif;font-size:1.75rem}.category-count{font-size:.875rem;color:var(--muted)}.product-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:1.5rem}.product-card{background:var(--card);border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.06);cursor:pointer;animation:fadeInUp .4s ease forwards;opacity:0}.product-card:hover{transform:translateY(-4px);box-shadow:0 16px 48px rgba(0,0,0,.08)}.product-image-container{position:relative;aspect-ratio:4/3;background:linear-gradient(145deg,#f5f5f5,#ebebeb);display:flex;align-items:center;justify-content:center}.product-image{width:100%;height:100%;object-fit:cover}.no-image{color:var(--muted);font-size:.875rem}.product-badge{position:absolute;top:1rem;left:1rem;padding:.375rem .75rem;background:var(--danger);color:#fff;font-size:.75rem;font-weight:600;border-radius:4px}.product-info{padding:1.25rem}.product-style{font-size:.8125rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.25rem}.product-name{font-family:'Playfair Display',serif;font-size:1.25rem;margin-bottom:1rem}.color-availability{display:flex;flex-direction:column;gap:.625rem}.color-row{display:flex;align-items:center;justify-content:space-between;padding:.5rem .75rem;background:var(--bg);border-radius:6px}.color-info{display:flex;align-items:center;gap:.625rem}.color-swatch{width:20px;height:20px;border-radius:50%;border:2px solid rgba(0,0,0,.08)}.color-name{font-size:.875rem;font-weight:500}.color-qty{font-size:.9375rem;font-weight:600;color:var(--accent)}.color-qty.low{color:var(--danger)}.color-qty.out{color:var(--muted);text-decoration:line-through}.total-row{display:flex;align-items:center;justify-content:space-between;padding-top:.75rem;margin-top:.5rem;border-top:1px solid var(--border)}.total-label{font-size:.8125rem;font-weight:500;color:#666;text-transform:uppercase}.total-value{font-size:1.125rem;font-weight:600}.empty-state{text-align:center;padding:4rem 2rem}.empty-state h3{font-family:'Playfair Display',serif;font-size:1.5rem;margin-bottom:.5rem}.empty-state p{color:var(--muted)}.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);z-index:1000;display:none;align-items:center;justify-content:center;padding:2rem}.modal-overlay.active{display:flex}.modal-content{background:var(--card);border-radius:16px;max-width:900px;width:100%;max-height:90vh;overflow:hidden;display:grid;grid-template-columns:1fr 1fr;position:relative}.modal-close{position:absolute;top:1rem;right:1rem;width:40px;height:40px;border-radius:50%;background:var(--card);border:none;cursor:pointer;font-size:1.5rem;color:#666;z-index:10}.modal-image{aspect-ratio:1;background:#f5f5f5;display:flex;align-items:center;justify-content:center}.modal-image img{width:100%;height:100%;object-fit:cover}.modal-details{padding:2rem;display:flex;flex-direction:column}.modal-style{font-size:.875rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:.5rem}.modal-name{font-family:'Playfair Display',serif;font-size:2rem;margin-bottom:.5rem}.modal-category{font-size:1rem;color:#666;margin-bottom:2rem}.modal-availability-title{font-size:.8125rem;font-weight:600;color:#666;text-transform:uppercase;margin-bottom:1rem}.modal-colors{display:flex;flex-direction:column;gap:.75rem;flex:1;overflow-y:auto}.modal-color-row{display:flex;align-items:center;justify-content:space-between;padding:.875rem 1rem;background:var(--bg);border-radius:8px}.modal-color-info{display:flex;align-items:center;gap:.875rem}.modal-color-swatch{width:28px;height:28px;border-radius:50%;border:2px solid rgba(0,0,0,.1)}.modal-color-name{font-size:1rem;font-weight:500}.modal-color-qty{font-size:1.25rem;font-weight:600;color:var(--accent)}.modal-total{display:flex;align-items:center;justify-content:space-between;padding-top:1.5rem;margin-top:1rem;border-top:2px solid var(--border)}.modal-total-label{font-size:1rem;font-weight:500;color:#666}.modal-total-value{font-size:1.75rem;font-weight:600}@media(max-width:768px){.header-inner{flex-direction:column;align-items:stretch;gap:1rem}.controls{max-width:none}.product-grid{grid-template-columns:1fr}.modal-content{grid-template-columns:1fr;max-height:85vh;overflow-y:auto}}@keyframes fadeInUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}.hidden{display:none!important}.loading{display:inline-block;width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}</style></head><body>
-<div id="loginPage" class="login-container"><div class="login-box"><div class="login-logo">Product <span>Catalog</span></div><form id="loginForm"><div class="form-group"><label>Username</label><input type="text" id="loginUsername" required></div><div class="form-group"><label>Password</label><input type="password" id="loginPassword" required></div><button type="submit" class="btn btn-primary">Sign In</button><div id="loginError" class="error-message hidden"></div></form></div></div>
-<div id="mainApp" class="hidden"><header class="header"><div class="header-inner"><div class="logo">Product <span>Catalog</span></div><div class="controls"><div class="search-box"><input type="text" id="searchInput" placeholder="Search by style, color, or category..."></div></div><div class="filter-pills" id="categoryFilters"><button class="filter-pill active" data-category="all">All</button></div><div class="header-right"><span class="user-info">Signed in as <strong id="currentUser"></strong></span><button class="btn btn-secondary" id="adminBtn" style="display:none">Admin</button><button class="btn btn-secondary" id="logoutBtn">Sign Out</button></div></div></header>
-<div class="stats-bar"><div class="stats-inner"><div class="stat"><span class="stat-value" id="totalStyles">0</span><span class="stat-label">Styles</span></div><div class="stat"><span class="stat-value" id="totalUnits">0</span><span class="stat-label">Units Available</span></div><div class="stat"><span class="stat-value" id="inStockCount">0</span><span class="stat-label">In Stock</span></div><div class="sync-info" id="syncInfo"></div></div></div>
-<main class="main"><div id="adminPanel" class="admin-panel hidden"><h2>Admin Panel</h2><div class="admin-tabs"><button class="admin-tab active" data-tab="import">CSV Import</button><button class="admin-tab" data-tab="users">Manage Users</button><button class="admin-tab" data-tab="history">Sync History</button></div>
-<div id="importSection" class="admin-section active"><p style="margin-bottom:1rem;color:#666">Upload CSV from Zoho Analytics with: Style Name, Style Image, Color, Commodity, On Hand, Available Now</p><div class="file-upload-area"><input type="file" id="csvUpload" accept=".csv"><label for="csvUpload">Click to upload CSV file</label></div><div id="importStatus" style="margin-top:1rem"></div><div style="margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--border)"><button class="btn btn-danger" id="clearProductsBtn" style="padding:.5rem 1rem;font-size:.875rem">Clear All Products</button><span style="margin-left:1rem;font-size:.8125rem;color:#666">Use before importing fresh data</span></div></div>
-<div id="usersSection" class="admin-section"><table class="user-table"><thead><tr><th>Username</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="userTableBody"></tbody></table><div class="add-user-form"><input type="text" id="newUsername" placeholder="Username"><input type="password" id="newPassword" placeholder="Password"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add User</button></div></div>
-<div id="historySection" class="admin-section"><table class="sync-table"><thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Records</th></tr></thead><tbody id="syncHistoryBody"></tbody></table></div></div><div id="productContainer"></div></main></div>
-<div class="modal-overlay" id="modal"><div class="modal-content"><button class="modal-close" onclick="closeModal()">&times;</button><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div class="modal-style" id="modalStyle"></div><h2 class="modal-name" id="modalName"></h2><div class="modal-category" id="modalCategory"></div><div class="modal-availability-title">Availability by Color</div><div class="modal-colors" id="modalColors"></div><div class="modal-total"><span class="modal-total-label">Total Available</span><span class="modal-total-value" id="modalTotal"></span></div></div></div></div>
-<script>let products=[],currentCategory='all',isAdmin=false;async function checkSession(){try{const r=await fetch('/api/session');const d=await r.json();if(d.loggedIn){showApp(d.username,d.role);loadProducts();if(d.role==='admin'){loadUsers();loadSyncHistory()}}else{showLogin()}}catch(e){showLogin()}}function showLogin(){document.getElementById('loginPage').classList.remove('hidden');document.getElementById('mainApp').classList.add('hidden')}function showApp(u,r){document.getElementById('loginPage').classList.add('hidden');document.getElementById('mainApp').classList.remove('hidden');document.getElementById('currentUser').textContent=u;isAdmin=r==='admin';document.getElementById('adminBtn').style.display=isAdmin?'block':'none'}document.getElementById('loginForm').addEventListener('submit',async e=>{e.preventDefault();const u=document.getElementById('loginUsername').value;const p=document.getElementById('loginPassword').value;try{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});const d=await r.json();if(d.success){showApp(d.username,d.role);loadProducts();if(d.role==='admin'){loadUsers();loadSyncHistory()}}else{document.getElementById('loginError').textContent=d.error;document.getElementById('loginError').classList.remove('hidden')}}catch(e){document.getElementById('loginError').textContent='Connection error';document.getElementById('loginError').classList.remove('hidden')}});document.getElementById('logoutBtn').addEventListener('click',async()=>{await fetch('/api/logout',{method:'POST'});showLogin()});document.getElementById('adminBtn').addEventListener('click',()=>{document.getElementById('adminPanel').classList.toggle('hidden')});document.querySelectorAll('.admin-tab').forEach(t=>{t.addEventListener('click',e=>{document.querySelectorAll('.admin-tab').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.admin-section').forEach(x=>x.classList.remove('active'));e.target.classList.add('active');document.getElementById(e.target.dataset.tab+'Section').classList.add('active')})});async function loadSyncHistory(){try{const r=await fetch('/api/zoho/sync-history');const h=await r.json();document.getElementById('syncHistoryBody').innerHTML=h.map(x=>'<tr><td>'+new Date(x.created_at).toLocaleString()+'</td><td>'+x.sync_type+'</td><td style="color:'+(x.status==='success'?'var(--success)':'var(--danger)')+'">'+x.status+'</td><td>'+(x.records_synced||'-')+'</td></tr>').join('')}catch(e){}}async function loadProducts(){try{const r=await fetch('/api/products');products=await r.json();updateCategoryFilters();renderProducts()}catch(e){}}function updateCategoryFilters(){const cats=[...new Set(products.map(p=>p.category).filter(Boolean))];const c=document.getElementById('categoryFilters');c.innerHTML='<button class="filter-pill active" data-category="all">All</button>';cats.sort().forEach(cat=>{c.innerHTML+='<button class="filter-pill" data-category="'+cat+'">'+cat+'</button>'});document.querySelectorAll('.filter-pill').forEach(p=>{p.addEventListener('click',e=>{document.querySelectorAll('.filter-pill').forEach(x=>x.classList.remove('active'));e.target.classList.add('active');currentCategory=e.target.dataset.category;renderProducts()})})}function formatNumber(n){return(n||0).toLocaleString()}function getSwatchStyle(c){const colors={black:'#1A1A1A',ivory:'#FFFFF0',pink:'#F9A8D4',brown:'#A78B71',navy:'#1E3A5F',burgundy:'#722F37',charcoal:'#36454F',white:'#FFFFFF',grey:'#808080',gray:'#808080',red:'#DC2626',blue:'#2563EB',green:'#16A34A',yellow:'#EAB308',purple:'#9333EA',orange:'#F97316',beige:'#D4C4A8',silver:'#C0C0C0',sage:'#9CAF88'};return colors[(c||'').toLowerCase().split(' ')[0]]||'#CCCCCC'}function renderProducts(){const s=document.getElementById('searchInput').value.toLowerCase();let f=products.filter(p=>{const ms=!s||(p.style_id||'').toLowerCase().includes(s)||(p.name||'').toLowerCase().includes(s)||(p.category||'').toLowerCase().includes(s)||(p.colors||[]).some(c=>(c.color_name||'').toLowerCase().includes(s));const mc=currentCategory==='all'||p.category===currentCategory;return ms&&mc});const bc={};f.forEach(p=>{const cat=p.category||'Uncategorized';if(!bc[cat])bc[cat]=[];bc[cat].push(p)});let h='';Object.keys(bc).sort().forEach(cat=>{const cp=bc[cat];h+='<section class="category-section"><div class="category-header"><h2 class="category-title">'+cat+'</h2><span class="category-count">'+cp.length+' styles</span></div><div class="product-grid">';cp.forEach((p,idx)=>{const colors=p.colors||[];const total=colors.reduce((s,c)=>s+(c.available_qty||0),0);const low=total<100&&total>0;let ch=colors.slice(0,4).map(c=>'<div class="color-row"><div class="color-info"><div class="color-swatch" style="background:'+getSwatchStyle(c.color_name)+'"></div><span class="color-name">'+(c.color_name||'Unknown')+'</span></div><span class="color-qty'+(c.available_qty===0?' out':c.available_qty<50?' low':'')+'">'+formatNumber(c.available_qty)+'</span></div>').join('');if(colors.length>4)ch+='<div class="color-row" style="justify-content:center;color:var(--muted);font-size:.75rem">+'+(colors.length-4)+' more</div>';h+='<div class="product-card" style="animation-delay:'+(idx*.05)+'s" onclick="openModal('+p.id+')"><div class="product-image-container">';if(p.image_url)h+='<img class="product-image" src="'+p.image_url+'" alt="'+p.name+'" loading="lazy" onerror="this.style.display=\'none\'">';else h+='<span class="no-image">No Image</span>';if(low)h+='<span class="product-badge">Low Stock</span>';h+='</div><div class="product-info"><div class="product-style">'+p.style_id+'</div><h3 class="product-name">'+p.name+'</h3><div class="color-availability">'+ch+'</div><div class="total-row"><span class="total-label">Total Available</span><span class="total-value">'+formatNumber(total)+'</span></div></div></div>'});h+='</div></section>'});if(!h)h='<div class="empty-state"><h3>No products found</h3><p>Upload a CSV file to import products.</p></div>';document.getElementById('productContainer').innerHTML=h;updateStats(f)}function updateStats(f){document.getElementById('totalStyles').textContent=f.length;document.getElementById('totalUnits').textContent=formatNumber(f.reduce((s,p)=>s+(p.colors||[]).reduce((x,c)=>x+(c.available_qty||0),0),0));document.getElementById('inStockCount').textContent=f.filter(p=>(p.colors||[]).some(c=>c.available_qty>0)).length}document.getElementById('searchInput').addEventListener('input',renderProducts);function openModal(id){const p=products.find(x=>x.id===id);if(!p)return;const colors=p.colors||[];const total=colors.reduce((s,c)=>s+(c.available_qty||0),0);if(p.image_url){document.getElementById('modalImage').src=p.image_url;document.getElementById('modalImage').style.display='block'}else{document.getElementById('modalImage').style.display='none'}document.getElementById('modalStyle').textContent=p.style_id;document.getElementById('modalName').textContent=p.name;document.getElementById('modalCategory').textContent=p.category||'';document.getElementById('modalTotal').textContent=formatNumber(total);document.getElementById('modalColors').innerHTML=colors.map(c=>'<div class="modal-color-row"><div class="modal-color-info"><div class="modal-color-swatch" style="background:'+getSwatchStyle(c.color_name)+'"></div><span class="modal-color-name">'+c.color_name+'</span></div><span class="modal-color-qty">'+formatNumber(c.available_qty)+'</span></div>').join('');document.getElementById('modal').classList.add('active');document.body.style.overflow='hidden'}function closeModal(){document.getElementById('modal').classList.remove('active');document.body.style.overflow=''}document.getElementById('modal').addEventListener('click',e=>{if(e.target.id==='modal')closeModal()});document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});document.getElementById('csvUpload').addEventListener('change',async e=>{const f=e.target.files[0];if(!f)return;const fd=new FormData();fd.append('file',f);document.getElementById('importStatus').innerHTML='<p><span class="loading"></span> Importing...</p>';try{const r=await fetch('/api/import',{method:'POST',body:fd});const d=await r.json();if(d.success){document.getElementById('importStatus').innerHTML='<p class="success-message">Imported '+d.imported+' products'+(d.skipped?' ('+d.skipped+' skipped)':'')+'</p>';loadProducts();loadSyncHistory()}else{document.getElementById('importStatus').innerHTML='<p class="error-message">'+d.error+'</p>'}}catch(e){document.getElementById('importStatus').innerHTML='<p class="error-message">Upload failed</p>'}});document.getElementById('clearProductsBtn').addEventListener('click',async()=>{if(!confirm('Delete all products?'))return;try{const r=await fetch('/api/products/clear',{method:'POST'});const d=await r.json();if(d.success){alert('All products cleared');loadProducts()}}catch(e){alert(e.message)}});async function loadUsers(){try{const r=await fetch('/api/users');const u=await r.json();document.getElementById('userTableBody').innerHTML=u.map(x=>'<tr><td>'+x.username+'</td><td>'+x.role+'</td><td>'+new Date(x.created_at).toLocaleDateString()+'</td><td><button class="btn btn-danger" onclick="deleteUser('+x.id+')" style="padding:.5rem 1rem;font-size:.75rem">Delete</button></td></tr>').join('')}catch(e){}}document.getElementById('addUserBtn').addEventListener('click',async()=>{const u=document.getElementById('newUsername').value;const p=document.getElementById('newPassword').value;const r=document.getElementById('newRole').value;if(!u||!p){alert('Enter username and password');return}try{const res=await fetch('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p,role:r})});const d=await res.json();if(d.success){document.getElementById('newUsername').value='';document.getElementById('newPassword').value='';loadUsers()}else{alert(d.error)}}catch(e){alert(e.message)}});async function deleteUser(id){if(!confirm('Delete user?'))return;try{const r=await fetch('/api/users/'+id,{method:'DELETE'});const d=await r.json();if(d.success)loadUsers();else alert(d.error)}catch(e){alert(e.message)}}checkSession();</script></body></html>`;
+app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
+    try {
+        const { username, password, role } = req.body;
+        const hash = await bcrypt.hash(password, 10);
+        await pool.query('INSERT INTO users (username, password, role) VALUES ($1,$2,$3)', [username, hash, role || 'sales_rep']);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
+    try {
+        if (req.params.id == req.session.userId) return res.status(400).json({ error: 'Cannot delete yourself' });
+        await pool.query('DELETE FROM users WHERE id=$1', [req.params.id]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('*', (req, res) => {
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Product Catalog</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; }
+.login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+.login-box { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); width: 100%; max-width: 360px; }
+.login-box h1 { margin-bottom: 1.5rem; font-size: 1.5rem; text-align: center; }
+.form-group { margin-bottom: 1rem; }
+.form-group label { display: block; margin-bottom: 0.5rem; font-weight: 500; }
+.form-group input { width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 4px; font-size: 1rem; }
+.btn { padding: 0.75rem 1.5rem; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+.btn-primary { background: #2c5545; color: white; width: 100%; }
+.btn-secondary { background: #eee; color: #333; }
+.btn-danger { background: #c4553d; color: white; }
+.error { color: #c4553d; margin-top: 1rem; text-align: center; }
+.success { color: #2e7d32; }
+.hidden { display: none !important; }
+.header { background: white; padding: 1rem 2rem; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
+.header h1 { font-size: 1.25rem; }
+.header-right { display: flex; gap: 1rem; align-items: center; }
+.search-box input { padding: 0.5rem 1rem; border: 1px solid #ddd; border-radius: 4px; width: 250px; }
+.main { max-width: 1400px; margin: 0 auto; padding: 2rem; }
+.admin-panel { background: white; padding: 1.5rem; border-radius: 8px; margin-bottom: 2rem; }
+.admin-panel h2 { margin-bottom: 1rem; }
+.tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+.tab { padding: 0.5rem 1rem; border: none; background: #eee; cursor: pointer; border-radius: 4px; }
+.tab.active { background: #2c5545; color: white; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.upload-area { border: 2px dashed #ddd; padding: 2rem; text-align: center; border-radius: 4px; margin-bottom: 1rem; }
+.upload-area input { display: none; }
+.upload-area label { color: #2c5545; cursor: pointer; }
+.stats { display: flex; gap: 2rem; margin-bottom: 1rem; padding: 1rem; background: white; border-radius: 8px; }
+.stat-value { font-size: 1.5rem; font-weight: bold; }
+.stat-label { color: #666; font-size: 0.875rem; }
+.filters { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.filter-btn { padding: 0.5rem 1rem; border: 1px solid #ddd; background: white; border-radius: 20px; cursor: pointer; }
+.filter-btn.active { background: #2c5545; color: white; border-color: #2c5545; }
+.product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.5rem; }
+.product-card { background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); cursor: pointer; }
+.product-card:hover { transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0,0,0,0.15); }
+.product-image { height: 200px; background: #f0f0f0; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.product-image img { width: 100%; height: 100%; object-fit: cover; }
+.product-info { padding: 1rem; }
+.product-style { font-size: 0.75rem; color: #666; text-transform: uppercase; }
+.product-name { font-size: 1.1rem; font-weight: 600; margin: 0.25rem 0; }
+.color-list { margin-top: 0.75rem; }
+.color-row { display: flex; justify-content: space-between; padding: 0.25rem 0; font-size: 0.875rem; }
+.total-row { margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #eee; font-weight: bold; display: flex; justify-content: space-between; }
+.empty { text-align: center; padding: 3rem; color: #666; }
+.modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; z-index: 1000; }
+.modal.active { display: flex; }
+.modal-content { background: white; border-radius: 8px; max-width: 800px; width: 90%; max-height: 90vh; overflow: auto; display: flex; }
+.modal-image { width: 50%; background: #f0f0f0; display: flex; align-items: center; justify-content: center; }
+.modal-image img { width: 100%; height: 100%; object-fit: cover; }
+.modal-details { width: 50%; padding: 2rem; }
+.modal-close { position: absolute; top: 1rem; right: 1rem; background: white; border: none; font-size: 1.5rem; cursor: pointer; border-radius: 50%; width: 36px; height: 36px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #eee; }
+.add-form { display: flex; gap: 0.5rem; margin-top: 1rem; flex-wrap: wrap; }
+.add-form input, .add-form select { padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; }
+@media (max-width: 768px) { .modal-content { flex-direction: column; } .modal-image, .modal-details { width: 100%; } }
+</style>
+</head>
+<body>
+
+<div id="loginPage" class="login-page">
+<div class="login-box">
+<h1>Product Catalog</h1>
+<form id="loginForm">
+<div class="form-group"><label>Username</label><input type="text" id="username" required></div>
+<div class="form-group"><label>Password</label><input type="password" id="password" required></div>
+<button type="submit" class="btn btn-primary">Sign In</button>
+<div id="loginError" class="error hidden"></div>
+</form>
+</div>
+</div>
+
+<div id="mainApp" class="hidden">
+<header class="header">
+<h1>Product Catalog</h1>
+<div class="search-box"><input type="text" id="searchInput" placeholder="Search products..."></div>
+<div class="header-right">
+<span id="userInfo"></span>
+<button class="btn btn-secondary" id="adminBtn" style="display:none">Admin</button>
+<button class="btn btn-secondary" id="logoutBtn">Sign Out</button>
+</div>
+</header>
+
+<main class="main">
+<div id="adminPanel" class="admin-panel hidden">
+<h2>Admin Panel</h2>
+<div class="tabs">
+<button class="tab active" data-tab="import">Import CSV</button>
+<button class="tab" data-tab="users">Users</button>
+<button class="tab" data-tab="history">History</button>
+</div>
+
+<div id="importTab" class="tab-content active">
+<div class="upload-area">
+<input type="file" id="csvFile" accept=".csv">
+<label for="csvFile">Click to upload CSV file</label>
+</div>
+<div id="importStatus"></div>
+<button class="btn btn-danger" id="clearBtn" style="margin-top:1rem">Clear All Products</button>
+</div>
+
+<div id="usersTab" class="tab-content">
+<table><thead><tr><th>Username</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table>
+<div class="add-form">
+<input type="text" id="newUser" placeholder="Username">
+<input type="password" id="newPass" placeholder="Password">
+<select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select>
+<button class="btn btn-primary" id="addUserBtn">Add</button>
+</div>
+</div>
+
+<div id="historyTab" class="tab-content">
+<table><thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Records</th></tr></thead><tbody id="historyTable"></tbody></table>
+</div>
+</div>
+
+<div class="stats">
+<div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div>
+<div><div class="stat-value" id="totalUnits">0</div><div class="stat-label">Units Available</div></div>
+</div>
+
+<div class="filters" id="filters"></div>
+<div class="product-grid" id="productGrid"></div>
+<div class="empty hidden" id="emptyState">No products found. Import a CSV to get started.</div>
+</main>
+</div>
+
+<div class="modal" id="modal">
+<button class="modal-close" onclick="closeModal()">&times;</button>
+<div class="modal-content">
+<div class="modal-image"><img id="modalImage" src="" alt=""></div>
+<div class="modal-details">
+<div class="product-style" id="modalStyle"></div>
+<h2 id="modalName"></h2>
+<p id="modalCategory" style="color:#666;margin-bottom:1rem"></p>
+<div id="modalColors"></div>
+<div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div>
+</div>
+</div>
+</div>
+
+<script>
+let products = [];
+let currentFilter = 'all';
+
+async function checkSession() {
+    const res = await fetch('/api/session');
+    const data = await res.json();
+    if (data.loggedIn) {
+        showApp(data.username, data.role);
+        loadProducts();
+        if (data.role === 'admin') { loadUsers(); loadHistory(); }
+    } else {
+        document.getElementById('loginPage').classList.remove('hidden');
+        document.getElementById('mainApp').classList.add('hidden');
+    }
 }
 
-initDB().then(() => { app.listen(PORT, () => { console.log('Product Catalog running on port ' + PORT); }); setTimeout(() => { startTokenRefreshJob(); }, 5000); });
+function showApp(username, role) {
+    document.getElementById('loginPage').classList.add('hidden');
+    document.getElementById('mainApp').classList.remove('hidden');
+    document.getElementById('userInfo').textContent = 'Welcome, ' + username;
+    if (role === 'admin') document.getElementById('adminBtn').style.display = 'block';
+}
+
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = document.getElementById('username').value;
+    const password = document.getElementById('password').value;
+    const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+    });
+    const data = await res.json();
+    if (data.success) {
+        showApp(data.username, data.role);
+        loadProducts();
+        if (data.role === 'admin') { loadUsers(); loadHistory(); }
+    } else {
+        document.getElementById('loginError').textContent = data.error;
+        document.getElementById('loginError').classList.remove('hidden');
+    }
+});
+
+document.getElementById('logoutBtn').addEventListener('click', async () => {
+    await fetch('/api/logout', { method: 'POST' });
+    location.reload();
+});
+
+document.getElementById('adminBtn').addEventListener('click', () => {
+    document.getElementById('adminPanel').classList.toggle('hidden');
+});
+
+document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(tab.dataset.tab + 'Tab').classList.add('active');
+    });
+});
+
+async function loadProducts() {
+    const res = await fetch('/api/products');
+    products = await res.json();
+    renderFilters();
+    renderProducts();
+}
+
+function renderFilters() {
+    const cats = [...new Set(products.map(p => p.category).filter(Boolean))];
+    const html = '<button class="filter-btn active" data-cat="all">All</button>' +
+        cats.sort().map(c => '<button class="filter-btn" data-cat="' + c + '">' + c + '</button>').join('');
+    document.getElementById('filters').innerHTML = html;
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentFilter = btn.dataset.cat;
+            renderProducts();
+        });
+    });
+}
+
+function renderProducts() {
+    const search = document.getElementById('searchInput').value.toLowerCase();
+    let filtered = products.filter(p => {
+        const matchSearch = !search || p.style_id.toLowerCase().includes(search) || p.name.toLowerCase().includes(search) ||
+            (p.colors || []).some(c => c.color_name.toLowerCase().includes(search));
+        const matchCat = currentFilter === 'all' || p.category === currentFilter;
+        return matchSearch && matchCat;
+    });
+
+    if (filtered.length === 0) {
+        document.getElementById('productGrid').innerHTML = '';
+        document.getElementById('emptyState').classList.remove('hidden');
+    } else {
+        document.getElementById('emptyState').classList.add('hidden');
+        document.getElementById('productGrid').innerHTML = filtered.map(p => {
+            const colors = p.colors || [];
+            const total = colors.reduce((s, c) => s + (c.available_qty || 0), 0);
+            const colorHtml = colors.slice(0, 3).map(c =>
+                '<div class="color-row"><span>' + c.color_name + '</span><span>' + (c.available_qty || 0).toLocaleString() + '</span></div>'
+            ).join('') + (colors.length > 3 ? '<div class="color-row" style="color:#999">+' + (colors.length - 3) + ' more</div>' : '');
+            return '<div class="product-card" onclick="openModal(' + p.id + ')">' +
+                '<div class="product-image">' + (p.image_url ? '<img src="' + p.image_url + '" onerror="this.style.display=\'none\'">' : 'No Image') + '</div>' +
+                '<div class="product-info"><div class="product-style">' + p.style_id + '</div>' +
+                '<div class="product-name">' + p.name + '</div>' +
+                '<div class="color-list">' + colorHtml + '</div>' +
+                '<div class="total-row"><span>Total</span><span>' + total.toLocaleString() + '</span></div></div></div>';
+        }).join('');
+    }
+
+    document.getElementById('totalStyles').textContent = filtered.length;
+    document.getElementById('totalUnits').textContent = filtered.reduce((s, p) => s + (p.colors || []).reduce((x, c) => x + (c.available_qty || 0), 0), 0).toLocaleString();
+}
+
+document.getElementById('searchInput').addEventListener('input', renderProducts);
+
+function openModal(id) {
+    const p = products.find(x => x.id === id);
+    if (!p) return;
+    const colors = p.colors || [];
+    const total = colors.reduce((s, c) => s + (c.available_qty || 0), 0);
+    document.getElementById('modalImage').src = p.image_url || '';
+    document.getElementById('modalImage').style.display = p.image_url ? 'block' : 'none';
+    document.getElementById('modalStyle').textContent = p.style_id;
+    document.getElementById('modalName').textContent = p.name;
+    document.getElementById('modalCategory').textContent = p.category || '';
+    document.getElementById('modalColors').innerHTML = colors.map(c =>
+        '<div class="color-row"><span>' + c.color_name + '</span><span>' + (c.available_qty || 0).toLocaleString() + '</span></div>'
+    ).join('');
+    document.getElementById('modalTotal').textContent = total.toLocaleString();
+    document.getElementById('modal').classList.add('active');
+}
+
+function closeModal() { document.getElementById('modal').classList.remove('active'); }
+document.getElementById('modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
+
+document.getElementById('csvFile').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    document.getElementById('importStatus').innerHTML = 'Importing...';
+    const res = await fetch('/api/import', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.success) {
+        document.getElementById('importStatus').innerHTML = '<span class="success">Imported ' + data.imported + ' products</span>';
+        loadProducts();
+        loadHistory();
+    } else {
+        document.getElementById('importStatus').innerHTML = '<span class="error">' + data.error + '</span>';
+    }
+});
+
+document.getElementById('clearBtn').addEventListener('click', async () => {
+    if (!confirm('Delete all products?')) return;
+    await fetch('/api/products/clear', { method: 'POST' });
+    loadProducts();
+});
+
+async function loadUsers() {
+    const res = await fetch('/api/users');
+    const users = await res.json();
+    document.getElementById('usersTable').innerHTML = users.map(u =>
+        '<tr><td>' + u.username + '</td><td>' + u.role + '</td><td><button class="btn btn-danger" onclick="deleteUser(' + u.id + ')">Delete</button></td></tr>'
+    ).join('');
+}
+
+document.getElementById('addUserBtn').addEventListener('click', async () => {
+    const username = document.getElementById('newUser').value;
+    const password = document.getElementById('newPass').value;
+    const role = document.getElementById('newRole').value;
+    if (!username || !password) return alert('Enter username and password');
+    await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, role })
+    });
+    document.getElementById('newUser').value = '';
+    document.getElementById('newPass').value = '';
+    loadUsers();
+});
+
+async function deleteUser(id) {
+    if (!confirm('Delete this user?')) return;
+    await fetch('/api/users/' + id, { method: 'DELETE' });
+    loadUsers();
+}
+
+async function loadHistory() {
+    const res = await fetch('/api/zoho/sync-history');
+    const history = await res.json();
+    document.getElementById('historyTable').innerHTML = history.map(h =>
+        '<tr><td>' + new Date(h.created_at).toLocaleString() + '</td><td>' + h.sync_type + '</td><td>' + h.status + '</td><td>' + (h.records_synced || '-') + '</td></tr>'
+    ).join('');
+}
+
+checkSession();
+</script>
+</body>
+</html>`);
+});
+
+initDB().then(() => {
+    app.listen(PORT, () => console.log('Product Catalog running on port ' + PORT));
+});

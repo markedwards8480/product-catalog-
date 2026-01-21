@@ -42,6 +42,8 @@ async function initDB() {
         try { await pool.query('ALTER TABLE selections ADD COLUMN IF NOT EXISTS share_type VARCHAR(50) DEFAULT \'link\''); } catch (e) {}
         try { await pool.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS first_seen_import INTEGER'); } catch (e) {}
         try { await pool.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS ai_tags TEXT'); } catch (e) {}
+        try { await pool.query('ALTER TABLE product_colors ADD COLUMN IF NOT EXISTS left_to_sell INTEGER DEFAULT 0'); } catch (e) {}
+        try { await pool.query('ALTER TABLE product_colors ADD COLUMN IF NOT EXISTS available_now INTEGER DEFAULT 0'); } catch (e) {}
         
         var userCheck = await pool.query('SELECT COUNT(*) FROM users');
         if (parseInt(userCheck.rows[0].count) === 0) {
@@ -93,7 +95,7 @@ app.get('/api/session', function(req, res) {
 
 app.get('/api/products', requireAuth, async function(req, res) {
     try {
-        var result = await pool.query('SELECT p.id, p.style_id, p.base_style, p.name, p.category, p.image_url, p.first_seen_import, p.ai_tags, json_agg(json_build_object(\'id\', pc.id, \'color_name\', pc.color_name, \'available_qty\', pc.available_qty, \'on_hand\', pc.on_hand)) FILTER (WHERE pc.id IS NOT NULL) as colors FROM products p LEFT JOIN product_colors pc ON p.id = pc.product_id GROUP BY p.id ORDER BY p.category, p.name');
+        var result = await pool.query('SELECT p.id, p.style_id, p.base_style, p.name, p.category, p.image_url, p.first_seen_import, p.ai_tags, json_agg(json_build_object(\'id\', pc.id, \'color_name\', pc.color_name, \'available_now\', COALESCE(pc.available_now, pc.available_qty, 0), \'left_to_sell\', COALESCE(pc.left_to_sell, pc.available_qty, 0), \'on_hand\', pc.on_hand, \'open_order\', COALESCE(pc.open_order, 0), \'to_come\', COALESCE(pc.to_come, 0))) FILTER (WHERE pc.id IS NOT NULL) as colors FROM products p LEFT JOIN product_colors pc ON p.id = pc.product_id GROUP BY p.id ORDER BY p.category, p.name');
         res.json({ products: result.rows, lastImportId: lastImportId });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -556,25 +558,92 @@ app.post('/api/import', requireAuth, requireAdmin, upload.single('file'), async 
         var existingStyleSet = {};
         existingStyles.rows.forEach(function(r) { existingStyleSet[r.style_id] = true; });
         
-        var content = req.file.buffer.toString('utf-8'); var allLines = content.split('\n'); var lines = []; for (var i = 0; i < allLines.length; i++) { if (allLines[i].trim()) lines.push(allLines[i]); } if (lines.length < 2) return res.status(400).json({ error: 'File appears empty' });
-        var headerLine = lines[0]; if (headerLine.charCodeAt(0) === 0xFEFF) headerLine = headerLine.slice(1); var headersRaw = parseCSVLine(headerLine); var headers = []; for (var h = 0; h < headersRaw.length; h++) { headers.push(headersRaw[h].toLowerCase().replace(/[^\w\s]/g, '').trim()); }
-        var headerMap = {}; for (var hi = 0; hi < headers.length; hi++) { headerMap[headers[hi]] = hi; }
-        var imported = 0, skipped = 0, newArrivals = 0; var lastStyleId = null, lastImageUrl = null, lastCategory = null;
-        for (var li = 1; li < lines.length; li++) { try { var values = parseCSVLine(lines[li]); if (values[0] && values[0].indexOf('Grand Summary') !== -1) { skipped++; continue; } var styleId = values[headerMap['style name']] || values[0]; var imageUrl = values[headerMap['style image']] || values[1]; var color = values[headerMap['color']] || values[2]; var category = values[headerMap['commodity']] || values[3]; var onHand = parseNumber(values[headerMap['on hand']] || values[4]); var available = parseNumber(values[headerMap['available now']] || values[headerMap['left to sell']] || values[7]); if (!styleId && color) { styleId = lastStyleId; if (!imageUrl || imageUrl === '-No Value-') imageUrl = lastImageUrl; if (!category || category === '-No Value-') category = lastCategory; } if (!styleId) { skipped++; continue; } lastStyleId = styleId; if (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) lastImageUrl = imageUrl; if (category && category !== '-No Value-') lastCategory = category; var baseStyle = styleId.split('-')[0]; var validCategory = (category && category !== '-No Value-') ? category : 'Uncategorized'; var name = validCategory + ' - ' + baseStyle; var validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) ? imageUrl : lastImageUrl; 
-            var isNewStyle = !existingStyleSet[styleId];
-            var productResult = await pool.query('SELECT id, image_url FROM products WHERE style_id = $1', [styleId]); 
-            var productId; 
-            if (productResult.rows.length > 0) { 
-                productId = productResult.rows[0].id; 
-                var finalImage = validImageUrl || productResult.rows[0].image_url; 
-                await pool.query('UPDATE products SET name=$1, category=$2, base_style=$3, image_url=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5', [name, validCategory, baseStyle, finalImage, productId]); 
-            } else { 
-                var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url, first_seen_import) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl, currentImportId]); 
-                productId = ins.rows[0].id;
-                if (isNewStyle) newArrivals++;
-                existingStyleSet[styleId] = true;
+        var content = req.file.buffer.toString('utf-8'); 
+        var allLines = content.split('\n'); 
+        var lines = []; 
+        for (var i = 0; i < allLines.length; i++) { 
+            if (allLines[i].trim()) lines.push(allLines[i]); 
+        } 
+        if (lines.length < 2) return res.status(400).json({ error: 'File appears empty' });
+        
+        var headerLine = lines[0]; 
+        if (headerLine.charCodeAt(0) === 0xFEFF) headerLine = headerLine.slice(1); 
+        var headersRaw = parseCSVLine(headerLine); 
+        var headers = []; 
+        for (var h = 0; h < headersRaw.length; h++) { 
+            headers.push(headersRaw[h].toLowerCase().replace(/[^\w\s]/g, '').trim()); 
+        }
+        var headerMap = {}; 
+        for (var hi = 0; hi < headers.length; hi++) { 
+            headerMap[headers[hi]] = hi; 
+        }
+        
+        var imported = 0, skipped = 0, newArrivals = 0; 
+        var lastStyleId = null, lastImageUrl = null, lastCategory = null;
+        
+        for (var li = 1; li < lines.length; li++) { 
+            try { 
+                var values = parseCSVLine(lines[li]); 
+                if (values[0] && values[0].indexOf('Grand Summary') !== -1) { skipped++; continue; } 
+                
+                var styleId = values[headerMap['style name']] || values[0]; 
+                var imageUrl = values[headerMap['style image']] || values[1]; 
+                var color = values[headerMap['color']] || values[2]; 
+                var category = values[headerMap['commodity']] || values[3]; 
+                var onHand = parseNumber(values[headerMap['net on hand']] || values[4]); 
+                var availableNow = parseNumber(values[headerMap['available now']] || values[7]); 
+                var openOrder = parseNumber(values[headerMap['open order']] || values[8]); 
+                var toCome = parseNumber(values[headerMap['to come']] || values[9]); 
+                var leftToSell = parseNumber(values[headerMap['left to sell']] || values[10]); 
+                
+                // Handle rows where style is inherited from previous row
+                if (!styleId && color) { 
+                    styleId = lastStyleId; 
+                    if (!imageUrl || imageUrl === '-No Value-') imageUrl = lastImageUrl; 
+                    if (!category || category === '-No Value-') category = lastCategory; 
+                } 
+                if (!styleId) { skipped++; continue; } 
+                
+                lastStyleId = styleId; 
+                if (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) lastImageUrl = imageUrl; 
+                if (category && category !== '-No Value-') lastCategory = category; 
+                
+                var baseStyle = styleId.split('-')[0]; 
+                var validCategory = (category && category !== '-No Value-') ? category : 'Uncategorized'; 
+                var name = validCategory + ' - ' + baseStyle; 
+                var validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) ? imageUrl : lastImageUrl; 
+                
+                var isNewStyle = !existingStyleSet[styleId];
+                var productResult = await pool.query('SELECT id, image_url FROM products WHERE style_id = $1', [styleId]); 
+                var productId; 
+                
+                if (productResult.rows.length > 0) { 
+                    productId = productResult.rows[0].id; 
+                    var finalImage = validImageUrl || productResult.rows[0].image_url; 
+                    await pool.query('UPDATE products SET name=$1, category=$2, base_style=$3, image_url=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5', [name, validCategory, baseStyle, finalImage, productId]); 
+                } else { 
+                    var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url, first_seen_import) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl, currentImportId]); 
+                    productId = ins.rows[0].id;
+                    if (isNewStyle) newArrivals++;
+                    existingStyleSet[styleId] = true;
+                } 
+                
+                if (color && color !== '-No Value-') { 
+                    var colorResult = await pool.query('SELECT id FROM product_colors WHERE product_id=$1 AND color_name=$2', [productId, color]); 
+                    if (colorResult.rows.length > 0) { 
+                        await pool.query('UPDATE product_colors SET available_now=$1, left_to_sell=$2, on_hand=$3, open_order=$4, to_come=$5, available_qty=$6, updated_at=CURRENT_TIMESTAMP WHERE id=$7', 
+                            [availableNow, leftToSell, onHand, openOrder, toCome, availableNow, colorResult.rows[0].id]); 
+                    } else { 
+                        await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', 
+                            [productId, color, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]); 
+                    } 
+                } 
+                imported++; 
+            } catch (rowErr) { 
+                console.error('Row error:', rowErr.message);
+                skipped++; 
             } 
-            if (color && color !== '-No Value-') { var colorResult = await pool.query('SELECT id FROM product_colors WHERE product_id=$1 AND color_name=$2', [productId, color]); if (colorResult.rows.length > 0) { await pool.query('UPDATE product_colors SET available_qty=$1, on_hand=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3', [available, onHand, colorResult.rows[0].id]); } else { await pool.query('INSERT INTO product_colors (product_id, color_name, available_qty, on_hand) VALUES ($1,$2,$3,$4)', [productId, color, available, onHand]); } } imported++; } catch (rowErr) { skipped++; } }
+        }
         
         // Update sync history with actual count
         await pool.query('UPDATE sync_history SET records_synced = $1 WHERE id = $2', [imported, currentImportId]);
@@ -713,7 +782,8 @@ function getHTML() {
     html += '.admin-panel{background:white;padding:1.5rem;border-radius:8px;margin-bottom:2rem}.admin-panel h2{margin-bottom:1rem}';
     html += '.tabs{display:flex;gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap}.tab{padding:0.5rem 1rem;border:none;background:#eee;cursor:pointer;border-radius:4px}.tab.active{background:#2c5545;color:white}.tab-content{display:none}.tab-content.active{display:block}';
     html += '.upload-area{border:2px dashed #ddd;padding:2rem;text-align:center;border-radius:4px;margin-bottom:1rem}.upload-area input{display:none}.upload-area label{color:#2c5545;cursor:pointer}';
-    html += '.stats{display:flex;gap:2rem;margin-bottom:1rem;padding:1rem;background:white;border-radius:8px}.stat-value{font-size:1.5rem;font-weight:bold}.stat-label{color:#666;font-size:0.875rem}';
+    html += '.stats{display:flex;gap:2rem;margin-bottom:1rem;padding:1rem;background:white;border-radius:8px;align-items:center;flex-wrap:wrap}.stat-value{font-size:1.5rem;font-weight:bold}.stat-label{color:#666;font-size:0.875rem}';
+    html += '.qty-toggle{display:flex;background:#e0e0e0;border-radius:6px;padding:3px;margin-left:auto}.qty-toggle-btn{padding:0.5rem 1rem;border:none;background:transparent;cursor:pointer;font-size:0.875rem;font-weight:500;border-radius:4px;transition:all 0.2s;color:#666}.qty-toggle-btn.active{background:#2c5545;color:white;box-shadow:0 2px 4px rgba(0,0,0,0.15)}.qty-toggle-btn:hover:not(.active){background:#d0d0d0}';
     html += '.filters{display:flex;gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap;align-items:center}.filter-btn{padding:0.5rem 1rem;border:1px solid #ddd;background:white;border-radius:20px;cursor:pointer}.filter-btn.active{background:#2c5545;color:white;border-color:#2c5545}';
     html += '.color-dropdown{position:absolute;top:100%;left:0;background:white;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);padding:0.5rem;z-index:100;max-height:300px;overflow-y:auto;min-width:200px}.color-dropdown.hidden{display:none}.color-option{display:block;padding:0.5rem 1rem;cursor:pointer;border-radius:4px;font-size:0.875rem}.color-option:hover{background:#f5f5f5}.color-option.active{background:#2c5545;color:white}';
     html += '.product-grid{display:grid;gap:1.5rem}.product-grid.size-small{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}.product-grid.size-medium{grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}.product-grid.size-large{grid-template-columns:repeat(auto-fill,minmax(400px,1fr))}.product-grid.size-list{display:flex;flex-direction:column;gap:0.5rem}';
@@ -776,7 +846,7 @@ function getHTML() {
     html += '<div id="ai2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">API Status: </span><span class="status-value" id="aiStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Products Analyzed: </span><span class="status-value" id="aiAnalyzedCount">-</span></div><div class="status-item"><span class="status-label">Remaining: </span><span class="status-value" id="aiRemainingCount">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">AI analysis uses Claude Vision to generate searchable tags from product images. This enables searching by garment type (cardigan, hoodie), style (casual, formal), pattern (striped, floral), and more.</p><button class="btn btn-primary" id="runAiBtn">Analyze Next 10 Products</button><div id="aiMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Username</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUser" placeholder="Username"><input type="password" id="newPass" placeholder="Password"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add</button></div></div></div>';
     
-    html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div><div class="stat-value" id="totalUnits">0</div><div class="stat-label">Units Available</div></div></div>';
+    html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div><div class="stat-value" id="totalUnits">0</div><div class="stat-label" id="unitsLabel">Units Available</div></div><div class="qty-toggle"><button class="qty-toggle-btn active" id="toggleAvailableNow" data-mode="available_now">📦 Available Now</button><button class="qty-toggle-btn" id="toggleLeftToSell" data-mode="left_to_sell">📊 Left to Sell</button></div></div>';
     html += '<div class="view-controls"><label>View:</label><button class="size-btn" data-size="list">List</button><button class="size-btn" data-size="small">Small</button><button class="size-btn active" data-size="medium">Medium</button><button class="size-btn" data-size="large">Large</button><span style="margin-left:1rem"></span><label>Sort:</label><select id="sortSelect" style="padding:0.4rem;border:1px solid #ddd;border-radius:4px"><option value="name-asc">Name A-Z</option><option value="name-desc">Name Z-A</option><option value="qty-high">Qty High→Low</option><option value="qty-low">Qty Low→High</option><option value="newest">Newest First</option></select><span style="margin-left:1rem"></span><label>Qty:</label><input type="number" id="minQty" placeholder="Min" style="width:70px;padding:0.4rem;border:1px solid #ddd;border-radius:4px"><span style="margin:0 0.25rem">-</span><input type="number" id="maxQty" placeholder="Max" style="width:70px;padding:0.4rem;border:1px solid #ddd;border-radius:4px"><button id="resetQtyBtn" style="margin-left:0.5rem;padding:0.4rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.875rem">Reset</button><span style="margin-left:auto"></span><button class="btn btn-secondary btn-sm" id="compareBtn" disabled style="padding:0.4rem 0.75rem">Compare (0)</button><button class="select-mode-btn" id="selectModeBtn">Select for Sharing</button></div>';
     html += '<div class="filters"><button class="filter-btn" data-special="new">New Arrivals</button><button class="filter-btn" data-special="picks">My Picks</button><button class="filter-btn" data-special="notes">Has Notes</button><span style="margin:0 0.5rem;color:#ccc">|</span><div style="display:inline-block;position:relative"><button class="filter-btn" id="colorFilterBtn">Color: All ▼</button><button class="filter-btn hidden" id="clearColorBtn" style="margin-left:0.25rem;padding:0.5rem 0.75rem">✕</button><div id="colorDropdown" class="color-dropdown hidden"></div></div><span style="margin:0 0.5rem;color:#ccc">|</span><span id="categoryFilters"></span></div>';
     html += '<div class="product-grid size-medium" id="productGrid"></div><div class="empty hidden" id="emptyState">No products found.</div></main></div>';
@@ -823,7 +893,7 @@ function getHTML() {
     html += '</div></div></div>';
     
     html += '<script>';
-    html += 'var products=[];var allProducts=[];var lastImportId=null;var currentFilter="all";var colorFilter=null;var specialFilter=null;var currentSort="name-asc";var currentSize="medium";var selectedProducts=[];var compareProducts=[];var selectionMode=false;var currentShareId=null;var userPicks=[];var userNotes={};var currentModalProductId=null;var focusedIndex=-1;';
+    html += 'var products=[];var allProducts=[];var lastImportId=null;var currentFilter="all";var colorFilter=null;var specialFilter=null;var currentSort="name-asc";var currentSize="medium";var selectedProducts=[];var compareProducts=[];var selectionMode=false;var currentShareId=null;var userPicks=[];var userNotes={};var currentModalProductId=null;var focusedIndex=-1;var qtyMode="available_now";';
     
     html += 'function checkSession(){fetch("/api/session").then(function(r){return r.json()}).then(function(d){if(d.loggedIn){showApp(d.username,d.role);loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();loadShares();loadHistory();if(d.role==="admin"){loadUsers();loadAiStatus()}}})}';
     html += 'function showApp(u,r){document.getElementById("loginPage").classList.add("hidden");document.getElementById("mainApp").classList.remove("hidden");document.getElementById("userInfo").textContent="Welcome, "+u;if(r==="admin")document.getElementById("adminBtn").style.display="block"}';
@@ -843,6 +913,10 @@ function getHTML() {
     
     // Sort handler
     html += 'document.getElementById("sortSelect").addEventListener("change",function(e){currentSort=e.target.value;renderProducts()});';
+    
+    // Quantity mode toggle handlers
+    html += 'document.getElementById("toggleAvailableNow").addEventListener("click",function(){qtyMode="available_now";document.getElementById("toggleAvailableNow").classList.add("active");document.getElementById("toggleLeftToSell").classList.remove("active");document.getElementById("unitsLabel").textContent="Available Now";renderProducts()});';
+    html += 'document.getElementById("toggleLeftToSell").addEventListener("click",function(){qtyMode="left_to_sell";document.getElementById("toggleLeftToSell").classList.add("active");document.getElementById("toggleAvailableNow").classList.remove("active");document.getElementById("unitsLabel").textContent="Left to Sell";renderProducts()});';
     
     html += 'function loadZohoStatus(){fetch("/api/zoho/status").then(function(r){return r.json()}).then(function(d){var st=document.getElementById("zohoStatusText");if(d.connected){st.textContent="Connected";st.className="status-value connected"}else{st.textContent="Not connected";st.className="status-value disconnected"}document.getElementById("zohoWorkspaceId").textContent=d.workspaceId||"Not set";document.getElementById("zohoViewId").textContent=d.viewId||"Not set"})}';
     
@@ -874,13 +948,13 @@ function getHTML() {
     
     html += 'function updateCompareUI(){document.getElementById("compareCount").textContent=compareProducts.length;document.getElementById("compareBtn").disabled=compareProducts.length===0;document.getElementById("compareBtn").textContent="Compare ("+compareProducts.length+")";document.getElementById("compareBar").classList.toggle("visible",compareProducts.length>0)}';
     
-    html += 'function showProductModal(id){currentModalProductId=id;var pr=products.find(function(p){return p.id===id});if(!pr)return;var imgUrl=getImageUrl(pr.image_url);document.getElementById("modalImage").src=imgUrl||"";document.getElementById("modalStyle").textContent=pr.style_id;document.getElementById("modalName").textContent=pr.name;document.getElementById("modalCategory").textContent=pr.category||"";var cols=pr.colors||[];var tot=0;var ch="";cols.forEach(function(c){tot+=c.available_qty||0;ch+="<div class=\\"color-row\\"><span>"+c.color_name+"</span><span>"+(c.available_qty||0).toLocaleString()+"</span></div>"});document.getElementById("modalColors").innerHTML=ch;document.getElementById("modalTotal").textContent=tot.toLocaleString();document.getElementById("modalNote").value=userNotes[id]||"";var isPicked=userPicks.indexOf(id)!==-1;document.getElementById("modalPickBtn").textContent=isPicked?"♥ In My Picks":"♡ Add to My Picks";document.getElementById("modal").classList.add("active");loadSalesHistory(pr.style_id)}';
+    html += 'function showProductModal(id){currentModalProductId=id;var pr=products.find(function(p){return p.id===id});if(!pr)return;var imgUrl=getImageUrl(pr.image_url);document.getElementById("modalImage").src=imgUrl||"";document.getElementById("modalStyle").textContent=pr.style_id;document.getElementById("modalName").textContent=pr.name;document.getElementById("modalCategory").textContent=pr.category||"";var cols=pr.colors||[];var totNow=0,totLts=0;var ch="";cols.forEach(function(c){var aNow=c.available_now||c.available_qty||0;var lts=c.left_to_sell||0;totNow+=aNow;totLts+=lts;ch+="<div class=\\"color-row\\" style=\\"display:grid;grid-template-columns:1fr auto auto;gap:1rem\\"><span>"+c.color_name+"</span><span style=\\"text-align:right\\">"+aNow.toLocaleString()+"</span><span style=\\"text-align:right;color:#666\\">"+lts.toLocaleString()+"</span></div>"});document.getElementById("modalColors").innerHTML="<div style=\\"display:grid;grid-template-columns:1fr auto auto;gap:1rem;font-weight:bold;padding-bottom:0.5rem;margin-bottom:0.5rem;border-bottom:1px solid #ddd;font-size:0.8rem;color:#666\\"><span>Color</span><span style=\\"text-align:right\\">Avail Now</span><span style=\\"text-align:right\\">Left to Sell</span></div>"+ch;document.getElementById("modalTotal").innerHTML="<span style=\\"margin-right:2rem\\">📦 Now: "+totNow.toLocaleString()+"</span><span>📊 LTS: "+totLts.toLocaleString()+"</span>";document.getElementById("modalNote").value=userNotes[id]||"";var isPicked=userPicks.indexOf(id)!==-1;document.getElementById("modalPickBtn").textContent=isPicked?"♥ In My Picks":"♡ Add to My Picks";document.getElementById("modal").classList.add("active");loadSalesHistory(pr.style_id)}';
     
     html += 'function loadSalesHistory(styleId){document.getElementById("salesHistoryLoading").textContent="(loading...)";document.getElementById("salesHistorySummary").innerHTML="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#666;padding:0.5rem\\">Loading sales history...</div>";fetch("/api/sales-history/"+encodeURIComponent(styleId)).then(function(r){return r.json()}).then(function(d){document.getElementById("salesHistoryLoading").textContent="";if(!d.success){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">Unable to load sales history</div>";return}var sum=d.summary;document.getElementById("salesHistorySummary").innerHTML="<div style=\\"padding:0.5rem 0.75rem;background:#e8f5e9;border-radius:4px\\"><div style=\\"font-weight:bold;color:#2e7d32\\">"+sum.totalInvoiced.toLocaleString()+"</div><div style=\\"font-size:0.75rem;color:#666\\">Units Invoiced ("+sum.invoiceCount+" orders)</div></div><div style=\\"padding:0.5rem 0.75rem;background:#fff3e0;border-radius:4px\\"><div style=\\"font-weight:bold;color:#ef6c00\\">"+sum.totalOpenOrders.toLocaleString()+"</div><div style=\\"font-size:0.75rem;color:#666\\">Open Orders ("+sum.openOrderCount+")</div></div>";if(d.history.length===0){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">No sales history found for this style</div>";return}var h="<table style=\\"width:100%;border-collapse:collapse;font-size:0.8rem\\"><thead><tr style=\\"background:#f5f5f5\\"><th style=\\"text-align:left;padding:0.4rem\\">Date</th><th style=\\"text-align:left;padding:0.4rem\\">Customer</th><th style=\\"text-align:left;padding:0.4rem\\">Type</th><th style=\\"text-align:right;padding:0.4rem\\">Qty</th></tr></thead><tbody>";d.history.forEach(function(rec){var typeLabel=rec.type==="invoice"?"<span style=\\"color:#2e7d32\\">Invoice</span>":"<span style=\\"color:#ef6c00\\">SO"+(rec.isOpen?" (Open)":"")+"</span>";var dt=new Date(rec.date).toLocaleDateString();h+="<tr style=\\"border-bottom:1px solid #eee\\"><td style=\\"padding:0.4rem\\">"+dt+"</td><td style=\\"padding:0.4rem\\">"+rec.customerName+"</td><td style=\\"padding:0.4rem\\">"+typeLabel+"</td><td style=\\"padding:0.4rem;text-align:right\\">"+rec.quantity.toLocaleString()+"</td></tr>"});h+="</tbody></table>";document.getElementById("salesHistoryList").innerHTML=h}).catch(function(err){document.getElementById("salesHistoryLoading").textContent="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">Error loading sales history</div>"})}';
     
     html += 'function updateSelectionUI(){document.getElementById("selectedCount").textContent=selectedProducts.length;var bar=document.getElementById("selectionBar");if(selectedProducts.length>0&&selectionMode){bar.classList.add("visible")}else{bar.classList.remove("visible")}}';
     
-    html += 'function renderProducts(){var s=document.getElementById("searchInput").value.toLowerCase().trim();var searchWords=s?s.split(/\\s+/):[];var minQ=parseInt(document.getElementById("minQty").value)||0;var maxQ=parseInt(document.getElementById("maxQty").value)||999999999;var f=allProducts.filter(function(p){var searchText=p.style_id.toLowerCase()+" "+p.name.toLowerCase()+" "+(p.ai_tags||"").toLowerCase();var ms=searchWords.length===0||searchWords.every(function(word){return searchText.indexOf(word)!==-1});var mc=currentFilter==="all"||p.category===currentFilter;var colorNames=(p.colors||[]).map(function(c){return c.color_name});var mcolor=!colorFilter||colorNames.indexOf(colorFilter)!==-1;var tot=0;(p.colors||[]).forEach(function(c){tot+=c.available_qty||0});var mq=tot>=minQ&&tot<=maxQ;var msp=true;if(specialFilter==="new"){msp=p.first_seen_import===lastImportId}else if(specialFilter==="picks"){msp=userPicks.indexOf(p.id)!==-1}else if(specialFilter==="notes"){msp=!!userNotes[p.id]}return ms&&mc&&mcolor&&mq&&msp});f.sort(function(a,b){var ta=0,tb=0;(a.colors||[]).forEach(function(c){ta+=c.available_qty||0});(b.colors||[]).forEach(function(c){tb+=c.available_qty||0});if(currentSort==="qty-high")return tb-ta;if(currentSort==="qty-low")return ta-tb;if(currentSort==="name-desc")return b.name.localeCompare(a.name);if(currentSort==="newest")return(b.first_seen_import||0)-(a.first_seen_import||0);return a.name.localeCompare(b.name)});products=f;if(f.length===0){document.getElementById("productGrid").innerHTML="";document.getElementById("emptyState").classList.remove("hidden")}else{document.getElementById("emptyState").classList.add("hidden");var h="";var isListView=currentSize==="list";f.forEach(function(pr,idx){var cols=pr.colors||[];var tot=0;cols.forEach(function(c){tot+=c.available_qty||0});var ch="";if(!isListView){var mx=Math.min(cols.length,3);for(var d=0;d<mx;d++){ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+(cols[d].available_qty||0).toLocaleString()+"</span></div>"}if(cols.length>3)ch+="<div class=\\"color-row\\" style=\\"color:#999\\">+"+(cols.length-3)+" more</div>"}var listCols="";if(isListView){cols.slice(0,5).forEach(function(c){listCols+=c.color_name+": "+(c.available_qty||0).toLocaleString()+"; "});if(cols.length>5)listCols+="+"+(cols.length-5)+" more"}var imgUrl=getImageUrl(pr.image_url);var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";var sel=selectedProducts.indexOf(pr.id)!==-1?"selected":"";var selModeClass=selectionMode?"selection-mode":"";var listClass=isListView?"list-view":"";var isPicked=userPicks.indexOf(pr.id)!==-1;var hasNote=!!userNotes[pr.id];h+="<div class=\\"product-card "+sel+" "+selModeClass+" "+listClass+"\\" data-idx=\\""+idx+"\\" onclick=\\"handleCardClick("+pr.id+",event)\\"><div class=\\"select-badge\\">✓</div><div class=\\"pick-badge "+(isPicked?"active":"")+"\\">"+(isPicked?"♥":"♡")+"</div><div class=\\"note-badge "+(hasNote?"has-note":"")+"\\">📝</div><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+pr.style_id+"</div><div class=\\"product-name\\">"+pr.name+"</div>"+(isListView?"<div class=\\"list-colors\\">"+listCols+"</div>":"<div class=\\"color-list\\">"+ch+"</div>")+"<div class=\\"total-row\\"><span>Total</span><span>"+tot.toLocaleString()+"</span></div></div></div>"});document.getElementById("productGrid").innerHTML=h}document.getElementById("totalStyles").textContent=f.length;var tu=0;f.forEach(function(p){(p.colors||[]).forEach(function(c){tu+=c.available_qty||0})});document.getElementById("totalUnits").textContent=tu.toLocaleString();focusedIndex=-1}';
+    html += 'function renderProducts(){var s=document.getElementById("searchInput").value.toLowerCase().trim();var searchWords=s?s.split(/\\s+/):[];var minQ=parseInt(document.getElementById("minQty").value)||0;var maxQ=parseInt(document.getElementById("maxQty").value)||999999999;var f=allProducts.filter(function(p){var searchText=p.style_id.toLowerCase()+" "+p.name.toLowerCase()+" "+(p.ai_tags||"").toLowerCase();var ms=searchWords.length===0||searchWords.every(function(word){return searchText.indexOf(word)!==-1});var mc=currentFilter==="all"||p.category===currentFilter;var colorNames=(p.colors||[]).map(function(c){return c.color_name});var mcolor=!colorFilter||colorNames.indexOf(colorFilter)!==-1;var tot=0;(p.colors||[]).forEach(function(c){tot+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))});var mq=tot>=minQ&&tot<=maxQ;var msp=true;if(specialFilter==="new"){msp=p.first_seen_import===lastImportId}else if(specialFilter==="picks"){msp=userPicks.indexOf(p.id)!==-1}else if(specialFilter==="notes"){msp=!!userNotes[p.id]}return ms&&mc&&mcolor&&mq&&msp});f.sort(function(a,b){var ta=0,tb=0;(a.colors||[]).forEach(function(c){ta+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))});(b.colors||[]).forEach(function(c){tb+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))});if(currentSort==="qty-high")return tb-ta;if(currentSort==="qty-low")return ta-tb;if(currentSort==="name-desc")return b.name.localeCompare(a.name);if(currentSort==="newest")return(b.first_seen_import||0)-(a.first_seen_import||0);return a.name.localeCompare(b.name)});products=f;if(f.length===0){document.getElementById("productGrid").innerHTML="";document.getElementById("emptyState").classList.remove("hidden")}else{document.getElementById("emptyState").classList.add("hidden");var h="";var isListView=currentSize==="list";f.forEach(function(pr,idx){var cols=pr.colors||[];var totNow=0,totLts=0;cols.forEach(function(c){totNow+=(c.available_now||c.available_qty||0);totLts+=(c.left_to_sell||0)});var primaryQty=qtyMode==="left_to_sell"?totLts:totNow;var secondaryQty=qtyMode==="left_to_sell"?totNow:totLts;var secondaryLabel=qtyMode==="left_to_sell"?"Now":"LTS";var ch="";if(!isListView){var mx=Math.min(cols.length,3);for(var d=0;d<mx;d++){var cq=qtyMode==="left_to_sell"?(cols[d].left_to_sell||0):(cols[d].available_now||cols[d].available_qty||0);ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+cq.toLocaleString()+"</span></div>"}if(cols.length>3)ch+="<div class=\\"color-row\\" style=\\"color:#999\\">+"+(cols.length-3)+" more</div>"}var listCols="";if(isListView){cols.slice(0,5).forEach(function(c){var cq=qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0);listCols+=c.color_name+": "+cq.toLocaleString()+"; "});if(cols.length>5)listCols+="+"+(cols.length-5)+" more"}var imgUrl=getImageUrl(pr.image_url);var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";var sel=selectedProducts.indexOf(pr.id)!==-1?"selected":"";var selModeClass=selectionMode?"selection-mode":"";var listClass=isListView?"list-view":"";var isPicked=userPicks.indexOf(pr.id)!==-1;var hasNote=!!userNotes[pr.id];h+="<div class=\\"product-card "+sel+" "+selModeClass+" "+listClass+"\\" data-idx=\\""+idx+"\\" onclick=\\"handleCardClick("+pr.id+",event)\\"><div class=\\"select-badge\\">✓</div><div class=\\"pick-badge "+(isPicked?"active":"")+"\\">"+(isPicked?"♥":"♡")+"</div><div class=\\"note-badge "+(hasNote?"has-note":"")+"\\">📝</div><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+pr.style_id+"</div><div class=\\"product-name\\">"+pr.name+"</div>"+(isListView?"<div class=\\"list-colors\\">"+listCols+"</div>":"<div class=\\"color-list\\">"+ch+"</div>")+"<div class=\\"total-row\\"><span>Total</span><span>"+primaryQty.toLocaleString()+"</span></div><div style=\\"font-size:0.75rem;color:#999;text-align:right\\">("+secondaryLabel+": "+secondaryQty.toLocaleString()+")</div></div></div>"});document.getElementById("productGrid").innerHTML=h}document.getElementById("totalStyles").textContent=f.length;var tu=0;f.forEach(function(p){(p.colors||[]).forEach(function(c){tu+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))})});document.getElementById("totalUnits").textContent=tu.toLocaleString();focusedIndex=-1}';
     
     html += 'document.getElementById("searchInput").addEventListener("input",renderProducts);';
     html += 'document.getElementById("clearSearchBtn").addEventListener("click",function(){document.getElementById("searchInput").value="";renderProducts()});';

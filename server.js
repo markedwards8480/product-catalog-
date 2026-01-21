@@ -30,7 +30,7 @@ var lastImportId = null;
 async function initDB() {
     try {
         await pool.query('CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, username VARCHAR(255) UNIQUE NOT NULL, password VARCHAR(255) NOT NULL, role VARCHAR(50) DEFAULT \'sales_rep\', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
-        await pool.query('CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, style_id VARCHAR(100) NOT NULL, base_style VARCHAR(100), name VARCHAR(255) NOT NULL, category VARCHAR(100), image_url TEXT, first_seen_import INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
+        await pool.query('CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, style_id VARCHAR(100) NOT NULL, base_style VARCHAR(100), name VARCHAR(255) NOT NULL, category VARCHAR(100), image_url TEXT, first_seen_import INTEGER, ai_tags TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         await pool.query('CREATE TABLE IF NOT EXISTS product_colors (id SERIAL PRIMARY KEY, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE, color_name VARCHAR(100) NOT NULL, available_qty INTEGER DEFAULT 0, on_hand INTEGER DEFAULT 0, open_order INTEGER DEFAULT 0, to_come INTEGER DEFAULT 0, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         await pool.query('CREATE TABLE IF NOT EXISTS sync_history (id SERIAL PRIMARY KEY, sync_type VARCHAR(50), status VARCHAR(50), records_synced INTEGER DEFAULT 0, error_message TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         await pool.query('CREATE TABLE IF NOT EXISTS zoho_tokens (id SERIAL PRIMARY KEY, access_token TEXT, refresh_token TEXT, expires_at TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
@@ -41,6 +41,7 @@ async function initDB() {
         // Add columns if they don't exist (for existing databases)
         try { await pool.query('ALTER TABLE selections ADD COLUMN IF NOT EXISTS share_type VARCHAR(50) DEFAULT \'link\''); } catch (e) {}
         try { await pool.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS first_seen_import INTEGER'); } catch (e) {}
+        try { await pool.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS ai_tags TEXT'); } catch (e) {}
         
         var userCheck = await pool.query('SELECT COUNT(*) FROM users');
         if (parseInt(userCheck.rows[0].count) === 0) {
@@ -92,8 +93,61 @@ app.get('/api/session', function(req, res) {
 
 app.get('/api/products', requireAuth, async function(req, res) {
     try {
-        var result = await pool.query('SELECT p.id, p.style_id, p.base_style, p.name, p.category, p.image_url, p.first_seen_import, json_agg(json_build_object(\'id\', pc.id, \'color_name\', pc.color_name, \'available_qty\', pc.available_qty, \'on_hand\', pc.on_hand)) FILTER (WHERE pc.id IS NOT NULL) as colors FROM products p LEFT JOIN product_colors pc ON p.id = pc.product_id GROUP BY p.id ORDER BY p.category, p.name');
+        var result = await pool.query('SELECT p.id, p.style_id, p.base_style, p.name, p.category, p.image_url, p.first_seen_import, p.ai_tags, json_agg(json_build_object(\'id\', pc.id, \'color_name\', pc.color_name, \'available_qty\', pc.available_qty, \'on_hand\', pc.on_hand)) FILTER (WHERE pc.id IS NOT NULL) as colors FROM products p LEFT JOIN product_colors pc ON p.id = pc.product_id GROUP BY p.id ORDER BY p.category, p.name');
         res.json({ products: result.rows, lastImportId: lastImportId });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// AI Analysis endpoint - analyze products without tags
+app.post('/api/ai-analyze', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        if (!process.env.ANTHROPIC_API_KEY) {
+            return res.json({ success: false, error: 'ANTHROPIC_API_KEY not configured in environment variables' });
+        }
+        
+        // Get products without AI tags that have images
+        var result = await pool.query("SELECT id, style_id, name, image_url FROM products WHERE (ai_tags IS NULL OR ai_tags = '') AND image_url IS NOT NULL AND image_url != '' LIMIT 10");
+        
+        if (result.rows.length === 0) {
+            return res.json({ success: true, message: 'All products already have AI tags', analyzed: 0, remaining: 0 });
+        }
+        
+        var analyzed = 0;
+        for (var i = 0; i < result.rows.length; i++) {
+            var product = result.rows[i];
+            var tags = await analyzeProductImage(product.image_url, product.name);
+            if (tags) {
+                await pool.query('UPDATE products SET ai_tags = $1 WHERE id = $2', [tags, product.id]);
+                analyzed++;
+            }
+            // Small delay to avoid rate limiting
+            await new Promise(function(resolve) { setTimeout(resolve, 500); });
+        }
+        
+        // Check how many remain
+        var remaining = await pool.query("SELECT COUNT(*) FROM products WHERE (ai_tags IS NULL OR ai_tags = '') AND image_url IS NOT NULL AND image_url != ''");
+        
+        res.json({ 
+            success: true, 
+            message: 'Analyzed ' + analyzed + ' products', 
+            analyzed: analyzed, 
+            remaining: parseInt(remaining.rows[0].count)
+        });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Get AI analysis status
+app.get('/api/ai-status', requireAuth, async function(req, res) {
+    try {
+        var total = await pool.query('SELECT COUNT(*) FROM products WHERE image_url IS NOT NULL');
+        var withTags = await pool.query("SELECT COUNT(*) FROM products WHERE ai_tags IS NOT NULL AND ai_tags != ''");
+        var hasKey = !!process.env.ANTHROPIC_API_KEY;
+        res.json({
+            configured: hasKey,
+            total: parseInt(total.rows[0].count),
+            analyzed: parseInt(withTags.rows[0].count),
+            remaining: parseInt(total.rows[0].count) - parseInt(withTags.rows[0].count)
+        });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -176,6 +230,82 @@ function startTokenRefreshJob() {
     console.log('Starting background token refresh job (every 30 minutes)');
     refreshZohoToken();
     setInterval(function() { refreshZohoToken(); }, 30 * 60 * 1000);
+}
+
+// AI Image Analysis using Claude Vision
+async function analyzeProductImage(imageUrl, productName) {
+    try {
+        var anthropicKey = process.env.ANTHROPIC_API_KEY;
+        if (!anthropicKey) {
+            console.log('ANTHROPIC_API_KEY not configured, skipping AI analysis');
+            return null;
+        }
+        
+        // Fetch the image
+        var imgResponse;
+        if (imageUrl.indexOf('download-accl.zoho.com') !== -1) {
+            // WorkDrive image - need to fetch with auth
+            if (!zohoAccessToken) await refreshZohoToken();
+            var fileId = imageUrl.split('/').pop();
+            var workdriveUrl = 'https://workdrive.zoho.com/api/v1/download/' + fileId;
+            imgResponse = await fetch(workdriveUrl, { 
+                headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } 
+            });
+        } else {
+            imgResponse = await fetch(imageUrl);
+        }
+        
+        if (!imgResponse.ok) {
+            console.log('Failed to fetch image:', imageUrl);
+            return null;
+        }
+        
+        var imgBuffer = Buffer.from(await imgResponse.arrayBuffer());
+        var base64Image = imgBuffer.toString('base64');
+        var mediaType = imgResponse.headers.get('content-type') || 'image/jpeg';
+        
+        // Call Claude Vision API
+        var response = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': anthropicKey,
+                'anthropic-version': '2023-06-01'
+            },
+            body: JSON.stringify({
+                model: 'claude-sonnet-4-20250514',
+                max_tokens: 300,
+                messages: [{
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'image',
+                            source: { type: 'base64', media_type: mediaType, data: base64Image }
+                        },
+                        {
+                            type: 'text',
+                            text: 'Analyze this apparel product image. Return ONLY a comma-separated list of descriptive tags (no sentences). Be thorough and specific. Include:\n- Garment type: sweater, cardigan, hoodie, sweatshirt, t-shirt, tank top, blouse, dress, skirt, pants, jeans, shorts, jacket, coat, romper, jumpsuit, set, matching set, 2-piece, etc.\n- Neckline: crew neck, v-neck, scoop neck, turtleneck, mock neck, hoodie, collared, off-shoulder, etc.\n- Closure: button-front, zip-up, pullover, snap buttons, tie-front, open-front, etc.\n- Sleeves: long sleeve, short sleeve, sleeveless, 3/4 sleeve, cap sleeve, etc.\n- Fit: oversized, relaxed, slim, fitted, cropped, longline, regular, boxy, etc.\n- Length: mini, midi, maxi, cropped, full-length, etc.\n- Pattern: solid, striped, horizontal stripes, vertical stripes, floral, plaid, checkered, polka dot, animal print, leopard, camo, tie-dye, ombre, colorblock, graphic, logo, text print, heart print, star print, abstract, geometric, etc.\n- Material appearance: knit, ribbed, fleece, denim, leather, satin, lace, mesh, terry, velvet, sequin, etc.\n- Style: casual, athletic, sporty, loungewear, streetwear, bohemian, preppy, vintage, minimalist, glamorous, etc.\n- Details: pockets, kangaroo pocket, drawstring, hood, ribbed cuffs, distressed, embroidered, ruffle, lace trim, etc.\n- Season: spring, summer, fall, winter, all-season\n- Any visible text, brand names, or graphics on the garment\n\nExample output: cardigan, button-front, v-neck, long sleeve, cropped, relaxed fit, striped, horizontal stripes, knit, ribbed, casual, fall, cream and navy'
+                        }
+                    ]
+                }]
+            })
+        });
+        
+        if (!response.ok) {
+            var errorText = await response.text();
+            console.log('Claude API error:', errorText);
+            return null;
+        }
+        
+        var data = await response.json();
+        var tags = data.content[0].text.trim();
+        console.log('AI tags for', productName, ':', tags);
+        return tags;
+        
+    } catch (err) {
+        console.error('AI analysis error:', err.message);
+        return null;
+    }
 }
 
 app.get('/api/zoho/status', requireAuth, function(req, res) {
@@ -394,7 +524,8 @@ function getHTML() {
     html += '.btn{padding:0.75rem 1.5rem;border:none;border-radius:4px;cursor:pointer;font-size:1rem}.btn-primary{background:#2c5545;color:white}.btn-secondary{background:#eee;color:#333}.btn-danger{background:#c4553d;color:white}.btn-success{background:#2e7d32;color:white}';
     html += '.error{color:#c4553d;margin-top:1rem;text-align:center}.success{color:#2e7d32}.hidden{display:none!important}';
     html += '.header{background:white;padding:1rem 2rem;border-bottom:1px solid #ddd;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem}.header h1{font-size:1.25rem}.header-right{display:flex;gap:1rem;align-items:center}';
-    html += '.search-box input{padding:0.5rem 1rem;border:1px solid #ddd;border-radius:4px;width:250px}';
+    html += '.search-box{position:relative}.search-box input{padding:0.5rem 1rem;border:1px solid #ddd;border-radius:4px;width:250px}';
+    html += '.ai-search-indicator{position:absolute;top:100%;left:0;font-size:0.7rem;color:#059669;margin-top:0.2rem;white-space:nowrap}.ai-search-indicator.hidden{display:none}';
     html += '.main{max-width:1400px;margin:0 auto;padding:2rem}';
     html += '.admin-panel{background:white;padding:1.5rem;border-radius:8px;margin-bottom:2rem}.admin-panel h2{margin-bottom:1rem}';
     html += '.tabs{display:flex;gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap}.tab{padding:0.5rem 1rem;border:none;background:#eee;cursor:pointer;border-radius:4px}.tab.active{background:#2c5545;color:white}.tab-content{display:none}.tab-content.active{display:block}';
@@ -436,7 +567,7 @@ function getHTML() {
     
     html += '<div id="loginPage" class="login-page"><div class="login-box"><h1>Mark Edwards Apparel<br><span style="font-size:0.8em;font-weight:normal">Product Catalog</span></h1><form id="loginForm"><div class="form-group"><label>Username</label><input type="text" id="username" required></div><div class="form-group"><label>Password</label><input type="password" id="password" required></div><button type="submit" class="btn btn-primary" style="width:100%">Sign In</button><div id="loginError" class="error hidden"></div></form></div></div>';
     
-    html += '<div id="mainApp" class="hidden"><header class="header"><h1>Mark Edwards Apparel Product Catalog</h1><div class="search-box"><input type="text" id="searchInput" placeholder="Search products..."><button id="clearSearchBtn" style="margin-left:0.5rem;padding:0.5rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer">Clear</button></div><div class="header-right"><span id="userInfo"></span><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn" style="display:none">Admin</button><button class="btn btn-secondary" id="logoutBtn">Sign Out</button></div></header>';
+    html += '<div id="mainApp" class="hidden"><header class="header"><h1>Mark Edwards Apparel Product Catalog</h1><div class="search-box"><input type="text" id="searchInput" placeholder="Search products..."><button id="clearSearchBtn" style="margin-left:0.5rem;padding:0.5rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer">Clear</button><div id="aiSearchIndicator" class="ai-search-indicator hidden">🤖 AI-enhanced search active</div></div><div class="header-right"><span id="userInfo"></span><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn" style="display:none">Admin</button><button class="btn btn-secondary" id="logoutBtn">Sign Out</button></div></header>';
     
     // History panel (visible to all users)
     html += '<main class="main"><div id="historyPanel" class="admin-panel hidden"><h2>History & Status</h2><div class="tabs"><button class="tab active" data-tab="shares">Sharing History</button><button class="tab" data-tab="freshness">Data Freshness</button><button class="tab" data-tab="history">Sync History</button></div>';
@@ -445,9 +576,10 @@ function getHTML() {
     html += '<div id="historyTab" class="tab-content"><table><thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Records</th><th>Error</th></tr></thead><tbody id="historyTable"></tbody></table></div></div>';
     
     // Admin panel (admin only)
-    html += '<div id="adminPanel" class="admin-panel hidden"><h2>Admin Settings</h2><div class="tabs"><button class="tab active" data-tab="zoho2">Zoho Sync</button><button class="tab" data-tab="import2">Import CSV</button><button class="tab" data-tab="users2">Users</button></div>';
+    html += '<div id="adminPanel" class="admin-panel hidden"><h2>Admin Settings</h2><div class="tabs"><button class="tab active" data-tab="zoho2">Zoho Sync</button><button class="tab" data-tab="import2">Import CSV</button><button class="tab" data-tab="ai2">AI Analysis</button><button class="tab" data-tab="users2">Users</button></div>';
     html += '<div id="zoho2Tab" class="tab-content active"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="zohoStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Workspace ID: </span><span class="status-value" id="zohoWorkspaceId">-</span></div><div class="status-item"><span class="status-label">View ID: </span><span class="status-value" id="zohoViewId">-</span></div></div><div style="display:flex;gap:1rem"><button class="btn btn-secondary" id="testZohoBtn">Test Connection</button><button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div><div id="zohoMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="import2Tab" class="tab-content"><div class="upload-area"><input type="file" id="csvFile" accept=".csv"><label for="csvFile">Click to upload CSV file</label></div><div id="importStatus"></div><button class="btn btn-danger" id="clearBtn" style="margin-top:1rem">Clear All Products</button></div>';
+    html += '<div id="ai2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">API Status: </span><span class="status-value" id="aiStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Products Analyzed: </span><span class="status-value" id="aiAnalyzedCount">-</span></div><div class="status-item"><span class="status-label">Remaining: </span><span class="status-value" id="aiRemainingCount">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">AI analysis uses Claude Vision to generate searchable tags from product images. This enables searching by garment type (cardigan, hoodie), style (casual, formal), pattern (striped, floral), and more.</p><button class="btn btn-primary" id="runAiBtn">Analyze Next 10 Products</button><div id="aiMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Username</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUser" placeholder="Username"><input type="password" id="newPass" placeholder="Password"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add</button></div></div></div>';
     
     html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div><div class="stat-value" id="totalUnits">0</div><div class="stat-label">Units Available</div></div></div>';
@@ -473,10 +605,10 @@ function getHTML() {
     html += '<script>';
     html += 'var products=[];var allProducts=[];var lastImportId=null;var currentFilter="all";var colorFilter=null;var specialFilter=null;var currentSort="name-asc";var currentSize="medium";var selectedProducts=[];var compareProducts=[];var selectionMode=false;var currentShareId=null;var userPicks=[];var userNotes={};var currentModalProductId=null;var focusedIndex=-1;';
     
-    html += 'function checkSession(){fetch("/api/session").then(function(r){return r.json()}).then(function(d){if(d.loggedIn){showApp(d.username,d.role);loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();loadShares();loadHistory();if(d.role==="admin"){loadUsers()}}})}';
+    html += 'function checkSession(){fetch("/api/session").then(function(r){return r.json()}).then(function(d){if(d.loggedIn){showApp(d.username,d.role);loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();loadShares();loadHistory();if(d.role==="admin"){loadUsers();loadAiStatus()}}})}';
     html += 'function showApp(u,r){document.getElementById("loginPage").classList.add("hidden");document.getElementById("mainApp").classList.remove("hidden");document.getElementById("userInfo").textContent="Welcome, "+u;if(r==="admin")document.getElementById("adminBtn").style.display="block"}';
     
-    html += 'document.getElementById("loginForm").addEventListener("submit",function(e){e.preventDefault();fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("username").value,password:document.getElementById("password").value})}).then(function(r){return r.json()}).then(function(d){if(d.success){showApp(d.username,d.role);loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();loadShares();loadHistory();if(d.role==="admin"){loadUsers()}}else{document.getElementById("loginError").textContent=d.error;document.getElementById("loginError").classList.remove("hidden")}})});';
+    html += 'document.getElementById("loginForm").addEventListener("submit",function(e){e.preventDefault();fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("username").value,password:document.getElementById("password").value})}).then(function(r){return r.json()}).then(function(d){if(d.success){showApp(d.username,d.role);loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();loadShares();loadHistory();if(d.role==="admin"){loadUsers();loadAiStatus()}}else{document.getElementById("loginError").textContent=d.error;document.getElementById("loginError").classList.remove("hidden")}})});';
     
     html += 'document.getElementById("logoutBtn").addEventListener("click",function(){fetch("/api/logout",{method:"POST"}).then(function(){location.reload()})});';
     html += 'document.getElementById("historyBtn").addEventListener("click",function(){document.getElementById("historyPanel").classList.toggle("hidden");document.getElementById("adminPanel").classList.add("hidden")});';
@@ -499,7 +631,7 @@ function getHTML() {
     html += 'document.getElementById("syncZohoBtn").addEventListener("click",function(){document.getElementById("zohoMessage").innerHTML="Syncing...";fetch("/api/zoho/sync",{method:"POST"}).then(function(r){return r.json()}).then(function(d){document.getElementById("zohoMessage").innerHTML=d.success?"<span class=success>"+d.message+"</span>":"<span class=error>"+d.error+"</span>";loadProducts();loadHistory();loadDataFreshness()})});';
     
     html += 'function getImageUrl(url){if(!url)return null;if(url.indexOf("download-accl.zoho.com")!==-1){return"/api/image/"+url.split("/").pop()}return url}';
-    html += 'function loadProducts(){fetch("/api/products").then(function(r){return r.json()}).then(function(d){allProducts=d.products||d;lastImportId=d.lastImportId;products=allProducts;renderFilters();renderProducts()})}';
+    html += 'function loadProducts(){fetch("/api/products").then(function(r){return r.json()}).then(function(d){allProducts=d.products||d;lastImportId=d.lastImportId;products=allProducts;var hasAiTags=allProducts.some(function(p){return p.ai_tags&&p.ai_tags.length>0});document.getElementById("aiSearchIndicator").classList.toggle("hidden",!hasAiTags);renderFilters();renderProducts()})}';
     
     html += 'function loadPicks(){fetch("/api/picks").then(function(r){return r.json()}).then(function(p){userPicks=p;renderProducts()})}';
     html += 'function loadNotes(){fetch("/api/notes").then(function(r){return r.json()}).then(function(n){userNotes=n;renderProducts()})}';
@@ -523,7 +655,7 @@ function getHTML() {
     
     html += 'function updateSelectionUI(){document.getElementById("selectedCount").textContent=selectedProducts.length;var bar=document.getElementById("selectionBar");if(selectedProducts.length>0&&selectionMode){bar.classList.add("visible")}else{bar.classList.remove("visible")}}';
     
-    html += 'function renderProducts(){var s=document.getElementById("searchInput").value.toLowerCase();var minQ=parseInt(document.getElementById("minQty").value)||0;var maxQ=parseInt(document.getElementById("maxQty").value)||999999999;var f=allProducts.filter(function(p){var ms=!s||p.style_id.toLowerCase().indexOf(s)!==-1||p.name.toLowerCase().indexOf(s)!==-1;var mc=currentFilter==="all"||p.category===currentFilter;var colorNames=(p.colors||[]).map(function(c){return c.color_name});var mcolor=!colorFilter||colorNames.indexOf(colorFilter)!==-1;var tot=0;(p.colors||[]).forEach(function(c){tot+=c.available_qty||0});var mq=tot>=minQ&&tot<=maxQ;var msp=true;if(specialFilter==="new"){msp=p.first_seen_import===lastImportId}else if(specialFilter==="picks"){msp=userPicks.indexOf(p.id)!==-1}else if(specialFilter==="notes"){msp=!!userNotes[p.id]}return ms&&mc&&mcolor&&mq&&msp});f.sort(function(a,b){var ta=0,tb=0;(a.colors||[]).forEach(function(c){ta+=c.available_qty||0});(b.colors||[]).forEach(function(c){tb+=c.available_qty||0});if(currentSort==="qty-high")return tb-ta;if(currentSort==="qty-low")return ta-tb;if(currentSort==="name-desc")return b.name.localeCompare(a.name);if(currentSort==="newest")return(b.first_seen_import||0)-(a.first_seen_import||0);return a.name.localeCompare(b.name)});products=f;if(f.length===0){document.getElementById("productGrid").innerHTML="";document.getElementById("emptyState").classList.remove("hidden")}else{document.getElementById("emptyState").classList.add("hidden");var h="";var isListView=currentSize==="list";f.forEach(function(pr,idx){var cols=pr.colors||[];var tot=0;cols.forEach(function(c){tot+=c.available_qty||0});var ch="";if(!isListView){var mx=Math.min(cols.length,3);for(var d=0;d<mx;d++){ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+(cols[d].available_qty||0).toLocaleString()+"</span></div>"}if(cols.length>3)ch+="<div class=\\"color-row\\" style=\\"color:#999\\">+"+(cols.length-3)+" more</div>"}var listCols="";if(isListView){cols.slice(0,5).forEach(function(c){listCols+=c.color_name+": "+(c.available_qty||0).toLocaleString()+"; "});if(cols.length>5)listCols+="+"+(cols.length-5)+" more"}var imgUrl=getImageUrl(pr.image_url);var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";var sel=selectedProducts.indexOf(pr.id)!==-1?"selected":"";var selModeClass=selectionMode?"selection-mode":"";var listClass=isListView?"list-view":"";var isPicked=userPicks.indexOf(pr.id)!==-1;var hasNote=!!userNotes[pr.id];h+="<div class=\\"product-card "+sel+" "+selModeClass+" "+listClass+"\\" data-idx=\\""+idx+"\\" onclick=\\"handleCardClick("+pr.id+",event)\\"><div class=\\"select-badge\\">✓</div><div class=\\"pick-badge "+(isPicked?"active":"")+"\\">"+(isPicked?"♥":"♡")+"</div><div class=\\"note-badge "+(hasNote?"has-note":"")+"\\">📝</div><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+pr.style_id+"</div><div class=\\"product-name\\">"+pr.name+"</div>"+(isListView?"<div class=\\"list-colors\\">"+listCols+"</div>":"<div class=\\"color-list\\">"+ch+"</div>")+"<div class=\\"total-row\\"><span>Total</span><span>"+tot.toLocaleString()+"</span></div></div></div>"});document.getElementById("productGrid").innerHTML=h}document.getElementById("totalStyles").textContent=f.length;var tu=0;f.forEach(function(p){(p.colors||[]).forEach(function(c){tu+=c.available_qty||0})});document.getElementById("totalUnits").textContent=tu.toLocaleString();focusedIndex=-1}';
+    html += 'function renderProducts(){var s=document.getElementById("searchInput").value.toLowerCase().trim();var searchWords=s?s.split(/\\s+/):[];var minQ=parseInt(document.getElementById("minQty").value)||0;var maxQ=parseInt(document.getElementById("maxQty").value)||999999999;var f=allProducts.filter(function(p){var searchText=p.style_id.toLowerCase()+" "+p.name.toLowerCase()+" "+(p.ai_tags||"").toLowerCase();var ms=searchWords.length===0||searchWords.every(function(word){return searchText.indexOf(word)!==-1});var mc=currentFilter==="all"||p.category===currentFilter;var colorNames=(p.colors||[]).map(function(c){return c.color_name});var mcolor=!colorFilter||colorNames.indexOf(colorFilter)!==-1;var tot=0;(p.colors||[]).forEach(function(c){tot+=c.available_qty||0});var mq=tot>=minQ&&tot<=maxQ;var msp=true;if(specialFilter==="new"){msp=p.first_seen_import===lastImportId}else if(specialFilter==="picks"){msp=userPicks.indexOf(p.id)!==-1}else if(specialFilter==="notes"){msp=!!userNotes[p.id]}return ms&&mc&&mcolor&&mq&&msp});f.sort(function(a,b){var ta=0,tb=0;(a.colors||[]).forEach(function(c){ta+=c.available_qty||0});(b.colors||[]).forEach(function(c){tb+=c.available_qty||0});if(currentSort==="qty-high")return tb-ta;if(currentSort==="qty-low")return ta-tb;if(currentSort==="name-desc")return b.name.localeCompare(a.name);if(currentSort==="newest")return(b.first_seen_import||0)-(a.first_seen_import||0);return a.name.localeCompare(b.name)});products=f;if(f.length===0){document.getElementById("productGrid").innerHTML="";document.getElementById("emptyState").classList.remove("hidden")}else{document.getElementById("emptyState").classList.add("hidden");var h="";var isListView=currentSize==="list";f.forEach(function(pr,idx){var cols=pr.colors||[];var tot=0;cols.forEach(function(c){tot+=c.available_qty||0});var ch="";if(!isListView){var mx=Math.min(cols.length,3);for(var d=0;d<mx;d++){ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+(cols[d].available_qty||0).toLocaleString()+"</span></div>"}if(cols.length>3)ch+="<div class=\\"color-row\\" style=\\"color:#999\\">+"+(cols.length-3)+" more</div>"}var listCols="";if(isListView){cols.slice(0,5).forEach(function(c){listCols+=c.color_name+": "+(c.available_qty||0).toLocaleString()+"; "});if(cols.length>5)listCols+="+"+(cols.length-5)+" more"}var imgUrl=getImageUrl(pr.image_url);var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";var sel=selectedProducts.indexOf(pr.id)!==-1?"selected":"";var selModeClass=selectionMode?"selection-mode":"";var listClass=isListView?"list-view":"";var isPicked=userPicks.indexOf(pr.id)!==-1;var hasNote=!!userNotes[pr.id];h+="<div class=\\"product-card "+sel+" "+selModeClass+" "+listClass+"\\" data-idx=\\""+idx+"\\" onclick=\\"handleCardClick("+pr.id+",event)\\"><div class=\\"select-badge\\">✓</div><div class=\\"pick-badge "+(isPicked?"active":"")+"\\">"+(isPicked?"♥":"♡")+"</div><div class=\\"note-badge "+(hasNote?"has-note":"")+"\\">📝</div><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+pr.style_id+"</div><div class=\\"product-name\\">"+pr.name+"</div>"+(isListView?"<div class=\\"list-colors\\">"+listCols+"</div>":"<div class=\\"color-list\\">"+ch+"</div>")+"<div class=\\"total-row\\"><span>Total</span><span>"+tot.toLocaleString()+"</span></div></div></div>"});document.getElementById("productGrid").innerHTML=h}document.getElementById("totalStyles").textContent=f.length;var tu=0;f.forEach(function(p){(p.colors||[]).forEach(function(c){tu+=c.available_qty||0})});document.getElementById("totalUnits").textContent=tu.toLocaleString();focusedIndex=-1}';
     
     html += 'document.getElementById("searchInput").addEventListener("input",renderProducts);';
     html += 'document.getElementById("clearSearchBtn").addEventListener("click",function(){document.getElementById("searchInput").value="";renderProducts()});';
@@ -560,6 +692,11 @@ function getHTML() {
     html += 'function deleteUser(id){if(!confirm("Delete user?"))return;fetch("/api/users/"+id,{method:"DELETE"}).then(function(){loadUsers()})}';
     
     html += 'function loadHistory(){fetch("/api/zoho/sync-history").then(function(r){return r.json()}).then(function(h){var html="";h.forEach(function(x){html+="<tr><td>"+new Date(x.created_at).toLocaleString()+"</td><td>"+x.sync_type+"</td><td>"+x.status+"</td><td>"+(x.records_synced||"-")+"</td><td>"+(x.error_message||"-")+"</td></tr>"});document.getElementById("historyTable").innerHTML=html})}';
+    
+    // AI Analysis functions
+    html += 'function loadAiStatus(){fetch("/api/ai-status").then(function(r){return r.json()}).then(function(d){var st=document.getElementById("aiStatusText");if(d.configured){st.textContent="Configured";st.className="status-value connected"}else{st.textContent="API Key Not Set";st.className="status-value disconnected"}document.getElementById("aiAnalyzedCount").textContent=d.analyzed+" / "+d.total;document.getElementById("aiRemainingCount").textContent=d.remaining})}';
+    
+    html += 'document.getElementById("runAiBtn").addEventListener("click",function(){var btn=this;btn.disabled=true;btn.textContent="Analyzing...";document.getElementById("aiMessage").innerHTML="<span style=\\"color:#666\\">Processing images with Claude Vision...</span>";fetch("/api/ai-analyze",{method:"POST"}).then(function(r){return r.json()}).then(function(d){btn.disabled=false;btn.textContent="Analyze Next 10 Products";if(d.success){document.getElementById("aiMessage").innerHTML="<span class=\\"success\\">"+d.message+". "+d.remaining+" remaining.</span>"}else{document.getElementById("aiMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadAiStatus()})});';
     
     html += 'document.getElementById("modalClose").addEventListener("click",function(){document.getElementById("modal").classList.remove("active")});';
     html += 'document.getElementById("modal").addEventListener("click",function(e){if(e.target.id==="modal")document.getElementById("modal").classList.remove("active")});';

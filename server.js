@@ -24,7 +24,6 @@ app.use(session({
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Zoho token storage
 var zohoAccessToken = null;
 
 async function initDB() {
@@ -42,7 +41,6 @@ async function initDB() {
             console.log('Default admin user created (admin/admin123)');
         }
         
-        // Load stored token
         var tokenResult = await pool.query('SELECT * FROM zoho_tokens ORDER BY id DESC LIMIT 1');
         if (tokenResult.rows.length > 0) {
             zohoAccessToken = tokenResult.rows[0].access_token;
@@ -53,7 +51,6 @@ async function initDB() {
     } catch (err) { console.error('Database initialization error:', err); }
 }
 
-// AUTH BYPASS
 function requireAuth(req, res, next) { next(); }
 function requireAdmin(req, res, next) { next(); }
 
@@ -86,7 +83,6 @@ app.get('/api/products', requireAuth, async function(req, res) {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Zoho Token Refresh
 async function refreshZohoToken() {
     try {
         var clientId = process.env.ZOHO_CLIENT_ID;
@@ -128,348 +124,101 @@ async function refreshZohoToken() {
     }
 }
 
-// Background token refresh
 function startTokenRefreshJob() {
     console.log('Starting background token refresh job (every 30 minutes)');
     refreshZohoToken();
-    setInterval(function() {
-        refreshZohoToken();
-    }, 30 * 60 * 1000);
+    setInterval(function() { refreshZohoToken(); }, 30 * 60 * 1000);
 }
 
-// Zoho Status
 app.get('/api/zoho/status', requireAuth, function(req, res) {
     var hasCredentials = !!(process.env.ZOHO_CLIENT_ID && process.env.ZOHO_CLIENT_SECRET && process.env.ZOHO_REFRESH_TOKEN);
     var hasToken = !!zohoAccessToken;
     var hasViewId = !!process.env.ZOHO_VIEW_ID;
     var hasWorkspaceId = !!process.env.ZOHO_WORKSPACE_ID;
-    
-    res.json({
-        configured: hasCredentials,
-        connected: hasToken,
-        viewConfigured: hasViewId && hasWorkspaceId,
-        viewId: process.env.ZOHO_VIEW_ID || null,
-        workspaceId: process.env.ZOHO_WORKSPACE_ID || null
-    });
+    res.json({ configured: hasCredentials, connected: hasToken, viewConfigured: hasViewId && hasWorkspaceId, viewId: process.env.ZOHO_VIEW_ID || null, workspaceId: process.env.ZOHO_WORKSPACE_ID || null });
 });
 
-// Test Zoho Connection
 app.post('/api/zoho/test', requireAuth, requireAdmin, async function(req, res) {
     try {
         if (!zohoAccessToken) {
             var tokenResult = await refreshZohoToken();
-            if (!tokenResult.success) {
-                return res.json({ success: false, error: tokenResult.error });
-            }
+            if (!tokenResult.success) return res.json({ success: false, error: tokenResult.error });
         }
         res.json({ success: true, message: 'Connection successful' });
-    } catch (err) {
-        res.json({ success: false, error: err.message });
-    }
+    } catch (err) { res.json({ success: false, error: err.message }); }
 });
 
-// Sync from Zoho
 app.post('/api/zoho/sync', requireAuth, requireAdmin, async function(req, res) {
     try {
         var workspaceId = process.env.ZOHO_WORKSPACE_ID;
         var viewId = process.env.ZOHO_VIEW_ID;
-        
-        if (!workspaceId) {
-            await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', 'ZOHO_WORKSPACE_ID not configured']);
-            return res.json({ success: false, error: 'ZOHO_WORKSPACE_ID not configured in Railway variables' });
-        }
-        
-        if (!viewId) {
-            await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', 'ZOHO_VIEW_ID not configured']);
-            return res.json({ success: false, error: 'ZOHO_VIEW_ID not configured in Railway variables' });
-        }
-        
-        if (!zohoAccessToken) {
-            var tokenResult = await refreshZohoToken();
-            if (!tokenResult.success) {
-                await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', tokenResult.error]);
-                return res.json({ success: false, error: tokenResult.error });
-            }
-        }
-        
+        if (!workspaceId) { await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', 'ZOHO_WORKSPACE_ID not configured']); return res.json({ success: false, error: 'ZOHO_WORKSPACE_ID not configured in Railway variables' }); }
+        if (!viewId) { await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', 'ZOHO_VIEW_ID not configured']); return res.json({ success: false, error: 'ZOHO_VIEW_ID not configured in Railway variables' }); }
+        if (!zohoAccessToken) { var tokenResult = await refreshZohoToken(); if (!tokenResult.success) { await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', tokenResult.error]); return res.json({ success: false, error: tokenResult.error }); } }
         var apiUrl = 'https://analyticsapi.zoho.com/restapi/v2/workspaces/' + workspaceId + '/views/' + viewId + '/data?CONFIG={"responseFormat":"json"}';
         console.log('Fetching from Zoho:', apiUrl);
-        
-        var response = await fetch(apiUrl, {
-            headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
-        });
-        
-        if (response.status === 401) {
-            console.log('Got 401, refreshing token...');
-            var tokenResult = await refreshZohoToken();
-            if (!tokenResult.success) {
-                await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', tokenResult.error]);
-                return res.json({ success: false, error: tokenResult.error });
-            }
-            response = await fetch(apiUrl, {
-                headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
-            });
-        }
-        
-        if (!response.ok) {
-            var errorText = await response.text();
-            console.error('Zoho API error:', response.status, errorText);
-            await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', 'API error: ' + response.status]);
-            return res.json({ success: false, error: 'API error: ' + response.status + ' - ' + errorText });
-        }
-        
-        var data = await response.json();
-        console.log('Zoho response keys:', Object.keys(data));
-        
-        var rows = data.data || data.rows || [];
-        var columns = data.column_order || data.columns || [];
-        
-        if (rows.length === 0) {
-            await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', 'No data returned']);
-            return res.json({ success: false, error: 'No data returned from Zoho Analytics' });
-        }
-        
-        var colMap = {};
-        for (var ci = 0; ci < columns.length; ci++) {
-            colMap[columns[ci].toLowerCase().replace(/\s+/g, '_')] = ci;
-        }
-        console.log('Column map:', colMap);
-        
-        await pool.query('DELETE FROM product_colors');
-        await pool.query('DELETE FROM products');
-        
-        var productMap = {};
-        var recordCount = 0;
-        
-        for (var ri = 0; ri < rows.length; ri++) {
-            var row = rows[ri];
-            var styleIdx = colMap['style_name'] !== undefined ? colMap['style_name'] : (colMap['style'] !== undefined ? colMap['style'] : 0);
-            var colorIdx = colMap['color'] !== undefined ? colMap['color'] : (colMap['color_name'] !== undefined ? colMap['color_name'] : 1);
-            var categoryIdx = colMap['commodity'] !== undefined ? colMap['commodity'] : (colMap['category'] !== undefined ? colMap['category'] : 2);
-            var qtyIdx = colMap['left_to_sell'] !== undefined ? colMap['left_to_sell'] : (colMap['available'] !== undefined ? colMap['available'] : 3);
-            
-            var styleName = row[styleIdx] || 'Unknown Style';
-            var color = row[colorIdx] || 'Default';
-            var category = row[categoryIdx] || 'Uncategorized';
-            var qty = parseInt(row[qtyIdx]) || 0;
-            
-            var baseStyle = styleName.replace(/\s*-\s*\d+$/, '').trim();
-            
-            if (!productMap[baseStyle]) {
-                var insertResult = await pool.query('INSERT INTO products (style_id, base_style, name, category) VALUES ($1, $2, $3, $4) RETURNING id', [styleName, baseStyle, baseStyle, category]);
-                productMap[baseStyle] = insertResult.rows[0].id;
-            }
-            
-            var productId = productMap[baseStyle];
-            await pool.query('INSERT INTO product_colors (product_id, color_name, available_qty) VALUES ($1, $2, $3)', [productId, color, qty]);
-            recordCount++;
-        }
-        
+        var response = await fetch(apiUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+        if (response.status === 401) { console.log('Got 401, refreshing token...'); var tokenResult = await refreshZohoToken(); if (!tokenResult.success) { await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', tokenResult.error]); return res.json({ success: false, error: tokenResult.error }); } response = await fetch(apiUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } }); }
+        if (!response.ok) { var errorText = await response.text(); console.error('Zoho API error:', response.status, errorText); await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', 'API error: ' + response.status]); return res.json({ success: false, error: 'API error: ' + response.status + ' - ' + errorText }); }
+        var data = await response.json(); console.log('Zoho response keys:', Object.keys(data));
+        var rows = data.data || data.rows || []; var columns = data.column_order || data.columns || [];
+        if (rows.length === 0) { await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', 'No data returned']); return res.json({ success: false, error: 'No data returned from Zoho Analytics' }); }
+        var colMap = {}; for (var ci = 0; ci < columns.length; ci++) { colMap[columns[ci].toLowerCase().replace(/\s+/g, '_')] = ci; } console.log('Column map:', colMap);
+        await pool.query('DELETE FROM product_colors'); await pool.query('DELETE FROM products');
+        var productMap = {}; var recordCount = 0;
+        for (var ri = 0; ri < rows.length; ri++) { var row = rows[ri]; var styleIdx = colMap['style_name'] !== undefined ? colMap['style_name'] : (colMap['style'] !== undefined ? colMap['style'] : 0); var colorIdx = colMap['color'] !== undefined ? colMap['color'] : (colMap['color_name'] !== undefined ? colMap['color_name'] : 1); var categoryIdx = colMap['commodity'] !== undefined ? colMap['commodity'] : (colMap['category'] !== undefined ? colMap['category'] : 2); var qtyIdx = colMap['left_to_sell'] !== undefined ? colMap['left_to_sell'] : (colMap['available'] !== undefined ? colMap['available'] : 3); var styleName = row[styleIdx] || 'Unknown Style'; var color = row[colorIdx] || 'Default'; var category = row[categoryIdx] || 'Uncategorized'; var qty = parseInt(row[qtyIdx]) || 0; var baseStyle = styleName.replace(/\s*-\s*\d+$/, '').trim(); if (!productMap[baseStyle]) { var insertResult = await pool.query('INSERT INTO products (style_id, base_style, name, category) VALUES ($1, $2, $3, $4) RETURNING id', [styleName, baseStyle, baseStyle, category]); productMap[baseStyle] = insertResult.rows[0].id; } var productId = productMap[baseStyle]; await pool.query('INSERT INTO product_colors (product_id, color_name, available_qty) VALUES ($1, $2, $3)', [productId, color, qty]); recordCount++; }
         await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1, $2, $3)', ['zoho', 'success', recordCount]);
         res.json({ success: true, message: 'Synced ' + recordCount + ' records from ' + Object.keys(productMap).length + ' products' });
-    } catch (err) {
-        console.error('Sync error:', err);
-        await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', err.message]);
-        res.json({ success: false, error: err.message });
-    }
+    } catch (err) { console.error('Sync error:', err); await pool.query('INSERT INTO sync_history (sync_type, status, error_message) VALUES ($1, $2, $3)', ['zoho', 'failed', err.message]); res.json({ success: false, error: err.message }); }
 });
 
-app.get('/api/zoho/sync-history', requireAuth, async function(req, res) {
-    try {
-        var result = await pool.query('SELECT * FROM sync_history ORDER BY created_at DESC LIMIT 20');
-        res.json(result.rows);
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
+app.get('/api/zoho/sync-history', requireAuth, async function(req, res) { try { var result = await pool.query('SELECT * FROM sync_history ORDER BY created_at DESC LIMIT 20'); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
 
-function parseCSVLine(line) {
-    var result = [];
-    var current = '';
-    var inQuotes = false;
-    for (var i = 0; i < line.length; i++) {
-        var char = line[i];
-        if (char === '"') { inQuotes = !inQuotes; }
-        else if (char === ',' && !inQuotes) { result.push(current.trim()); current = ''; }
-        else { current += char; }
-    }
-    result.push(current.trim());
-    return result;
-}
-
-function parseNumber(val) {
-    if (!val) return 0;
-    return parseInt(val.toString().replace(/,/g, '').replace(/"/g, '').trim()) || 0;
-}
+function parseCSVLine(line) { var result = []; var current = ''; var inQuotes = false; for (var i = 0; i < line.length; i++) { var char = line[i]; if (char === '"') { inQuotes = !inQuotes; } else if (char === ',' && !inQuotes) { result.push(current.trim()); current = ''; } else { current += char; } } result.push(current.trim()); return result; }
+function parseNumber(val) { if (!val) return 0; return parseInt(val.toString().replace(/,/g, '').replace(/"/g, '').trim()) || 0; }
 
 app.post('/api/import', requireAuth, requireAdmin, upload.single('file'), async function(req, res) {
     try {
         if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-        var content = req.file.buffer.toString('utf-8');
-        var allLines = content.split('\n');
-        var lines = [];
-        for (var i = 0; i < allLines.length; i++) {
-            if (allLines[i].trim()) lines.push(allLines[i]);
-        }
-        if (lines.length < 2) return res.status(400).json({ error: 'File appears empty' });
-
-        var headerLine = lines[0];
-        if (headerLine.charCodeAt(0) === 0xFEFF) headerLine = headerLine.slice(1);
-        var headersRaw = parseCSVLine(headerLine);
-        var headers = [];
-        for (var h = 0; h < headersRaw.length; h++) {
-            headers.push(headersRaw[h].toLowerCase().replace(/[^\w\s]/g, '').trim());
-        }
-        console.log('CSV Headers:', headers);
-
-        var headerMap = {};
-        for (var hi = 0; hi < headers.length; hi++) { headerMap[headers[hi]] = hi; }
-
-        var imported = 0, skipped = 0;
-        var lastStyleId = null, lastImageUrl = null, lastCategory = null;
-
-        for (var li = 1; li < lines.length; li++) {
-            try {
-                var values = parseCSVLine(lines[li]);
-                if (values[0] && values[0].indexOf('Grand Summary') !== -1) { skipped++; continue; }
-
-                var styleId = values[headerMap['style name']] || values[0];
-                var imageUrl = values[headerMap['style image']] || values[1];
-                var color = values[headerMap['color']] || values[2];
-                var category = values[headerMap['commodity']] || values[3];
-                var onHand = parseNumber(values[headerMap['on hand']] || values[4]);
-                var available = parseNumber(values[headerMap['available now']] || values[headerMap['left to sell']] || values[7]);
-
-                if (!styleId && color) {
-                    styleId = lastStyleId;
-                    if (!imageUrl || imageUrl === '-No Value-') imageUrl = lastImageUrl;
-                    if (!category || category === '-No Value-') category = lastCategory;
-                }
-                if (!styleId) { skipped++; continue; }
-
-                lastStyleId = styleId;
-                if (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) lastImageUrl = imageUrl;
-                if (category && category !== '-No Value-') lastCategory = category;
-
-                var baseStyle = styleId.split('-')[0];
-                var validCategory = (category && category !== '-No Value-') ? category : 'Uncategorized';
-                var name = validCategory + ' - ' + baseStyle;
-                var validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) ? imageUrl : lastImageUrl;
-
-                var productResult = await pool.query('SELECT id, image_url FROM products WHERE style_id = $1', [styleId]);
-                var productId;
-
-                if (productResult.rows.length > 0) {
-                    productId = productResult.rows[0].id;
-                    var finalImage = validImageUrl || productResult.rows[0].image_url;
-                    await pool.query('UPDATE products SET name=$1, category=$2, base_style=$3, image_url=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5', [name, validCategory, baseStyle, finalImage, productId]);
-                } else {
-                    var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url) VALUES ($1,$2,$3,$4,$5) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl]);
-                    productId = ins.rows[0].id;
-                }
-
-                if (color && color !== '-No Value-') {
-                    var colorResult = await pool.query('SELECT id FROM product_colors WHERE product_id=$1 AND color_name=$2', [productId, color]);
-                    if (colorResult.rows.length > 0) {
-                        await pool.query('UPDATE product_colors SET available_qty=$1, on_hand=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3', [available, onHand, colorResult.rows[0].id]);
-                    } else {
-                        await pool.query('INSERT INTO product_colors (product_id, color_name, available_qty, on_hand) VALUES ($1,$2,$3,$4)', [productId, color, available, onHand]);
-                    }
-                }
-                imported++;
-            } catch (rowErr) { console.error('Row error:', rowErr.message); skipped++; }
-        }
-
+        var content = req.file.buffer.toString('utf-8'); var allLines = content.split('\n'); var lines = []; for (var i = 0; i < allLines.length; i++) { if (allLines[i].trim()) lines.push(allLines[i]); } if (lines.length < 2) return res.status(400).json({ error: 'File appears empty' });
+        var headerLine = lines[0]; if (headerLine.charCodeAt(0) === 0xFEFF) headerLine = headerLine.slice(1); var headersRaw = parseCSVLine(headerLine); var headers = []; for (var h = 0; h < headersRaw.length; h++) { headers.push(headersRaw[h].toLowerCase().replace(/[^\w\s]/g, '').trim()); } console.log('CSV Headers:', headers);
+        var headerMap = {}; for (var hi = 0; hi < headers.length; hi++) { headerMap[headers[hi]] = hi; }
+        var imported = 0, skipped = 0; var lastStyleId = null, lastImageUrl = null, lastCategory = null;
+        for (var li = 1; li < lines.length; li++) { try { var values = parseCSVLine(lines[li]); if (values[0] && values[0].indexOf('Grand Summary') !== -1) { skipped++; continue; } var styleId = values[headerMap['style name']] || values[0]; var imageUrl = values[headerMap['style image']] || values[1]; var color = values[headerMap['color']] || values[2]; var category = values[headerMap['commodity']] || values[3]; var onHand = parseNumber(values[headerMap['on hand']] || values[4]); var available = parseNumber(values[headerMap['available now']] || values[headerMap['left to sell']] || values[7]); if (!styleId && color) { styleId = lastStyleId; if (!imageUrl || imageUrl === '-No Value-') imageUrl = lastImageUrl; if (!category || category === '-No Value-') category = lastCategory; } if (!styleId) { skipped++; continue; } lastStyleId = styleId; if (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) lastImageUrl = imageUrl; if (category && category !== '-No Value-') lastCategory = category; var baseStyle = styleId.split('-')[0]; var validCategory = (category && category !== '-No Value-') ? category : 'Uncategorized'; var name = validCategory + ' - ' + baseStyle; var validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) ? imageUrl : lastImageUrl; var productResult = await pool.query('SELECT id, image_url FROM products WHERE style_id = $1', [styleId]); var productId; if (productResult.rows.length > 0) { productId = productResult.rows[0].id; var finalImage = validImageUrl || productResult.rows[0].image_url; await pool.query('UPDATE products SET name=$1, category=$2, base_style=$3, image_url=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5', [name, validCategory, baseStyle, finalImage, productId]); } else { var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url) VALUES ($1,$2,$3,$4,$5) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl]); productId = ins.rows[0].id; } if (color && color !== '-No Value-') { var colorResult = await pool.query('SELECT id FROM product_colors WHERE product_id=$1 AND color_name=$2', [productId, color]); if (colorResult.rows.length > 0) { await pool.query('UPDATE product_colors SET available_qty=$1, on_hand=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3', [available, onHand, colorResult.rows[0].id]); } else { await pool.query('INSERT INTO product_colors (product_id, color_name, available_qty, on_hand) VALUES ($1,$2,$3,$4)', [productId, color, available, onHand]); } } imported++; } catch (rowErr) { console.error('Row error:', rowErr.message); skipped++; } }
         await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1,$2,$3)', ['csv_import', 'success', imported]);
         res.json({ success: true, imported: imported, skipped: skipped });
     } catch (err) { console.error('Import error:', err); res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/products/clear', requireAuth, requireAdmin, async function(req, res) {
-    try {
-        await pool.query('DELETE FROM product_colors');
-        await pool.query('DELETE FROM products');
-        res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
+app.post('/api/products/clear', requireAuth, requireAdmin, async function(req, res) { try { await pool.query('DELETE FROM product_colors'); await pool.query('DELETE FROM products'); res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });
+app.get('/api/users', requireAuth, requireAdmin, async function(req, res) { try { var result = await pool.query('SELECT id, username, role, created_at FROM users ORDER BY created_at'); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
+app.post('/api/users', requireAuth, requireAdmin, async function(req, res) { try { var username = req.body.username; var password = req.body.password; var role = req.body.role; var hash = await bcrypt.hash(password, 10); await pool.query('INSERT INTO users (username, password, role) VALUES ($1,$2,$3)', [username, hash, role || 'sales_rep']); res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });
+app.delete('/api/users/:id', requireAuth, requireAdmin, async function(req, res) { try { await pool.query('DELETE FROM users WHERE id=$1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });
 
-app.get('/api/users', requireAuth, requireAdmin, async function(req, res) {
-    try { var result = await pool.query('SELECT id, username, role, created_at FROM users ORDER BY created_at'); res.json(result.rows); }
-    catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/users', requireAuth, requireAdmin, async function(req, res) {
-    try {
-        var username = req.body.username;
-        var password = req.body.password;
-        var role = req.body.role;
-        var hash = await bcrypt.hash(password, 10);
-        await pool.query('INSERT INTO users (username, password, role) VALUES ($1,$2,$3)', [username, hash, role || 'sales_rep']);
-        res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.delete('/api/users/:id', requireAuth, requireAdmin, async function(req, res) {
-    try {
-        await pool.query('DELETE FROM users WHERE id=$1', [req.params.id]);
-        res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Image proxy for WorkDrive images
+// Image proxy for WorkDrive images - FIXED VERSION
 app.get('/api/image/:fileId', async function(req, res) {
-    try {
-        var fileId = req.params.fileId;
-        
-        if (!zohoAccessToken) {
-            var tokenResult = await refreshZohoToken();
-            if (!tokenResult.success) {
-                return res.status(401).send('No valid token');
-            }
-        }
-        
-        // Try WorkDrive download endpoint
-        var imageUrl = 'https://download-accl.zoho.com/v1/workdrive/download/' + fileId;
-        
-        var response = await fetch(imageUrl, {
-            headers: { 
-                'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken
-            }
-        });
-        
-        if (response.status === 401) {
-            // Try refreshing token
-            var tokenResult = await refreshZohoToken();
-            if (tokenResult.success) {
-                response = await fetch(imageUrl, {
-                    headers: { 
-                        'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken
-                    }
-                });
-            }
-        }
-        
-        if (!response.ok) {
-            console.error('WorkDrive image fetch failed:', response.status);
-            return res.status(response.status).send('Image not found');
-        }
-        
-        // Get content type and pipe the image
-        var contentType = response.headers.get('content-type') || 'image/jpeg';
-        res.setHeader('Content-Type', contentType);
-        res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache for 1 day
-        
-        // Stream the response
-        var buffer = await response.arrayBuffer();
-        res.send(Buffer.from(buffer));
-        
-    } catch (err) {
-        console.error('Image proxy error:', err);
-        res.status(500).send('Error fetching image');
+    var retryCount = 0;
+    async function fetchImage() {
+        try {
+            var fileId = req.params.fileId;
+            if (!zohoAccessToken) { var tokenResult = await refreshZohoToken(); if (!tokenResult.success) { return res.status(401).send('No valid token'); } }
+            var imageUrl = 'https://workdrive.zoho.com/api/v1/download/' + fileId;
+            console.log('Fetching image:', imageUrl);
+            var response = await fetch(imageUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken, 'Accept': 'application/vnd.api+json' } });
+            console.log('WorkDrive response status:', response.status);
+            if (response.status === 401) { if (retryCount === 0) { retryCount++; console.log('Got 401, refreshing token and retrying...'); await refreshZohoToken(); return fetchImage(); } return res.status(401).send('Authentication failed'); }
+            if (!response.ok) { var errorText = await response.text(); console.error('WorkDrive image fetch failed:', response.status, errorText); return res.status(response.status).send('Image not found'); }
+            var contentType = response.headers.get('content-type') || 'image/jpeg';
+            res.setHeader('Content-Type', contentType);
+            res.setHeader('Cache-Control', 'public, max-age=86400');
+            var buffer = await response.arrayBuffer();
+            res.send(Buffer.from(buffer));
+        } catch (err) { console.error('Image proxy error:', err); res.status(500).send('Error fetching image'); }
     }
+    fetchImage();
 });
 
-app.get('*', function(req, res) {
-    res.send(getHTML());
-});
+app.get('*', function(req, res) { res.send(getHTML()); });
 
 function getHTML() {
     var html = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Product Catalog</title><style>';
@@ -542,14 +291,12 @@ function getHTML() {
     html += '.status-value.disconnected { color: #c4553d; }';
     html += '</style></head><body>';
     
-    // Login Page
     html += '<div id="loginPage" class="login-page"><div class="login-box"><h1>Product Catalog</h1>';
     html += '<form id="loginForm"><div class="form-group"><label>Username</label><input type="text" id="username" required></div>';
     html += '<div class="form-group"><label>Password</label><input type="password" id="password" required></div>';
     html += '<button type="submit" class="btn btn-primary" style="width:100%">Sign In</button>';
     html += '<div id="loginError" class="error hidden"></div></form></div></div>';
     
-    // Main App
     html += '<div id="mainApp" class="hidden"><header class="header"><h1>Product Catalog</h1>';
     html += '<div class="search-box"><input type="text" id="searchInput" placeholder="Search products..."></div>';
     html += '<div class="header-right"><span id="userInfo"></span>';
@@ -562,7 +309,6 @@ function getHTML() {
     html += '<button class="tab" data-tab="users">Users</button>';
     html += '<button class="tab" data-tab="history">History</button></div>';
     
-    // Zoho Tab
     html += '<div id="zohoTab" class="tab-content active">';
     html += '<div class="status-box" id="zohoStatusBox"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="zohoStatusText">Checking...</span></div>';
     html += '<div class="status-item"><span class="status-label">Workspace ID: </span><span class="status-value" id="zohoWorkspaceId">-</span></div>';
@@ -572,86 +318,57 @@ function getHTML() {
     html += '<button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div>';
     html += '<div id="zohoMessage" style="margin-top:1rem"></div></div>';
     
-    // Import Tab
     html += '<div id="importTab" class="tab-content"><div class="upload-area"><input type="file" id="csvFile" accept=".csv">';
     html += '<label for="csvFile">Click to upload CSV file</label></div><div id="importStatus"></div>';
     html += '<button class="btn btn-danger" id="clearBtn" style="margin-top:1rem">Clear All Products</button></div>';
     
-    // Users Tab
     html += '<div id="usersTab" class="tab-content"><table><thead><tr><th>Username</th><th>Role</th><th>Actions</th></tr></thead>';
     html += '<tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUser" placeholder="Username">';
     html += '<input type="password" id="newPass" placeholder="Password">';
     html += '<select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select>';
     html += '<button class="btn btn-primary" id="addUserBtn">Add</button></div></div>';
     
-    // History Tab
     html += '<div id="historyTab" class="tab-content"><table><thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Records</th><th>Error</th></tr></thead>';
     html += '<tbody id="historyTable"></tbody></table></div></div>';
     
-    // Stats and Products
     html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div>';
     html += '<div><div class="stat-value" id="totalUnits">0</div><div class="stat-label">Units Available</div></div></div>';
     html += '<div class="filters" id="filters"></div><div class="product-grid" id="productGrid"></div>';
     html += '<div class="empty hidden" id="emptyState">No products found. Import a CSV or sync from Zoho to get started.</div></main></div>';
     
-    // Modal
     html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button>';
     html += '<div class="modal-body"><div class="modal-image"><img id="modalImage" src="" alt=""></div>';
     html += '<div class="modal-details"><div class="product-style" id="modalStyle"></div><h2 id="modalName"></h2>';
     html += '<p id="modalCategory" style="color:#666;margin-bottom:1rem"></p><div id="modalColors"></div>';
     html += '<div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div></div></div></div></div>';
     
-    // Script
     html += '<script>';
     html += 'var products=[];var currentFilter="all";';
-    
     html += 'function checkSession(){fetch("/api/session").then(function(r){return r.json()}).then(function(d){if(d.loggedIn){showApp(d.username,d.role);loadProducts();loadZohoStatus();if(d.role==="admin"){loadUsers();loadHistory()}}else{document.getElementById("loginPage").classList.remove("hidden");document.getElementById("mainApp").classList.add("hidden")}})}';
-    
     html += 'function showApp(u,r){document.getElementById("loginPage").classList.add("hidden");document.getElementById("mainApp").classList.remove("hidden");document.getElementById("userInfo").textContent="Welcome, "+u;if(r==="admin")document.getElementById("adminBtn").style.display="block"}';
-    
     html += 'document.getElementById("loginForm").addEventListener("submit",function(e){e.preventDefault();var u=document.getElementById("username").value;var p=document.getElementById("password").value;fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:u,password:p})}).then(function(r){return r.json()}).then(function(d){if(d.success){showApp(d.username,d.role);loadProducts();loadZohoStatus();if(d.role==="admin"){loadUsers();loadHistory()}}else{document.getElementById("loginError").textContent=d.error;document.getElementById("loginError").classList.remove("hidden")}})});';
-    
     html += 'document.getElementById("logoutBtn").addEventListener("click",function(){fetch("/api/logout",{method:"POST"}).then(function(){location.reload()})});';
     html += 'document.getElementById("adminBtn").addEventListener("click",function(){document.getElementById("adminPanel").classList.toggle("hidden")});';
-    
     html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var all=document.querySelectorAll(".tab");var cons=document.querySelectorAll(".tab-content");for(var j=0;j<all.length;j++)all[j].classList.remove("active");for(var k=0;k<cons.length;k++)cons[k].classList.remove("active");e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active")})}';
-    
     html += 'function loadZohoStatus(){fetch("/api/zoho/status").then(function(r){return r.json()}).then(function(d){var st=document.getElementById("zohoStatusText");if(d.connected){st.textContent="Connected";st.className="status-value connected"}else if(d.configured){st.textContent="Configured (not connected)";st.className="status-value"}else{st.textContent="Not configured";st.className="status-value disconnected"}document.getElementById("zohoWorkspaceId").textContent=d.workspaceId||"Not set";document.getElementById("zohoViewId").textContent=d.viewId||"Not set"})}';
-    
     html += 'document.getElementById("testZohoBtn").addEventListener("click",function(){document.getElementById("zohoMessage").innerHTML="Testing...";fetch("/api/zoho/test",{method:"POST"}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("zohoMessage").innerHTML="<span class=\\"success\\">"+d.message+"</span>";loadZohoStatus()}else{document.getElementById("zohoMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}})});';
-    
     html += 'document.getElementById("syncZohoBtn").addEventListener("click",function(){document.getElementById("zohoMessage").innerHTML="Syncing...";fetch("/api/zoho/sync",{method:"POST"}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("zohoMessage").innerHTML="<span class=\\"success\\">"+d.message+"</span>";loadProducts();loadHistory()}else{document.getElementById("zohoMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>";loadHistory()}})});';
-    
     html += 'function getImageUrl(url){if(!url)return null;if(url.indexOf("download-accl.zoho.com/v1/workdrive/download/")!==-1){var parts=url.split("/");var fileId=parts[parts.length-1];return"/api/image/"+fileId}return url}';
-    
     html += 'function loadProducts(){fetch("/api/products").then(function(r){return r.json()}).then(function(d){products=d;renderFilters();renderProducts()})}';
-    
     html += 'function renderFilters(){var cats=[];for(var i=0;i<products.length;i++){if(products[i].category&&cats.indexOf(products[i].category)===-1)cats.push(products[i].category)}cats.sort();var h="<button class=\\"filter-btn active\\" data-cat=\\"all\\">All</button>";for(var j=0;j<cats.length;j++){h+="<button class=\\"filter-btn\\" data-cat=\\""+cats[j]+"\\">"+cats[j]+"</button>"}document.getElementById("filters").innerHTML=h;var btns=document.querySelectorAll(".filter-btn");for(var k=0;k<btns.length;k++){btns[k].addEventListener("click",function(e){var all=document.querySelectorAll(".filter-btn");for(var m=0;m<all.length;m++)all[m].classList.remove("active");e.target.classList.add("active");currentFilter=e.target.getAttribute("data-cat");renderProducts()})}}';
-    
     html += 'function renderProducts(){var s=document.getElementById("searchInput").value.toLowerCase();var f=[];for(var i=0;i<products.length;i++){var p=products[i];var ms=!s||p.style_id.toLowerCase().indexOf(s)!==-1||p.name.toLowerCase().indexOf(s)!==-1;var mc=currentFilter==="all"||p.category===currentFilter;if(ms&&mc)f.push(p)}if(f.length===0){document.getElementById("productGrid").innerHTML="";document.getElementById("emptyState").classList.remove("hidden")}else{document.getElementById("emptyState").classList.add("hidden");var h="";for(var j=0;j<f.length;j++){var pr=f[j];var cols=pr.colors||[];var tot=0;for(var c=0;c<cols.length;c++)tot+=cols[c].available_qty||0;var ch="";var mx=Math.min(cols.length,3);for(var d=0;d<mx;d++){ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+(cols[d].available_qty||0).toLocaleString()+"</span></div>"}if(cols.length>3)ch+="<div class=\\"color-row\\" style=\\"color:#999\\">+"+(cols.length-3)+" more</div>";var imgUrl=getImageUrl(pr.image_url);var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">" :"No Image";h+="<div class=\\"product-card\\" onclick=\\"openModal("+pr.id+")\\"><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+pr.style_id+"</div><div class=\\"product-name\\">"+pr.name+"</div><div class=\\"color-list\\">"+ch+"</div><div class=\\"total-row\\"><span>Total</span><span>"+tot.toLocaleString()+"</span></div></div></div>"}document.getElementById("productGrid").innerHTML=h}document.getElementById("totalStyles").textContent=f.length;var tu=0;for(var t=0;t<f.length;t++){var cs=f[t].colors||[];for(var u=0;u<cs.length;u++)tu+=cs[u].available_qty||0}document.getElementById("totalUnits").textContent=tu.toLocaleString()}';
-    
     html += 'document.getElementById("searchInput").addEventListener("input",renderProducts);';
-    
     html += 'function openModal(id){var p=null;for(var i=0;i<products.length;i++){if(products[i].id===id){p=products[i];break}}if(!p)return;var cols=p.colors||[];var tot=0;for(var c=0;c<cols.length;c++)tot+=cols[c].available_qty||0;var im=document.getElementById("modalImage");var imgUrl=getImageUrl(p.image_url);if(imgUrl){im.src=imgUrl;im.style.display="block"}else{im.style.display="none"}document.getElementById("modalStyle").textContent=p.style_id;document.getElementById("modalName").textContent=p.name;document.getElementById("modalCategory").textContent=p.category||"";var ch="";for(var d=0;d<cols.length;d++){ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+(cols[d].available_qty||0).toLocaleString()+"</span></div>"}document.getElementById("modalColors").innerHTML=ch;document.getElementById("modalTotal").textContent=tot.toLocaleString();document.getElementById("modal").classList.add("active")}';
-    
     html += 'document.getElementById("modalClose").addEventListener("click",function(){document.getElementById("modal").classList.remove("active")});';
     html += 'document.getElementById("modal").addEventListener("click",function(e){if(e.target.id==="modal")document.getElementById("modal").classList.remove("active")});';
-    
     html += 'document.getElementById("csvFile").addEventListener("change",function(e){var f=e.target.files[0];if(!f)return;var fd=new FormData();fd.append("file",f);document.getElementById("importStatus").innerHTML="Importing...";fetch("/api/import",{method:"POST",body:fd}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("importStatus").innerHTML="<span class=\\"success\\">Imported "+d.imported+" products</span>";loadProducts();loadHistory()}else{document.getElementById("importStatus").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}})});';
-    
     html += 'document.getElementById("clearBtn").addEventListener("click",function(){if(!confirm("Delete all products?"))return;fetch("/api/products/clear",{method:"POST"}).then(function(){loadProducts()})});';
-    
     html += 'function loadUsers(){fetch("/api/users").then(function(r){return r.json()}).then(function(u){var h="";for(var i=0;i<u.length;i++){h+="<tr><td>"+u[i].username+"</td><td>"+u[i].role+"</td><td><button class=\\"btn btn-danger\\" onclick=\\"deleteUser("+u[i].id+")\\">Delete</button></td></tr>"}document.getElementById("usersTable").innerHTML=h})}';
-    
     html += 'document.getElementById("addUserBtn").addEventListener("click",function(){var u=document.getElementById("newUser").value;var p=document.getElementById("newPass").value;var r=document.getElementById("newRole").value;if(!u||!p){alert("Enter username and password");return}fetch("/api/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:u,password:p,role:r})}).then(function(){document.getElementById("newUser").value="";document.getElementById("newPass").value="";loadUsers()})});';
-    
     html += 'function deleteUser(id){if(!confirm("Delete this user?"))return;fetch("/api/users/"+id,{method:"DELETE"}).then(function(){loadUsers()})}';
-    
     html += 'function loadHistory(){fetch("/api/zoho/sync-history").then(function(r){return r.json()}).then(function(h){var html="";for(var i=0;i<h.length;i++){html+="<tr><td>"+new Date(h[i].created_at).toLocaleString()+"</td><td>"+h[i].sync_type+"</td><td>"+h[i].status+"</td><td>"+(h[i].records_synced||"-")+"</td><td>"+(h[i].error_message||"-")+"</td></tr>"}document.getElementById("historyTable").innerHTML=html})}';
-    
     html += 'checkSession();';
     html += '</script></body></html>';
-    
     return html;
 }
 

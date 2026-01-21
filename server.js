@@ -414,6 +414,59 @@ app.delete('/api/users/:id', requireAuth, requireAdmin, async function(req, res)
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Image proxy for WorkDrive images
+app.get('/api/image/:fileId', async function(req, res) {
+    try {
+        var fileId = req.params.fileId;
+        
+        if (!zohoAccessToken) {
+            var tokenResult = await refreshZohoToken();
+            if (!tokenResult.success) {
+                return res.status(401).send('No valid token');
+            }
+        }
+        
+        // Try WorkDrive download endpoint
+        var imageUrl = 'https://download-accl.zoho.com/v1/workdrive/download/' + fileId;
+        
+        var response = await fetch(imageUrl, {
+            headers: { 
+                'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken
+            }
+        });
+        
+        if (response.status === 401) {
+            // Try refreshing token
+            var tokenResult = await refreshZohoToken();
+            if (tokenResult.success) {
+                response = await fetch(imageUrl, {
+                    headers: { 
+                        'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken
+                    }
+                });
+            }
+        }
+        
+        if (!response.ok) {
+            console.error('WorkDrive image fetch failed:', response.status);
+            return res.status(response.status).send('Image not found');
+        }
+        
+        // Get content type and pipe the image
+        var contentType = response.headers.get('content-type') || 'image/jpeg';
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache for 1 day
+        
+        // Stream the response
+        var buffer = await response.arrayBuffer();
+        res.send(Buffer.from(buffer));
+        
+    } catch (err) {
+        console.error('Image proxy error:', err);
+        res.status(500).send('Error fetching image');
+    }
+});
+
 app.get('*', function(req, res) {
     res.send(getHTML());
 });
@@ -569,15 +622,17 @@ function getHTML() {
     
     html += 'document.getElementById("syncZohoBtn").addEventListener("click",function(){document.getElementById("zohoMessage").innerHTML="Syncing...";fetch("/api/zoho/sync",{method:"POST"}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("zohoMessage").innerHTML="<span class=\\"success\\">"+d.message+"</span>";loadProducts();loadHistory()}else{document.getElementById("zohoMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>";loadHistory()}})});';
     
+    html += 'function getImageUrl(url){if(!url)return null;if(url.indexOf("download-accl.zoho.com/v1/workdrive/download/")!==-1){var parts=url.split("/");var fileId=parts[parts.length-1];return"/api/image/"+fileId}return url}';
+    
     html += 'function loadProducts(){fetch("/api/products").then(function(r){return r.json()}).then(function(d){products=d;renderFilters();renderProducts()})}';
     
     html += 'function renderFilters(){var cats=[];for(var i=0;i<products.length;i++){if(products[i].category&&cats.indexOf(products[i].category)===-1)cats.push(products[i].category)}cats.sort();var h="<button class=\\"filter-btn active\\" data-cat=\\"all\\">All</button>";for(var j=0;j<cats.length;j++){h+="<button class=\\"filter-btn\\" data-cat=\\""+cats[j]+"\\">"+cats[j]+"</button>"}document.getElementById("filters").innerHTML=h;var btns=document.querySelectorAll(".filter-btn");for(var k=0;k<btns.length;k++){btns[k].addEventListener("click",function(e){var all=document.querySelectorAll(".filter-btn");for(var m=0;m<all.length;m++)all[m].classList.remove("active");e.target.classList.add("active");currentFilter=e.target.getAttribute("data-cat");renderProducts()})}}';
     
-    html += 'function renderProducts(){var s=document.getElementById("searchInput").value.toLowerCase();var f=[];for(var i=0;i<products.length;i++){var p=products[i];var ms=!s||p.style_id.toLowerCase().indexOf(s)!==-1||p.name.toLowerCase().indexOf(s)!==-1;var mc=currentFilter==="all"||p.category===currentFilter;if(ms&&mc)f.push(p)}if(f.length===0){document.getElementById("productGrid").innerHTML="";document.getElementById("emptyState").classList.remove("hidden")}else{document.getElementById("emptyState").classList.add("hidden");var h="";for(var j=0;j<f.length;j++){var pr=f[j];var cols=pr.colors||[];var tot=0;for(var c=0;c<cols.length;c++)tot+=cols[c].available_qty||0;var ch="";var mx=Math.min(cols.length,3);for(var d=0;d<mx;d++){ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+(cols[d].available_qty||0).toLocaleString()+"</span></div>"}if(cols.length>3)ch+="<div class=\\"color-row\\" style=\\"color:#999\\">+"+(cols.length-3)+" more</div>";var im=pr.image_url?"<img src=\\""+pr.image_url+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">" :"No Image";h+="<div class=\\"product-card\\" onclick=\\"openModal("+pr.id+")\\"><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+pr.style_id+"</div><div class=\\"product-name\\">"+pr.name+"</div><div class=\\"color-list\\">"+ch+"</div><div class=\\"total-row\\"><span>Total</span><span>"+tot.toLocaleString()+"</span></div></div></div>"}document.getElementById("productGrid").innerHTML=h}document.getElementById("totalStyles").textContent=f.length;var tu=0;for(var t=0;t<f.length;t++){var cs=f[t].colors||[];for(var u=0;u<cs.length;u++)tu+=cs[u].available_qty||0}document.getElementById("totalUnits").textContent=tu.toLocaleString()}';
+    html += 'function renderProducts(){var s=document.getElementById("searchInput").value.toLowerCase();var f=[];for(var i=0;i<products.length;i++){var p=products[i];var ms=!s||p.style_id.toLowerCase().indexOf(s)!==-1||p.name.toLowerCase().indexOf(s)!==-1;var mc=currentFilter==="all"||p.category===currentFilter;if(ms&&mc)f.push(p)}if(f.length===0){document.getElementById("productGrid").innerHTML="";document.getElementById("emptyState").classList.remove("hidden")}else{document.getElementById("emptyState").classList.add("hidden");var h="";for(var j=0;j<f.length;j++){var pr=f[j];var cols=pr.colors||[];var tot=0;for(var c=0;c<cols.length;c++)tot+=cols[c].available_qty||0;var ch="";var mx=Math.min(cols.length,3);for(var d=0;d<mx;d++){ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+(cols[d].available_qty||0).toLocaleString()+"</span></div>"}if(cols.length>3)ch+="<div class=\\"color-row\\" style=\\"color:#999\\">+"+(cols.length-3)+" more</div>";var imgUrl=getImageUrl(pr.image_url);var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">" :"No Image";h+="<div class=\\"product-card\\" onclick=\\"openModal("+pr.id+")\\"><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+pr.style_id+"</div><div class=\\"product-name\\">"+pr.name+"</div><div class=\\"color-list\\">"+ch+"</div><div class=\\"total-row\\"><span>Total</span><span>"+tot.toLocaleString()+"</span></div></div></div>"}document.getElementById("productGrid").innerHTML=h}document.getElementById("totalStyles").textContent=f.length;var tu=0;for(var t=0;t<f.length;t++){var cs=f[t].colors||[];for(var u=0;u<cs.length;u++)tu+=cs[u].available_qty||0}document.getElementById("totalUnits").textContent=tu.toLocaleString()}';
     
     html += 'document.getElementById("searchInput").addEventListener("input",renderProducts);';
     
-    html += 'function openModal(id){var p=null;for(var i=0;i<products.length;i++){if(products[i].id===id){p=products[i];break}}if(!p)return;var cols=p.colors||[];var tot=0;for(var c=0;c<cols.length;c++)tot+=cols[c].available_qty||0;var im=document.getElementById("modalImage");if(p.image_url){im.src=p.image_url;im.style.display="block"}else{im.style.display="none"}document.getElementById("modalStyle").textContent=p.style_id;document.getElementById("modalName").textContent=p.name;document.getElementById("modalCategory").textContent=p.category||"";var ch="";for(var d=0;d<cols.length;d++){ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+(cols[d].available_qty||0).toLocaleString()+"</span></div>"}document.getElementById("modalColors").innerHTML=ch;document.getElementById("modalTotal").textContent=tot.toLocaleString();document.getElementById("modal").classList.add("active")}';
+    html += 'function openModal(id){var p=null;for(var i=0;i<products.length;i++){if(products[i].id===id){p=products[i];break}}if(!p)return;var cols=p.colors||[];var tot=0;for(var c=0;c<cols.length;c++)tot+=cols[c].available_qty||0;var im=document.getElementById("modalImage");var imgUrl=getImageUrl(p.image_url);if(imgUrl){im.src=imgUrl;im.style.display="block"}else{im.style.display="none"}document.getElementById("modalStyle").textContent=p.style_id;document.getElementById("modalName").textContent=p.name;document.getElementById("modalCategory").textContent=p.category||"";var ch="";for(var d=0;d<cols.length;d++){ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+(cols[d].available_qty||0).toLocaleString()+"</span></div>"}document.getElementById("modalColors").innerHTML=ch;document.getElementById("modalTotal").textContent=tot.toLocaleString();document.getElementById("modal").classList.add("active")}';
     
     html += 'document.getElementById("modalClose").addEventListener("click",function(){document.getElementById("modal").classList.remove("active")});';
     html += 'document.getElementById("modal").addEventListener("click",function(e){if(e.target.id==="modal")document.getElementById("modal").classList.remove("active")});';

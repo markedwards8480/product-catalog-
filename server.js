@@ -40,8 +40,9 @@ async function initDB() {
     } catch (err) { console.error('Database initialization error:', err); }
 }
 
-function requireAuth(req, res, next) { if (req.session && req.session.userId) next(); else res.status(401).json({ error: 'Unauthorized' }); }
-function requireAdmin(req, res, next) { if (req.session && req.session.role === 'admin') next(); else res.status(403).json({ error: 'Admin access required' }); }
+// Auth disabled for now - just pass through
+function requireAuth(req, res, next) { next(); }
+function requireAdmin(req, res, next) { next(); }
 
 app.post('/api/login', async (req, res) => {
     try {
@@ -60,8 +61,8 @@ app.post('/api/login', async (req, res) => {
 
 app.post('/api/logout', (req, res) => { req.session.destroy(); res.json({ success: true }); });
 app.get('/api/session', (req, res) => {
-    if (req.session && req.session.userId) res.json({ loggedIn: true, username: req.session.username, role: req.session.role });
-    else res.json({ loggedIn: false });
+    // Auto-login as admin when auth is disabled
+    res.json({ loggedIn: true, username: 'admin', role: 'admin' });
 });
 
 app.get('/api/products', requireAuth, async (req, res) => {
@@ -285,7 +286,7 @@ th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #eee; }
 </head>
 <body>
 
-<div id="loginPage" class="login-page">
+<div id="loginPage" class="login-page hidden">
 <div class="login-box">
 <h1>Product Catalog</h1>
 <form id="loginForm">
@@ -297,14 +298,14 @@ th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #eee; }
 </div>
 </div>
 
-<div id="mainApp" class="hidden">
+<div id="mainApp">
 <header class="header">
 <h1>Product Catalog</h1>
 <div class="search-box"><input type="text" id="searchInput" placeholder="Search products..."></div>
 <div class="header-right">
 <span id="userInfo"></span>
-<button class="btn btn-secondary" id="adminBtn" style="display:none">Admin</button>
-<button class="btn btn-secondary" id="logoutBtn">Sign Out</button>
+<button class="btn btn-secondary" id="adminBtn">Admin</button>
+<button class="btn btn-secondary" id="logoutBtn" style="display:none">Sign Out</button>
 </div>
 </header>
 

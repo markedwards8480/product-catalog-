@@ -1354,8 +1354,14 @@ app.get('/api/system-health', requireAuth, requireAdmin, async function(req, res
         // Last sync info
         var lastSync = await pool.query("SELECT * FROM sync_history WHERE status = 'success' ORDER BY created_at DESC LIMIT 1");
         
-        // Active sessions (approximate - count recent picks/notes activity)
-        var recentActivity = await pool.query("SELECT COUNT(DISTINCT username) as users FROM user_picks WHERE username IS NOT NULL");
+        // Active sessions (approximate - count distinct users with picks)
+        var activeUserCount = 0;
+        try {
+            var recentActivity = await pool.query("SELECT COUNT(DISTINCT user_id) as users FROM user_picks");
+            activeUserCount = parseInt(recentActivity.rows[0].users) || 0;
+        } catch (e) {
+            console.log('Could not count active users:', e.message);
+        }
         
         // Memory usage (Node.js)
         var memUsage = process.memoryUsage();
@@ -1377,7 +1383,7 @@ app.get('/api/system-health', requireAuth, requireAdmin, async function(req, res
                 syncsLast7Days: parseInt(recentSyncs.rows[0].count),
                 lastSuccessfulSync: lastSync.rows[0] ? lastSync.rows[0].created_at : null,
                 lastSyncRecords: lastSync.rows[0] ? lastSync.rows[0].records_updated : null,
-                activeUsers: parseInt(recentActivity.rows[0].users)
+                activeUsers: activeUserCount
             },
             server: {
                 uptime: uptimeStr,

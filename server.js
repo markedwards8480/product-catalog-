@@ -1324,6 +1324,85 @@ app.post('/api/selections/:shareId/record-pdf', requireAuth, async function(req,
 app.get('/', function(req, res) { res.send(getHTML()); });
 app.get('*', function(req, res) { res.send(getHTML()); });
 
+// System Health API endpoint
+app.get('/api/system-health', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        // Database stats
+        var dbStats = {};
+        
+        // Table row counts
+        var tables = ['products', 'product_colors', 'users', 'user_picks', 'user_notes', 'selections', 'sync_history', 'sales_history_cache'];
+        for (var i = 0; i < tables.length; i++) {
+            var t = tables[i];
+            try {
+                var result = await pool.query('SELECT COUNT(*) as count FROM ' + t);
+                dbStats[t] = parseInt(result.rows[0].count);
+            } catch (e) {
+                dbStats[t] = 'N/A';
+            }
+        }
+        
+        // Database size (PostgreSQL)
+        var dbSizeResult = await pool.query("SELECT pg_size_pretty(pg_database_size(current_database())) as size");
+        dbStats.totalSize = dbSizeResult.rows[0].size;
+        
+        // Products with AI tags
+        var aiTagsResult = await pool.query("SELECT COUNT(*) as count FROM products WHERE ai_tags IS NOT NULL AND ai_tags != ''");
+        var aiTagsCount = parseInt(aiTagsResult.rows[0].count);
+        
+        // Recent activity
+        var recentShares = await pool.query("SELECT COUNT(*) as count FROM selections WHERE created_at > NOW() - INTERVAL '7 days'");
+        var recentSyncs = await pool.query("SELECT COUNT(*) as count FROM sync_history WHERE created_at > NOW() - INTERVAL '7 days'");
+        
+        // Last sync info
+        var lastSync = await pool.query("SELECT * FROM sync_history WHERE status = 'success' ORDER BY created_at DESC LIMIT 1");
+        
+        // Active sessions (approximate - count recent picks/notes activity)
+        var recentActivity = await pool.query("SELECT COUNT(DISTINCT username) as users FROM user_picks WHERE username IS NOT NULL");
+        
+        // Memory usage (Node.js)
+        var memUsage = process.memoryUsage();
+        
+        // Uptime
+        var uptime = process.uptime();
+        var uptimeStr = Math.floor(uptime / 86400) + 'd ' + Math.floor((uptime % 86400) / 3600) + 'h ' + Math.floor((uptime % 3600) / 60) + 'm';
+        
+        res.json({
+            success: true,
+            database: {
+                tables: dbStats,
+                totalSize: dbStats.totalSize,
+                productsWithAI: aiTagsCount,
+                productsWithoutAI: dbStats.products - aiTagsCount
+            },
+            activity: {
+                sharesLast7Days: parseInt(recentShares.rows[0].count),
+                syncsLast7Days: parseInt(recentSyncs.rows[0].count),
+                lastSuccessfulSync: lastSync.rows[0] ? lastSync.rows[0].created_at : null,
+                lastSyncRecords: lastSync.rows[0] ? lastSync.rows[0].records_updated : null,
+                activeUsers: parseInt(recentActivity.rows[0].users)
+            },
+            server: {
+                uptime: uptimeStr,
+                uptimeSeconds: Math.floor(uptime),
+                memoryUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + ' MB',
+                memoryTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + ' MB',
+                nodeVersion: process.version,
+                platform: process.platform
+            },
+            apiStatus: {
+                anthropicConfigured: !!process.env.ANTHROPIC_API_KEY,
+                zohoConfigured: !!(process.env.ZOHO_CLIENT_ID && process.env.ZOHO_REFRESH_TOKEN),
+                zohoConnected: !!zohoAccessToken
+            },
+            timestamp: new Date().toISOString()
+        });
+    } catch (err) {
+        console.error('System health error:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
 // Chat API endpoint - AI-powered product assistant
 app.post('/api/chat', requireAuth, async function(req, res) {
     try {
@@ -1537,6 +1616,7 @@ function getHTML() {
     html += 'table{width:100%;border-collapse:collapse}th,td{padding:0.75rem;text-align:left;border-bottom:1px solid #eee}';
     html += '.add-form{display:flex;gap:0.5rem;margin-top:1rem;flex-wrap:wrap}.add-form input,.add-form select{padding:0.5rem;border:1px solid #ddd;border-radius:4px}';
     html += '.status-box{padding:1rem;background:#f9f9f9;border-radius:4px;margin-bottom:1rem}.status-item{margin-bottom:0.5rem}.status-label{font-weight:500}.status-value{color:#666}.status-value.connected{color:#2e7d32}.status-value.disconnected{color:#c4553d}';
+    html += '.system-health-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem}.health-card{background:#f9f9f9;border-radius:8px;padding:1rem}.health-card h4{margin:0 0 0.75rem;font-size:1rem;color:#333}.health-stats{display:flex;flex-direction:column;gap:0.5rem}.health-row{display:flex;justify-content:space-between;font-size:0.875rem}.health-row span{color:#666}.health-row strong{color:#333}.status-ok{color:#2e7d32}.status-warn{color:#f57c00}';
     html += '.view-controls{display:flex;align-items:center;gap:1rem;margin-bottom:1rem;padding:0.75rem 1rem;background:white;border-radius:0;flex-wrap:wrap;position:sticky;top:110px;z-index:80;border-bottom:1px solid #eee;transition:all 0.3s ease}.view-controls.compact{padding:0.5rem 1rem;gap:0.5rem;top:82px}.view-controls label{font-weight:500;color:#333}';
     html += '.size-btn{padding:0.5rem 1rem;border:1px solid #ddd;background:white;cursor:pointer}.size-btn:first-of-type{border-radius:4px 0 0 4px}.size-btn:last-of-type{border-radius:0 4px 4px 0}.size-btn.active{background:#2c5545;color:white;border-color:#2c5545}';
     html += '.selection-bar{position:fixed;bottom:0;left:0;right:0;background:white;padding:1rem 2rem;box-shadow:0 -2px 10px rgba(0,0,0,0.1);display:flex;justify-content:space-between;align-items:center;z-index:100;transform:translateY(100%);transition:transform 0.3s}.selection-bar.visible{transform:translateY(0)}';
@@ -1561,11 +1641,12 @@ function getHTML() {
     html += '<div id="historyTab" class="tab-content"><table><thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Records</th><th>Error</th></tr></thead><tbody id="historyTable"></tbody></table></div></div>';
     
     // Admin panel (admin only)
-    html += '<div id="adminPanel" class="admin-panel hidden"><h2>Admin Settings</h2><div class="tabs"><button class="tab active" data-tab="zoho2">Zoho Sync</button><button class="tab" data-tab="import2">Import CSV</button><button class="tab" data-tab="ai2">AI Analysis</button><button class="tab" data-tab="users2">Users</button></div>';
+    html += '<div id="adminPanel" class="admin-panel hidden"><h2>Admin Settings</h2><div class="tabs"><button class="tab active" data-tab="zoho2">Zoho Sync</button><button class="tab" data-tab="import2">Import CSV</button><button class="tab" data-tab="ai2">AI Analysis</button><button class="tab" data-tab="users2">Users</button><button class="tab" data-tab="system2">System Health</button></div>';
     html += '<div id="zoho2Tab" class="tab-content active"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="zohoStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Workspace ID: </span><span class="status-value" id="zohoWorkspaceId">-</span></div><div class="status-item"><span class="status-label">View ID: </span><span class="status-value" id="zohoViewId">-</span></div></div><div style="display:flex;gap:1rem"><button class="btn btn-secondary" id="testZohoBtn">Test Connection</button><button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div><div id="zohoMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="import2Tab" class="tab-content"><div class="upload-area"><input type="file" id="csvFile" accept=".csv"><label for="csvFile">Click to upload CSV file</label></div><div id="importStatus"></div><button class="btn btn-danger" id="clearBtn" style="margin-top:1rem">Clear All Products</button></div>';
     html += '<div id="ai2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">API Status: </span><span class="status-value" id="aiStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Products Analyzed: </span><span class="status-value" id="aiAnalyzedCount">-</span></div><div class="status-item"><span class="status-label">Remaining: </span><span class="status-value" id="aiRemainingCount">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">AI analysis uses Claude Vision to generate searchable tags from product images. This enables searching by garment type (cardigan, hoodie), style (casual, formal), pattern (striped, floral), and more.</p><button class="btn btn-primary" id="runAiBtn">Analyze Next 100 Products</button><button class="btn btn-success" id="runAllAiBtn" style="margin-left:0.5rem">Analyze All (Background)</button><button class="btn btn-secondary" id="stopAiBtn" style="margin-left:0.5rem;display:none">Stop</button><div id="aiMessage" style="margin-top:1rem"></div></div>';
-    html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Username</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUser" placeholder="Username"><input type="password" id="newPass" placeholder="Password"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add</button></div></div></div>';
+    html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Username</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUser" placeholder="Username"><input type="password" id="newPass" placeholder="Password"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add</button></div></div>';
+    html += '<div id="system2Tab" class="tab-content"><div id="systemHealthContent"><p>Loading system health data...</p></div><button class="btn btn-secondary" id="refreshSystemBtn" style="margin-top:1rem">🔄 Refresh</button></div></div>';
     
     html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div id="availNowStat" class="stat-box stat-active"><div class="stat-value" id="totalAvailNow">0</div><div class="stat-label">📦 Avail Now</div></div><div id="leftToSellStat" class="stat-box"><div class="stat-value" id="totalLeftToSell">0</div><div class="stat-label">📊 Left to Sell</div></div><div class="qty-toggle"><button class="qty-toggle-btn active" id="toggleAvailableNow" data-mode="available_now">📦 Available Now</button><button class="qty-toggle-btn" id="toggleLeftToSell" data-mode="left_to_sell">📊 Left to Sell</button></div></div>';
     html += '<div class="view-controls"><label>View:</label><button class="size-btn" data-size="list">List</button><button class="size-btn" data-size="small">Small</button><button class="size-btn active" data-size="medium">Medium</button><button class="size-btn" data-size="large">Large</button><div class="feature-toggle active-indicator" id="groupByStyleWrapper"><input type="checkbox" id="groupByStyleToggle" checked><label for="groupByStyleToggle">🎨 Grouped by Style ✓</label></div><label>Sort:</label><select id="sortSelect" style="padding:0.4rem;border:1px solid #ddd;border-radius:4px"><option value="name-asc">Name A-Z</option><option value="name-desc">Name Z-A</option><option value="qty-high">Qty High→Low</option><option value="qty-low">Qty Low→High</option><option value="newest">Newest First</option></select><span style="margin-left:1rem"></span><label>Qty:</label><input type="number" id="minQty" placeholder="Min" style="width:70px;padding:0.4rem;border:1px solid #ddd;border-radius:4px"><span style="margin:0 0.25rem">-</span><input type="number" id="maxQty" placeholder="Max" style="width:70px;padding:0.4rem;border:1px solid #ddd;border-radius:4px"><button id="resetQtyBtn" style="margin-left:0.5rem;padding:0.4rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.875rem">Reset</button><span style="margin-left:auto"></span><button class="select-mode-btn" id="selectModeBtn">📤 Select for Sharing</button></div>';
@@ -1636,7 +1717,7 @@ function getHTML() {
     html += 'document.getElementById("helpClose").addEventListener("click",function(){document.getElementById("helpModal").classList.remove("active")});';
     html += 'document.getElementById("helpModal").addEventListener("click",function(e){if(e.target.id==="helpModal")document.getElementById("helpModal").classList.remove("active")});';
     html += 'document.getElementById("historyBtn").addEventListener("click",function(){document.getElementById("historyPanel").classList.toggle("hidden");document.getElementById("adminPanel").classList.add("hidden")});';
-    html += 'document.getElementById("adminBtn").addEventListener("click",function(){document.getElementById("adminPanel").classList.toggle("hidden");document.getElementById("historyPanel").classList.add("hidden")});';
+    html += 'document.getElementById("adminBtn").addEventListener("click",function(){document.getElementById("adminPanel").classList.toggle("hidden");document.getElementById("historyPanel").classList.add("hidden");if(!document.getElementById("adminPanel").classList.contains("hidden")){loadSystemHealth()}});';
     
     // Chat functionality
     html += 'var chatOpen=false;';
@@ -1751,6 +1832,10 @@ function getHTML() {
     html += 'function loadUsers(){fetch("/api/users").then(function(r){return r.json()}).then(function(u){var h="";u.forEach(function(x){h+="<tr><td>"+x.username+"</td><td>"+x.role+"</td><td><button class=\\"btn btn-danger\\" onclick=\\"deleteUser("+x.id+")\\">Delete</button></td></tr>"});document.getElementById("usersTable").innerHTML=h})}';
     html += 'document.getElementById("addUserBtn").addEventListener("click",function(){var u=document.getElementById("newUser").value;var p=document.getElementById("newPass").value;if(!u||!p){alert("Enter username and password");return}fetch("/api/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:u,password:p,role:document.getElementById("newRole").value})}).then(function(){document.getElementById("newUser").value="";document.getElementById("newPass").value="";loadUsers()})});';
     html += 'function deleteUser(id){if(!confirm("Delete user?"))return;fetch("/api/users/"+id,{method:"DELETE"}).then(function(){loadUsers()})}';
+    
+    // System Health functions
+    html += 'function loadSystemHealth(){fetch("/api/system-health").then(function(r){return r.json()}).then(function(d){if(!d.success){document.getElementById("systemHealthContent").innerHTML="<p class=\\"error\\">Error loading system health</p>";return}var h="<div class=\\"system-health-grid\\">";h+="<div class=\\"health-card\\"><h4>📊 Database</h4><div class=\\"health-stats\\">";h+="<div class=\\"health-row\\"><span>Total Size:</span><strong>"+d.database.totalSize+"</strong></div>";h+="<div class=\\"health-row\\"><span>Products:</span><strong>"+d.database.tables.products.toLocaleString()+"</strong></div>";h+="<div class=\\"health-row\\"><span>Color Variants:</span><strong>"+d.database.tables.product_colors.toLocaleString()+"</strong></div>";h+="<div class=\\"health-row\\"><span>Users:</span><strong>"+d.database.tables.users+"</strong></div>";h+="<div class=\\"health-row\\"><span>Shares Created:</span><strong>"+d.database.tables.selections+"</strong></div>";h+="<div class=\\"health-row\\"><span>User Picks:</span><strong>"+d.database.tables.user_picks+"</strong></div>";h+="<div class=\\"health-row\\"><span>User Notes:</span><strong>"+d.database.tables.user_notes+"</strong></div>";h+="</div></div>";h+="<div class=\\"health-card\\"><h4>🤖 AI Analysis</h4><div class=\\"health-stats\\">";h+="<div class=\\"health-row\\"><span>Products Analyzed:</span><strong>"+d.database.productsWithAI.toLocaleString()+"</strong></div>";h+="<div class=\\"health-row\\"><span>Pending Analysis:</span><strong>"+d.database.productsWithoutAI.toLocaleString()+"</strong></div>";var aiPct=d.database.tables.products>0?Math.round(d.database.productsWithAI/d.database.tables.products*100):0;h+="<div class=\\"health-row\\"><span>Coverage:</span><strong>"+aiPct+"%</strong></div>";h+="<div class=\\"health-row\\"><span>Anthropic API:</span><strong class=\\"status-"+(d.apiStatus.anthropicConfigured?"ok":"warn")+"\\">"+(d.apiStatus.anthropicConfigured?"✓ Configured":"✗ Not Set")+"</strong></div>";h+="</div></div>";h+="<div class=\\"health-card\\"><h4>🔗 Integrations</h4><div class=\\"health-stats\\">";h+="<div class=\\"health-row\\"><span>Zoho Configured:</span><strong class=\\"status-"+(d.apiStatus.zohoConfigured?"ok":"warn")+"\\">"+(d.apiStatus.zohoConfigured?"✓ Yes":"✗ No")+"</strong></div>";h+="<div class=\\"health-row\\"><span>Zoho Connected:</span><strong class=\\"status-"+(d.apiStatus.zohoConnected?"ok":"warn")+"\\">"+(d.apiStatus.zohoConnected?"✓ Yes":"✗ No")+"</strong></div>";h+="<div class=\\"health-row\\"><span>Last Sync:</span><strong>"+(d.activity.lastSuccessfulSync?new Date(d.activity.lastSuccessfulSync).toLocaleDateString():"Never")+"</strong></div>";h+="<div class=\\"health-row\\"><span>Last Sync Records:</span><strong>"+(d.activity.lastSyncRecords||"-")+"</strong></div>";h+="</div></div>";h+="<div class=\\"health-card\\"><h4>⚡ Server</h4><div class=\\"health-stats\\">";h+="<div class=\\"health-row\\"><span>Uptime:</span><strong>"+d.server.uptime+"</strong></div>";h+="<div class=\\"health-row\\"><span>Memory Used:</span><strong>"+d.server.memoryUsed+"</strong></div>";h+="<div class=\\"health-row\\"><span>Memory Total:</span><strong>"+d.server.memoryTotal+"</strong></div>";h+="<div class=\\"health-row\\"><span>Node.js:</span><strong>"+d.server.nodeVersion+"</strong></div>";h+="<div class=\\"health-row\\"><span>Platform:</span><strong>"+d.server.platform+"</strong></div>";h+="</div></div>";h+="<div class=\\"health-card\\"><h4>📈 Activity (7 days)</h4><div class=\\"health-stats\\">";h+="<div class=\\"health-row\\"><span>Users with Picks:</span><strong>"+d.activity.activeUsers+"</strong></div>";h+="<div class=\\"health-row\\"><span>Shares Created:</span><strong>"+d.activity.sharesLast7Days+"</strong></div>";h+="<div class=\\"health-row\\"><span>Data Syncs:</span><strong>"+d.activity.syncsLast7Days+"</strong></div>";h+="</div></div>";h+="</div>";h+="<p style=\\"margin-top:1rem;font-size:0.8rem;color:#999\\">Last checked: "+new Date(d.timestamp).toLocaleString()+"</p>";document.getElementById("systemHealthContent").innerHTML=h}).catch(function(e){document.getElementById("systemHealthContent").innerHTML="<p class=\\"error\\">Error: "+e.message+"</p>"})}';
+    html += 'document.getElementById("refreshSystemBtn").addEventListener("click",loadSystemHealth);';
     
     html += 'function loadHistory(){fetch("/api/zoho/sync-history").then(function(r){return r.json()}).then(function(h){var html="";h.forEach(function(x){html+="<tr><td>"+new Date(x.created_at).toLocaleString()+"</td><td>"+x.sync_type+"</td><td>"+x.status+"</td><td>"+(x.records_synced||"-")+"</td><td>"+(x.error_message||"-")+"</td></tr>"});document.getElementById("historyTable").innerHTML=html})}';
     

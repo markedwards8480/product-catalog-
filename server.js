@@ -369,9 +369,9 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
         
         console.log('Sales History Request - Style:', styleId, 'Base:', baseStyle);
         
-        // Check cache first (valid for 1 hour)
+        // Check cache first (valid for 4 hours for display)
         var cacheResult = await pool.query(
-            'SELECT * FROM sales_history_cache WHERE base_style = $1 AND updated_at > NOW() - INTERVAL \'1 hour\'',
+            'SELECT * FROM sales_history_cache WHERE base_style = $1 AND updated_at > NOW() - INTERVAL \'4 hours\'',
             [baseStyle]
         );
         
@@ -1486,40 +1486,56 @@ async function refreshSalesHistoryCache() {
         staleResult.rows.forEach(function(r) { freshStyles[r.base_style] = true; });
         
         var stylesToRefresh = baseStyles.filter(function(s) { return !freshStyles[s]; });
-        console.log(stylesToRefresh.length, 'styles need refresh');
+        console.log(stylesToRefresh.length, 'styles need refresh (no cache or stale)');
         
-        // Limit to 50 per run to avoid API rate limits
-        var batch = stylesToRefresh.slice(0, 50);
+        // If all styles are fresh, refresh oldest ones anyway (rolling refresh)
+        if (stylesToRefresh.length === 0) {
+            var oldestResult = await pool.query(
+                'SELECT base_style FROM sales_history_cache ORDER BY updated_at ASC LIMIT 20'
+            );
+            stylesToRefresh = oldestResult.rows.map(function(r) { return r.base_style; });
+            console.log('All fresh - refreshing', stylesToRefresh.length, 'oldest cached styles');
+        }
+        
+        // Process up to 30 per run (with 2 second delays = ~1 minute per run)
+        var batch = stylesToRefresh.slice(0, 30);
         var refreshed = 0;
+        var errors = 0;
         
         for (var i = 0; i < batch.length; i++) {
             try {
-                // Small delay between requests
-                if (i > 0) await new Promise(function(r) { setTimeout(r, 1000); });
+                // 2 second delay between requests to avoid rate limits
+                if (i > 0) await new Promise(function(r) { setTimeout(r, 2000); });
                 
                 // Trigger the sales history endpoint internally
                 var response = await fetch('http://localhost:' + PORT + '/api/sales-history/' + encodeURIComponent(batch[i]), {
                     headers: { 'Cookie': 'connect.sid=background' }
                 });
-                if (response.ok) refreshed++;
+                if (response.ok) {
+                    refreshed++;
+                } else {
+                    errors++;
+                    console.log('Cache refresh failed for', batch[i], '- status:', response.status);
+                }
             } catch (err) {
+                errors++;
                 console.error('Cache refresh error for', batch[i], err.message);
             }
         }
         
-        console.log('Sales history cache refresh complete:', refreshed, '/', batch.length, 'styles updated');
+        console.log('Sales history cache refresh complete:', refreshed, 'updated,', errors, 'errors,', (baseStyles.length - stylesToRefresh.length + refreshed), '/', baseStyles.length, 'total cached');
     } catch (err) {
         console.error('Sales history cache refresh error:', err.message);
     }
 }
 
-// Start background cache refresh every hour
+// Start background cache refresh every 15 minutes
 function startSalesHistoryCacheJob() {
-    console.log('Starting sales history cache job (every hour)');
-    // Run immediately on startup after a delay
-    setTimeout(function() { refreshSalesHistoryCache(); }, 30000);
-    // Then every hour
-    setInterval(function() { refreshSalesHistoryCache(); }, 60 * 60 * 1000);
+    console.log('Starting sales history cache job (every 15 minutes)');
+    // Run 1 minute after startup (let other things initialize)
+    setTimeout(function() { refreshSalesHistoryCache(); }, 60000);
+    // Then every 15 minutes
+    setInterval(function() { refreshSalesHistoryCache(); }, 15 * 60 * 1000);
 }
 
 initDB().then(function() {

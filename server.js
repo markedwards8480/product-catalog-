@@ -325,6 +325,103 @@ app.get('/api/zoho/status', requireAuth, function(req, res) {
     res.json({ configured: hasCredentials, connected: hasToken, viewId: process.env.ZOHO_VIEW_ID || null, workspaceId: process.env.ZOHO_WORKSPACE_ID || null });
 });
 
+// Debug endpoint to test PO API access
+app.get('/api/debug/po-test/:styleId', requireAuth, async function(req, res) {
+    try {
+        var styleId = req.params.styleId;
+        var orgId = process.env.ZOHO_BOOKS_ORG_ID || '677681121';
+        
+        if (!zohoAccessToken) {
+            var tokenResult = await refreshZohoToken();
+            if (!tokenResult.success) {
+                return res.json({ success: false, error: 'Token refresh failed: ' + tokenResult.error });
+            }
+        }
+        
+        var debugResults = {
+            styleId: styleId,
+            baseStyle: styleId.split('-')[0],
+            orgId: orgId,
+            searches: [],
+            errors: []
+        };
+        
+        // Test 1: Try to list ANY purchase orders (test API access)
+        try {
+            var testUrl = 'https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&per_page=5';
+            console.log('Testing PO API access:', testUrl);
+            var testResponse = await fetch(testUrl, {
+                headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
+            });
+            var testData = await testResponse.json();
+            debugResults.searches.push({
+                test: 'List any POs',
+                url: testUrl,
+                status: testResponse.status,
+                poCount: testData.purchaseorders ? testData.purchaseorders.length : 0,
+                message: testData.message || null,
+                samplePO: testData.purchaseorders && testData.purchaseorders[0] ? {
+                    number: testData.purchaseorders[0].purchaseorder_number,
+                    vendor: testData.purchaseorders[0].vendor_name,
+                    status: testData.purchaseorders[0].status,
+                    date: testData.purchaseorders[0].date
+                } : null
+            });
+        } catch (err) {
+            debugResults.errors.push({ test: 'List any POs', error: err.message });
+        }
+        
+        // Test 2: Search for the specific style
+        var baseStyle = styleId.split('-')[0];
+        try {
+            var searchUrl = 'https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&item_name_contains=' + encodeURIComponent(baseStyle);
+            console.log('Searching POs for style:', searchUrl);
+            var searchResponse = await fetch(searchUrl, {
+                headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
+            });
+            var searchData = await searchResponse.json();
+            debugResults.searches.push({
+                test: 'Search by item_name_contains: ' + baseStyle,
+                url: searchUrl,
+                status: searchResponse.status,
+                poCount: searchData.purchaseorders ? searchData.purchaseorders.length : 0,
+                message: searchData.message || null,
+                pos: searchData.purchaseorders ? searchData.purchaseorders.map(function(po) {
+                    return { number: po.purchaseorder_number, vendor: po.vendor_name, status: po.status };
+                }) : []
+            });
+        } catch (err) {
+            debugResults.errors.push({ test: 'Search by item_name_contains', error: err.message });
+        }
+        
+        // Test 3: Search with search_text
+        try {
+            var textUrl = 'https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&search_text=' + encodeURIComponent(baseStyle);
+            console.log('Searching POs with search_text:', textUrl);
+            var textResponse = await fetch(textUrl, {
+                headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
+            });
+            var textData = await textResponse.json();
+            debugResults.searches.push({
+                test: 'Search by search_text: ' + baseStyle,
+                url: textUrl,
+                status: textResponse.status,
+                poCount: textData.purchaseorders ? textData.purchaseorders.length : 0,
+                message: textData.message || null,
+                pos: textData.purchaseorders ? textData.purchaseorders.map(function(po) {
+                    return { number: po.purchaseorder_number, vendor: po.vendor_name, status: po.status };
+                }) : []
+            });
+        } catch (err) {
+            debugResults.errors.push({ test: 'Search by search_text', error: err.message });
+        }
+        
+        res.json({ success: true, debug: debugResults });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
 app.post('/api/zoho/test', requireAuth, requireAdmin, async function(req, res) {
     try {
         if (!zohoAccessToken) { var tokenResult = await refreshZohoToken(); if (!tokenResult.success) return res.json({ success: false, error: tokenResult.error }); }
@@ -711,7 +808,7 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
             var poSearchTerm = searchTerms[pt];
             try {
                 // Strategy 1: item_name_contains (all statuses)
-                var poStatuses = ['draft', 'open', 'billed', 'closed'];
+                var poStatuses = ['draft', 'open', 'issued', 'billed', 'closed'];
                 for (var psi = 0; psi < poStatuses.length; psi++) {
                     var poStatus = poStatuses[psi];
                     

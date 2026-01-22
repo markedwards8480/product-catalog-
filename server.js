@@ -38,6 +38,9 @@ async function initDB() {
         await pool.query('CREATE TABLE IF NOT EXISTS user_picks (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, product_id))');
         await pool.query('CREATE TABLE IF NOT EXISTS user_notes (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE, note TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, product_id))');
         await pool.query('CREATE TABLE IF NOT EXISTS sales_history_cache (id SERIAL PRIMARY KEY, base_style VARCHAR(100) UNIQUE NOT NULL, summary JSONB, history JSONB, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
+        await pool.query('CREATE TABLE IF NOT EXISTS sales_data (id SERIAL PRIMARY KEY, document_type VARCHAR(50), document_number VARCHAR(100), doc_date DATE, customer_vendor VARCHAR(255), line_item_sku VARCHAR(255), base_style VARCHAR(100), status VARCHAR(50), quantity DECIMAL(12,2), amount DECIMAL(12,2), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
+        await pool.query('CREATE INDEX IF NOT EXISTS idx_sales_data_base_style ON sales_data(base_style)');
+        await pool.query('CREATE INDEX IF NOT EXISTS idx_sales_data_document_type ON sales_data(document_type)');
         
         // Add columns if they don't exist (for existing databases)
         try { await pool.query('ALTER TABLE selections ADD COLUMN IF NOT EXISTS share_type VARCHAR(50) DEFAULT \'link\''); } catch (e) {}
@@ -502,53 +505,76 @@ app.get('/api/data-freshness', requireAuth, async function(req, res) {
 });
 
 // Sales History API - Get invoices and sales orders for a style
-// DISABLED API CALLS - Will be replaced with CSV import
+// Now uses imported sales_data table
 app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
     try {
         var styleId = req.params.styleId;
         var baseStyle = styleId.split('-')[0];
         
-        console.log('Sales History Request - Style:', styleId, 'Base:', baseStyle, '(API DISABLED - awaiting CSV import)');
+        console.log('Sales History Request - Style:', styleId, 'Base:', baseStyle);
         
-        // Check cache first - return cached data if available
-        var cacheResult = await pool.query(
-            'SELECT * FROM sales_history_cache WHERE base_style = $1',
+        // Query sales_data table for this style
+        var salesResult = await pool.query(
+            'SELECT document_type, document_number, doc_date, customer_vendor, status, SUM(quantity) as total_qty, SUM(amount) as total_amount FROM sales_data WHERE base_style = $1 GROUP BY document_type, document_number, doc_date, customer_vendor, status ORDER BY doc_date DESC',
             [baseStyle]
         );
         
-        if (cacheResult.rows.length > 0) {
-            console.log('Sales History Cache HIT for', baseStyle);
-            var cached = cacheResult.rows[0];
-            return res.json({
-                success: true,
-                styleId: styleId,
-                summary: cached.summary,
-                history: cached.history,
-                cached: true,
-                cacheAge: Math.round((Date.now() - new Date(cached.updated_at).getTime()) / 60000) + ' minutes'
+        var history = [];
+        var summary = {
+            totalInvoiced: 0,
+            totalInvoiceAmount: 0,
+            invoiceCount: 0,
+            openSOQuantity: 0,
+            openSOAmount: 0,
+            openSOCount: 0,
+            openPOQuantity: 0,
+            openPOAmount: 0,
+            openPOCount: 0
+        };
+        
+        for (var i = 0; i < salesResult.rows.length; i++) {
+            var row = salesResult.rows[i];
+            var qty = parseFloat(row.total_qty) || 0;
+            var amt = parseFloat(row.total_amount) || 0;
+            var docType = row.document_type;
+            var status = (row.status || '').toLowerCase();
+            
+            history.push({
+                type: docType === 'Purchase Order' ? 'purchaseorder' : 'salesorder',
+                documentNumber: row.document_number,
+                date: row.doc_date,
+                customerName: row.customer_vendor,
+                status: row.status,
+                quantity: qty,
+                amount: amt
             });
+            
+            if (docType === 'Sales Order') {
+                // Check if it's invoiced or still open
+                if (status === 'invoiced' || status === 'closed' || status === 'fulfilled') {
+                    summary.totalInvoiced += qty;
+                    summary.totalInvoiceAmount += amt;
+                    summary.invoiceCount++;
+                } else {
+                    // Open sales order (confirmed, open, pending, etc.)
+                    summary.openSOQuantity += qty;
+                    summary.openSOAmount += amt;
+                    summary.openSOCount++;
+                }
+            } else if (docType === 'Purchase Order') {
+                // All POs count as import POs
+                summary.openPOQuantity += qty;
+                summary.openPOAmount += amt;
+                summary.openPOCount++;
+            }
         }
         
-        // API DISABLED - Return empty results instead of making API calls
-        // This will be replaced with CSV import functionality
-        console.log('Sales History - No cache, API disabled, returning empty for', baseStyle);
-        return res.json({
+        res.json({
             success: true,
             styleId: styleId,
-            summary: {
-                totalInvoiced: 0,
-                totalInvoiceAmount: 0,
-                invoiceCount: 0,
-                openSOQuantity: 0,
-                openSOAmount: 0,
-                openSOCount: 0,
-                openPOQuantity: 0,
-                openPOAmount: 0,
-                openPOCount: 0
-            },
-            history: [],
-            cached: false,
-            message: 'Sales history API disabled - CSV import coming soon'
+            summary: summary,
+            history: history.slice(0, 50), // Limit to 50 most recent
+            recordCount: salesResult.rows.length
         });
         
     } catch (err) {
@@ -1240,7 +1266,159 @@ app.post('/api/import', requireAuth, requireAdmin, upload.single('file'), async 
 });
 
 app.post('/api/products/clear', requireAuth, requireAdmin, async function(req, res) { try { await pool.query('DELETE FROM product_colors'); await pool.query('DELETE FROM products'); res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });
+
+// Import Sales Data CSV (PO-SO Query)
+app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), async function(req, res) {
+    try {
+        if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+        
+        var content = req.file.buffer.toString('utf-8');
+        // Remove BOM if present
+        if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
+        
+        var lines = content.split('\n').filter(function(line) { return line.trim(); });
+        if (lines.length < 2) return res.json({ success: false, error: 'CSV file is empty' });
+        
+        // Parse header
+        var headerLine = lines[0];
+        var headers = [];
+        var inQuote = false;
+        var current = '';
+        for (var i = 0; i < headerLine.length; i++) {
+            var char = headerLine[i];
+            if (char === '"') { inQuote = !inQuote; }
+            else if (char === ',' && !inQuote) { headers.push(current.trim().toLowerCase().replace(/\s+/g, '_')); current = ''; }
+            else { current += char; }
+        }
+        headers.push(current.trim().toLowerCase().replace(/\s+/g, '_'));
+        
+        console.log('Sales CSV Headers:', headers);
+        
+        // Find column indices
+        var colMap = {};
+        for (var h = 0; h < headers.length; h++) { colMap[headers[h]] = h; }
+        
+        // Required columns
+        var docTypeIdx = colMap['document_type'];
+        var docNumIdx = colMap['document_number'];
+        var dateIdx = colMap['date'];
+        var custIdx = colMap['customer_vendor'];
+        var skuIdx = colMap['line_item_sku'];
+        var styleIdx = colMap['line_item_style'];
+        var statusIdx = colMap['status'];
+        var qtyIdx = colMap['quantity'];
+        var amtIdx = colMap['amount'];
+        
+        if (docTypeIdx === undefined || docNumIdx === undefined) {
+            return res.json({ success: false, error: 'Missing required columns: document_type, document_number' });
+        }
+        
+        // Clear existing sales data
+        await pool.query('DELETE FROM sales_data');
+        
+        var imported = 0;
+        var errors = 0;
+        var batchSize = 500;
+        var batch = [];
+        
+        for (var r = 1; r < lines.length; r++) {
+            try {
+                // Parse CSV row
+                var row = [];
+                var inQuote2 = false;
+                var cell = '';
+                var line = lines[r];
+                for (var c = 0; c < line.length; c++) {
+                    var ch = line[c];
+                    if (ch === '"') { inQuote2 = !inQuote2; }
+                    else if (ch === ',' && !inQuote2) { row.push(cell.trim()); cell = ''; }
+                    else { cell += ch; }
+                }
+                row.push(cell.trim());
+                
+                var docType = row[docTypeIdx] || '';
+                var docNum = row[docNumIdx] || '';
+                var docDate = row[dateIdx] || null;
+                var customer = row[custIdx] || '';
+                var sku = skuIdx !== undefined ? row[skuIdx] || '' : '';
+                var style = styleIdx !== undefined ? row[styleIdx] || '' : '';
+                var status = statusIdx !== undefined ? row[statusIdx] || '' : '';
+                var qty = qtyIdx !== undefined ? parseFloat((row[qtyIdx] || '0').replace(/,/g, '')) || 0 : 0;
+                var amt = amtIdx !== undefined ? parseFloat((row[amtIdx] || '0').replace(/,/g, '')) || 0 : 0;
+                
+                // Extract base style (e.g., "80414J-AA" -> "80414J")
+                var baseStyle = style ? style.split('-')[0] : (sku ? sku.split('-')[0] : '');
+                
+                if (docType && docNum && baseStyle) {
+                    batch.push([docType, docNum, docDate, customer, sku, baseStyle, status, qty, amt]);
+                    
+                    if (batch.length >= batchSize) {
+                        // Batch insert
+                        var values = [];
+                        var placeholders = [];
+                        var paramIdx = 1;
+                        for (var b = 0; b < batch.length; b++) {
+                            var item = batch[b];
+                            placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
+                            values = values.concat(item);
+                        }
+                        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+                        imported += batch.length;
+                        batch = [];
+                    }
+                }
+            } catch (rowErr) {
+                errors++;
+                if (errors < 5) console.log('Row error:', rowErr.message);
+            }
+        }
+        
+        // Insert remaining batch
+        if (batch.length > 0) {
+            var values = [];
+            var placeholders = [];
+            var paramIdx = 1;
+            for (var b = 0; b < batch.length; b++) {
+                var item = batch[b];
+                placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
+                values = values.concat(item);
+            }
+            await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+            imported += batch.length;
+        }
+        
+        // Log to sync history
+        await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1, $2, $3)', ['sales_import', 'success', imported]);
+        
+        console.log('Sales data import complete:', imported, 'records imported,', errors, 'errors');
+        res.json({ success: true, imported: imported, errors: errors });
+    } catch (err) {
+        console.error('Sales import error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/api/users', requireAuth, requireAdmin, async function(req, res) { try { var result = await pool.query('SELECT id, username, role, created_at FROM users ORDER BY created_at'); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
+
+// Sales data stats
+app.get('/api/sales-stats', requireAuth, async function(req, res) {
+    try {
+        var totalResult = await pool.query('SELECT COUNT(*) as count FROM sales_data');
+        var soResult = await pool.query("SELECT COUNT(*) as count FROM sales_data WHERE document_type = 'Sales Order'");
+        var poResult = await pool.query("SELECT COUNT(*) as count FROM sales_data WHERE document_type = 'Purchase Order'");
+        var stylesResult = await pool.query('SELECT COUNT(DISTINCT base_style) as count FROM sales_data');
+        
+        res.json({
+            success: true,
+            totalRecords: parseInt(totalResult.rows[0].count),
+            salesOrders: parseInt(soResult.rows[0].count),
+            purchaseOrders: parseInt(poResult.rows[0].count),
+            uniqueStyles: parseInt(stylesResult.rows[0].count)
+        });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
 app.post('/api/users', requireAuth, requireAdmin, async function(req, res) { try { var hash = await bcrypt.hash(req.body.password, 10); await pool.query('INSERT INTO users (username, password, role) VALUES ($1,$2,$3)', [req.body.username, hash, req.body.role || 'sales_rep']); res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });
 app.delete('/api/users/:id', requireAuth, requireAdmin, async function(req, res) { try { await pool.query('DELETE FROM users WHERE id=$1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });
 
@@ -1648,9 +1826,10 @@ function getHTML() {
     html += '<div id="historyTab" class="tab-content"><table><thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Records</th><th>Error</th></tr></thead><tbody id="historyTable"></tbody></table></div></div>';
     
     // Admin panel (admin only)
-    html += '<div id="adminPanel" class="admin-panel hidden"><h2>Admin Settings</h2><div class="tabs"><button class="tab active" data-tab="zoho2">Zoho Sync</button><button class="tab" data-tab="import2">Import CSV</button><button class="tab" data-tab="ai2">AI Analysis</button><button class="tab" data-tab="users2">Users</button><button class="tab" data-tab="system2">System Health</button></div>';
+    html += '<div id="adminPanel" class="admin-panel hidden"><h2>Admin Settings</h2><div class="tabs"><button class="tab active" data-tab="zoho2">Zoho Sync</button><button class="tab" data-tab="import2">Import CSV</button><button class="tab" data-tab="sales2">Import Sales</button><button class="tab" data-tab="ai2">AI Analysis</button><button class="tab" data-tab="users2">Users</button><button class="tab" data-tab="system2">System Health</button></div>';
     html += '<div id="zoho2Tab" class="tab-content active"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="zohoStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Workspace ID: </span><span class="status-value" id="zohoWorkspaceId">-</span></div><div class="status-item"><span class="status-label">View ID: </span><span class="status-value" id="zohoViewId">-</span></div></div><div style="display:flex;gap:1rem"><button class="btn btn-secondary" id="testZohoBtn">Test Connection</button><button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div><div id="zohoMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="import2Tab" class="tab-content"><div class="upload-area"><input type="file" id="csvFile" accept=".csv"><label for="csvFile">Click to upload CSV file</label></div><div id="importStatus"></div><button class="btn btn-danger" id="clearBtn" style="margin-top:1rem">Clear All Products</button></div>';
+    html += '<div id="sales2Tab" class="tab-content"><p style="margin-bottom:1rem;color:#666">Import sales data (Sales Orders and Purchase Orders) from the PO-SO Query CSV export.</p><div class="upload-area"><input type="file" id="salesCsvFile" accept=".csv"><label for="salesCsvFile">Click to upload Sales CSV file</label></div><div id="salesImportStatus"></div><div id="salesDataStats" style="margin-top:1rem"></div></div>';
     html += '<div id="ai2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">API Status: </span><span class="status-value" id="aiStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Products Analyzed: </span><span class="status-value" id="aiAnalyzedCount">-</span></div><div class="status-item"><span class="status-label">Remaining: </span><span class="status-value" id="aiRemainingCount">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">AI analysis uses Claude Vision to generate searchable tags from product images. This enables searching by garment type (cardigan, hoodie), style (casual, formal), pattern (striped, floral), and more.</p><button class="btn btn-primary" id="runAiBtn">Analyze Next 100 Products</button><button class="btn btn-success" id="runAllAiBtn" style="margin-left:0.5rem">Analyze All (Background)</button><button class="btn btn-secondary" id="stopAiBtn" style="margin-left:0.5rem;display:none">Stop</button><div id="aiMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Username</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUser" placeholder="Username"><input type="password" id="newPass" placeholder="Password"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add</button></div></div>';
     html += '<div id="system2Tab" class="tab-content"><div id="systemHealthContent"><p>Loading system health data...</p></div><button class="btn btn-secondary" id="refreshSystemBtn" style="margin-top:1rem">🔄 Refresh</button></div></div>';
@@ -1724,7 +1903,7 @@ function getHTML() {
     html += 'document.getElementById("helpClose").addEventListener("click",function(){document.getElementById("helpModal").classList.remove("active")});';
     html += 'document.getElementById("helpModal").addEventListener("click",function(e){if(e.target.id==="helpModal")document.getElementById("helpModal").classList.remove("active")});';
     html += 'document.getElementById("historyBtn").addEventListener("click",function(){document.getElementById("historyPanel").classList.toggle("hidden");document.getElementById("adminPanel").classList.add("hidden")});';
-    html += 'document.getElementById("adminBtn").addEventListener("click",function(){document.getElementById("adminPanel").classList.toggle("hidden");document.getElementById("historyPanel").classList.add("hidden");if(!document.getElementById("adminPanel").classList.contains("hidden")){loadSystemHealth()}});';
+    html += 'document.getElementById("adminBtn").addEventListener("click",function(){document.getElementById("adminPanel").classList.toggle("hidden");document.getElementById("historyPanel").classList.add("hidden");if(!document.getElementById("adminPanel").classList.contains("hidden")){loadSystemHealth();loadSalesStats()}});';
     
     // Chat functionality
     html += 'var chatOpen=false;';
@@ -1834,6 +2013,11 @@ function getHTML() {
     html += 'document.getElementById("pdfLink").addEventListener("click",function(){if(currentShareId){fetch("/api/selections/"+currentShareId+"/record-pdf",{method:"POST"}).then(function(){loadShares()})}});';
     
     html += 'document.getElementById("csvFile").addEventListener("change",function(e){var f=e.target.files[0];if(!f)return;var fd=new FormData();fd.append("file",f);document.getElementById("importStatus").innerHTML="Importing...";fetch("/api/import",{method:"POST",body:fd}).then(function(r){return r.json()}).then(function(d){document.getElementById("importStatus").innerHTML=d.success?"<span class=success>Imported "+d.imported+" products"+(d.newArrivals?" ("+d.newArrivals+" new)":"")+"</span>":"<span class=error>"+d.error+"</span>";loadProducts();loadHistory();loadDataFreshness()})});';
+    
+    // Sales CSV import handler
+    html += 'document.getElementById("salesCsvFile").addEventListener("change",function(e){var f=e.target.files[0];if(!f)return;var fd=new FormData();fd.append("file",f);document.getElementById("salesImportStatus").innerHTML="<span style=\\"color:#666\\">Importing sales data... This may take a moment for large files.</span>";fetch("/api/import-sales",{method:"POST",body:fd}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("salesImportStatus").innerHTML="<span class=\\"success\\">✓ Imported "+d.imported.toLocaleString()+" sales records"+(d.errors?" ("+d.errors+" errors)":"")+"</span>";loadSalesStats()}else{document.getElementById("salesImportStatus").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}}).catch(function(e){document.getElementById("salesImportStatus").innerHTML="<span class=\\"error\\">Error: "+e.message+"</span>"})});';
+    html += 'function loadSalesStats(){fetch("/api/sales-stats").then(function(r){return r.json()}).then(function(d){if(d.success){var h="<div class=\\"status-box\\"><div class=\\"status-item\\"><span class=\\"status-label\\">Total Records: </span><span class=\\"status-value\\">"+d.totalRecords.toLocaleString()+"</span></div><div class=\\"status-item\\"><span class=\\"status-label\\">Sales Orders: </span><span class=\\"status-value\\">"+d.salesOrders.toLocaleString()+"</span></div><div class=\\"status-item\\"><span class=\\"status-label\\">Purchase Orders: </span><span class=\\"status-value\\">"+d.purchaseOrders.toLocaleString()+"</span></div><div class=\\"status-item\\"><span class=\\"status-label\\">Unique Styles: </span><span class=\\"status-value\\">"+d.uniqueStyles.toLocaleString()+"</span></div></div>";document.getElementById("salesDataStats").innerHTML=h}}).catch(function(){})}';
+    
     html += 'document.getElementById("clearBtn").addEventListener("click",function(){if(!confirm("Delete all products?"))return;fetch("/api/products/clear",{method:"POST"}).then(function(){loadProducts()})});';
     
     html += 'function loadUsers(){fetch("/api/users").then(function(r){return r.json()}).then(function(u){var h="";u.forEach(function(x){h+="<tr><td>"+x.username+"</td><td>"+x.role+"</td><td><button class=\\"btn btn-danger\\" onclick=\\"deleteUser("+x.id+")\\">Delete</button></td></tr>"});document.getElementById("usersTable").innerHTML=h})}';

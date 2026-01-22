@@ -520,60 +520,79 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
         );
         
         var history = [];
-        var summary = {
-            totalInvoiced: 0,
-            totalInvoiceAmount: 0,
-            invoiceCount: 0,
-            openSOQuantity: 0,
-            openSOAmount: 0,
-            openSOCount: 0,
-            openPOQuantity: 0,
-            openPOAmount: 0,
-            openPOCount: 0
-        };
+        var totalInvoiced = 0;
+        var totalInvoiceAmount = 0;
+        var invoiceCount = 0;
+        var totalOpenOrders = 0;
+        var totalOpenOrdersAmount = 0;
+        var openOrderCount = 0;
+        var totalPO = 0;
+        var totalPOAmount = 0;
+        var poCount = 0;
         
         for (var i = 0; i < salesResult.rows.length; i++) {
             var row = salesResult.rows[i];
             var qty = parseFloat(row.total_qty) || 0;
             var amt = parseFloat(row.total_amount) || 0;
-            var docType = row.document_type;
+            var docType = (row.document_type || '').toLowerCase();
             var status = (row.status || '').toLowerCase();
             
+            // Determine type for history display
+            var historyType = 'salesorder';
+            if (docType.indexOf('purchase') !== -1) {
+                historyType = 'purchaseorder';
+            } else if (docType.indexOf('invoice') !== -1) {
+                historyType = 'invoice';
+            }
+            
             history.push({
-                type: docType === 'Purchase Order' ? 'purchaseorder' : 'salesorder',
+                type: historyType,
                 documentNumber: row.document_number,
                 date: row.doc_date,
                 customerName: row.customer_vendor,
                 status: row.status,
                 quantity: qty,
-                amount: amt
+                amount: amt,
+                isOpen: status !== 'invoiced' && status !== 'closed' && status !== 'fulfilled' && status !== 'paid'
             });
             
-            if (docType === 'Sales Order') {
-                // Check if it's invoiced or still open
+            // Categorize for summary
+            if (docType.indexOf('purchase') !== -1) {
+                // Purchase Orders
+                totalPO += qty;
+                totalPOAmount += amt;
+                poCount++;
+            } else if (docType.indexOf('sales') !== -1) {
+                // Sales Orders - check if invoiced/closed or still open
                 if (status === 'invoiced' || status === 'closed' || status === 'fulfilled') {
-                    summary.totalInvoiced += qty;
-                    summary.totalInvoiceAmount += amt;
-                    summary.invoiceCount++;
+                    totalInvoiced += qty;
+                    totalInvoiceAmount += amt;
+                    invoiceCount++;
                 } else {
                     // Open sales order (confirmed, open, pending, etc.)
-                    summary.openSOQuantity += qty;
-                    summary.openSOAmount += amt;
-                    summary.openSOCount++;
+                    totalOpenOrders += qty;
+                    totalOpenOrdersAmount += amt;
+                    openOrderCount++;
                 }
-            } else if (docType === 'Purchase Order') {
-                // All POs count as import POs
-                summary.openPOQuantity += qty;
-                summary.openPOAmount += amt;
-                summary.openPOCount++;
             }
         }
         
+        // Return with field names matching what frontend expects
         res.json({
             success: true,
             styleId: styleId,
-            summary: summary,
-            history: history.slice(0, 50), // Limit to 50 most recent
+            summary: {
+                totalInvoiced: totalInvoiced,
+                totalInvoicedDollars: totalInvoiceAmount,
+                invoiceCount: invoiceCount,
+                totalOpenOrders: totalOpenOrders,
+                totalOpenOrdersDollars: totalOpenOrdersAmount,
+                openOrderCount: openOrderCount,
+                totalPO: totalPO,
+                totalPODollars: totalPOAmount,
+                poCount: poCount
+            },
+            history: history.slice(0, 50),
             recordCount: salesResult.rows.length
         });
         

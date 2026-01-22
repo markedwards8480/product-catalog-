@@ -602,6 +602,103 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
     }
 });
 
+// Sales Search API - Search orders by customer, style, or type
+app.get('/api/sales-search', requireAuth, async function(req, res) {
+    try {
+        var customer = req.query.customer;
+        var style = req.query.style;
+        var type = req.query.type; // 'po', 'salesorder', 'invoice', or 'all'
+        var limit = parseInt(req.query.limit) || 100;
+        
+        var conditions = [];
+        var params = [];
+        var paramIndex = 1;
+        
+        if (customer) {
+            conditions.push('LOWER(customer_vendor) LIKE LOWER($' + paramIndex + ')');
+            params.push('%' + customer + '%');
+            paramIndex++;
+        }
+        
+        if (style) {
+            conditions.push('(LOWER(base_style) LIKE LOWER($' + paramIndex + ') OR LOWER(line_item_sku) LIKE LOWER($' + paramIndex + '))');
+            params.push('%' + style + '%');
+            paramIndex++;
+        }
+        
+        if (type === 'po') {
+            conditions.push("LOWER(document_type) LIKE '%purchase%'");
+        } else if (type === 'salesorder') {
+            conditions.push("LOWER(document_type) LIKE '%sales%'");
+        } else if (type === 'invoice') {
+            conditions.push("LOWER(document_type) LIKE '%invoice%'");
+        }
+        
+        var whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+        
+        var query = `
+            SELECT 
+                document_type, 
+                document_number, 
+                doc_date, 
+                customer_vendor, 
+                base_style,
+                status, 
+                SUM(quantity) as total_qty, 
+                SUM(amount) as total_amount
+            FROM sales_data 
+            ${whereClause}
+            GROUP BY document_type, document_number, doc_date, customer_vendor, base_style, status
+            ORDER BY doc_date DESC
+            LIMIT $${paramIndex}
+        `;
+        params.push(limit);
+        
+        var result = await pool.query(query, params);
+        
+        // Also get summary stats
+        var summaryQuery = `
+            SELECT 
+                COUNT(DISTINCT document_number) as doc_count,
+                COUNT(DISTINCT customer_vendor) as customer_count,
+                COUNT(DISTINCT base_style) as style_count,
+                COALESCE(SUM(quantity), 0) as total_qty,
+                COALESCE(SUM(amount), 0) as total_amount
+            FROM sales_data
+            ${whereClause}
+        `;
+        var summaryResult = await pool.query(summaryQuery, params.slice(0, -1)); // Remove limit param
+        
+        res.json({
+            success: true,
+            results: result.rows.map(function(row) {
+                return {
+                    documentType: row.document_type,
+                    documentNumber: row.document_number,
+                    date: row.doc_date,
+                    customer: row.customer_vendor,
+                    style: row.base_style,
+                    status: row.status,
+                    quantity: parseFloat(row.total_qty) || 0,
+                    amount: parseFloat(row.total_amount) || 0
+                };
+            }),
+            summary: {
+                documentCount: parseInt(summaryResult.rows[0].doc_count) || 0,
+                customerCount: parseInt(summaryResult.rows[0].customer_count) || 0,
+                styleCount: parseInt(summaryResult.rows[0].style_count) || 0,
+                totalQty: parseFloat(summaryResult.rows[0].total_qty) || 0,
+                totalAmount: parseFloat(summaryResult.rows[0].total_amount) || 0
+            },
+            filters: { customer: customer, style: style, type: type }
+        });
+        
+    } catch (err) {
+        console.error('Sales search error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 /* DISABLED - API calls commented out, will be replaced with CSV import
 
         var results = [];
@@ -1631,9 +1728,29 @@ app.post('/api/chat', requireAuth, async function(req, res) {
         `);
         var stats = statsResult.rows[0];
         
-        var systemPrompt = `You are a helpful assistant for the Mark Edwards Apparel Product Catalog. You help sales reps find products and answer inventory questions.
+        // Get sales data context - top customers and document types
+        var customersResult = await pool.query(`
+            SELECT DISTINCT customer_vendor, COUNT(*) as order_count, SUM(quantity) as total_qty
+            FROM sales_data 
+            WHERE customer_vendor IS NOT NULL AND customer_vendor != ''
+            GROUP BY customer_vendor 
+            ORDER BY total_qty DESC 
+            LIMIT 50
+        `);
+        var topCustomers = customersResult.rows.map(function(r) { return r.customer_vendor; });
+        
+        var salesStatsResult = await pool.query(`
+            SELECT 
+                COUNT(DISTINCT document_number) as total_documents,
+                COUNT(DISTINCT customer_vendor) as total_customers,
+                COUNT(DISTINCT base_style) as styles_with_sales
+            FROM sales_data
+        `);
+        var salesStats = salesStatsResult.rows[0];
+        
+        var systemPrompt = `You are a helpful assistant for the Mark Edwards Apparel Product Catalog. You help sales reps find products, answer inventory questions, AND search sales/order history.
 
-AVAILABLE DATA:
+AVAILABLE PRODUCT DATA:
 - Categories: ${categories.join(', ')}
 - Colors available: ${colors.slice(0, 30).join(', ')}${colors.length > 30 ? '... and more' : ''}
 - Total styles: ${stats.total_styles}
@@ -1641,10 +1758,16 @@ AVAILABLE DATA:
 - Total Available Now: ${parseInt(stats.total_available_now).toLocaleString()} units
 - Total Left to Sell: ${parseInt(stats.total_left_to_sell).toLocaleString()} units
 
+AVAILABLE SALES/ORDER DATA:
+- Total documents (orders/invoices/POs): ${salesStats.total_documents}
+- Total customers/vendors: ${salesStats.total_customers}
+- Styles with sales history: ${salesStats.styles_with_sales}
+- Top customers include: ${topCustomers.slice(0, 20).join(', ')}${topCustomers.length > 20 ? '... and more' : ''}
+
 ACTIONS YOU CAN TRIGGER:
 You can respond with JSON actions that the app will execute. Include an "actions" array in your response.
 
-Available actions:
+Product filter actions:
 1. {"action": "search", "value": "search terms"} - Search for products
 2. {"action": "setCategory", "value": "category name"} - Filter by category (use exact category name from list above, or "all")
 3. {"action": "setColor", "value": "color name"} - Filter by color
@@ -1655,6 +1778,12 @@ Available actions:
 8. {"action": "setSort", "value": "qty-high" | "qty-low" | "name-asc" | "name-desc" | "newest"} - Sort products
 9. {"action": "showNewArrivals"} - Show new arrivals filter
 10. {"action": "showPicks"} - Show user's picks
+
+Sales/Order search actions:
+11. {"action": "searchByCustomer", "value": "customer name"} - Search orders by customer/vendor name (partial match works)
+12. {"action": "searchByStyle", "value": "style id"} - Search orders by style/SKU
+13. {"action": "searchPOs"} - Show all purchase orders
+14. {"action": "searchSalesOrders"} - Show all sales orders
 
 RESPONSE FORMAT:
 Always respond with valid JSON in this format:
@@ -1672,11 +1801,20 @@ Response: {"message": "Let me search for navy sweaters for you!", "actions": [{"
 User: "Show me joggers with more than 1000 units"
 Response: {"message": "Here are joggers with over 1,000 units available:", "actions": [{"action": "setCategory", "value": "Jogger"}, {"action": "setMinQty", "value": 1000}]}
 
-User: "Joggers with more than 2 color options"
-Response: {"message": "Here are joggers available in 3 or more colors:", "actions": [{"action": "setCategory", "value": "Jogger"}, {"action": "setMinColors", "value": 3}]}
-
 User: "What categories do we have?"
 Response: {"message": "We have these categories: ${categories.join(', ')}. Which would you like to explore?", "actions": []}
+
+User: "Show me styles that Amazon bought" or "What did Amazon order?"
+Response: {"message": "Here are all orders from Amazon:", "actions": [{"action": "searchByCustomer", "value": "Amazon"}]}
+
+User: "What stores bought style 71169?"
+Response: {"message": "Let me find all orders for style 71169:", "actions": [{"action": "searchByStyle", "value": "71169"}]}
+
+User: "Show me all purchase orders" or "What POs do we have?"
+Response: {"message": "Here are all purchase orders:", "actions": [{"action": "searchPOs"}]}
+
+User: "What customers have we sold to?"
+Response: {"message": "Here are our top customers: ${topCustomers.slice(0, 10).join(', ')}. Want me to search orders for a specific customer?", "actions": []}
 
 User: "Clear everything and start fresh"
 Response: {"message": "All filters cleared! Showing all products.", "actions": [{"action": "clearFilters"}]}`;
@@ -1863,7 +2001,7 @@ function getHTML() {
     
     // Chat UI
     html += '<div class="chat-bubble" id="chatBubble" title="Ask me anything about inventory"><svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg></div>';
-    html += '<div class="chat-panel" id="chatPanel"><div class="chat-header"><h3>💬 Product Assistant</h3><button class="chat-close" id="chatClose">&times;</button></div><div class="chat-messages" id="chatMessages"><div class="chat-message assistant">Hi! I can help you find products. Try asking me things like:<br><br>• "Show me navy sweaters"<br>• "Joggers with more than 1,000 units"<br>• "What categories do we have?"<br>• "Show new arrivals"</div></div><div class="chat-input-area"><textarea class="chat-input" id="chatInput" placeholder="Ask about products..." rows="1"></textarea><button class="chat-send" id="chatSend">Send</button></div></div>';
+    html += '<div class="chat-panel" id="chatPanel"><div class="chat-header"><h3>💬 Product Assistant</h3><button class="chat-close" id="chatClose">&times;</button></div><div class="chat-messages" id="chatMessages"><div class="chat-message assistant">Hi! I can help you find products and search orders. Try asking me:<br><br><strong>Products:</strong><br>• "Show me navy sweaters"<br>• "Joggers with more than 1,000 units"<br><br><strong>Orders & Sales:</strong><br>• "What did Amazon order?"<br>• "Show me all POs"<br>• "What stores bought style 71169?"</div></div><div class="chat-input-area"><textarea class="chat-input" id="chatInput" placeholder="Ask about products or orders..." rows="1"></textarea><button class="chat-send" id="chatSend">Send</button></div></div>';
     
     // Share modal
     html += '<div class="share-modal" id="shareModal"><div class="share-modal-content"><h3>Share Selection</h3><div id="shareForm"><input type="text" id="selectionName" placeholder="Name this selection (e.g. Spring Collection for Acme Co)"><div class="share-modal-actions"><button class="btn btn-secondary" id="cancelShareBtn">Cancel</button><button class="btn btn-primary" id="createShareBtn">Create Link</button></div></div><div class="share-result hidden" id="shareResult"><p style="margin-bottom:1rem;color:#666" id="shareNameDisplay"></p><div class="share-buttons"><button class="share-action-btn" id="emailLinkBtn">📧 Email Link</button><button class="share-action-btn" id="textLinkBtn">💬 Text Link</button><button class="share-action-btn" id="copyLinkBtn">🔗 Copy Link</button><a class="share-action-btn" id="pdfLink" href="" target="_blank">📄 Download PDF</a></div><div style="margin-top:1.5rem;text-align:center"><button class="btn btn-secondary" id="closeShareModalBtn">Done</button></div></div></div></div>';
@@ -1938,7 +2076,13 @@ function getHTML() {
     
     html += 'function hideTyping(){var el=document.getElementById("typingIndicator");if(el)el.remove()}';
     
-    html += 'function executeChatActions(actions){if(!actions||!actions.length)return;actions.forEach(function(a){switch(a.action){case"search":document.getElementById("searchInput").value=a.value||"";break;case"setCategory":currentFilter=a.value==="all"?"all":a.value;document.querySelectorAll(".filter-btn[data-cat]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-cat")===currentFilter)});break;case"setColor":colorFilter=a.value||null;var btn=document.getElementById("colorFilterBtn");btn.textContent=colorFilter?"Color: "+colorFilter+" ▼":"Color: All ▼";document.getElementById("clearColorBtn").classList.toggle("hidden",!colorFilter);break;case"setMinQty":document.getElementById("minQty").value=a.value||"";break;case"setMaxQty":document.getElementById("maxQty").value=a.value||"";break;case"setMinColors":minColorsFilter=a.value||0;break;case"clearFilters":document.getElementById("searchInput").value="";document.getElementById("minQty").value="";document.getElementById("maxQty").value="";currentFilter="all";colorFilter=null;specialFilter=null;minColorsFilter=0;document.querySelectorAll(".filter-btn").forEach(function(b){b.classList.remove("active")});document.querySelector(".filter-btn[data-cat=\\"all\\"]").classList.add("active");document.getElementById("colorFilterBtn").textContent="Color: All ▼";document.getElementById("clearColorBtn").classList.add("hidden");break;case"setSort":currentSort=a.value||"name-asc";document.getElementById("sortSelect").value=currentSort;break;case"showNewArrivals":specialFilter="new";document.querySelectorAll(".filter-btn[data-special]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-special")==="new")});break;case"showPicks":specialFilter="picks";document.querySelectorAll(".filter-btn[data-special]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-special")==="picks")});break}});renderProducts()}';
+    html += 'function executeChatActions(actions){if(!actions||!actions.length)return;actions.forEach(function(a){switch(a.action){case"search":document.getElementById("searchInput").value=a.value||"";break;case"setCategory":currentFilter=a.value==="all"?"all":a.value;document.querySelectorAll(".filter-btn[data-cat]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-cat")===currentFilter)});break;case"setColor":colorFilter=a.value||null;var btn=document.getElementById("colorFilterBtn");btn.textContent=colorFilter?"Color: "+colorFilter+" ▼":"Color: All ▼";document.getElementById("clearColorBtn").classList.toggle("hidden",!colorFilter);break;case"setMinQty":document.getElementById("minQty").value=a.value||"";break;case"setMaxQty":document.getElementById("maxQty").value=a.value||"";break;case"setMinColors":minColorsFilter=a.value||0;break;case"clearFilters":document.getElementById("searchInput").value="";document.getElementById("minQty").value="";document.getElementById("maxQty").value="";currentFilter="all";colorFilter=null;specialFilter=null;minColorsFilter=0;document.querySelectorAll(".filter-btn").forEach(function(b){b.classList.remove("active")});document.querySelector(".filter-btn[data-cat=\\"all\\"]").classList.add("active");document.getElementById("colorFilterBtn").textContent="Color: All ▼";document.getElementById("clearColorBtn").classList.add("hidden");break;case"setSort":currentSort=a.value||"name-asc";document.getElementById("sortSelect").value=currentSort;break;case"showNewArrivals":specialFilter="new";document.querySelectorAll(".filter-btn[data-special]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-special")==="new")});break;case"showPicks":specialFilter="picks";document.querySelectorAll(".filter-btn[data-special]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-special")==="picks")});break;case"searchByCustomer":fetchSalesResults({customer:a.value});break;case"searchByStyle":fetchSalesResults({style:a.value});break;case"searchPOs":fetchSalesResults({type:"po"});break;case"searchSalesOrders":fetchSalesResults({type:"salesorder"});break}});renderProducts()}';
+    
+    // Sales search function
+    html += 'async function fetchSalesResults(params){var url="/api/sales-search?";if(params.customer)url+="customer="+encodeURIComponent(params.customer)+"&";if(params.style)url+="style="+encodeURIComponent(params.style)+"&";if(params.type)url+="type="+encodeURIComponent(params.type)+"&";try{var resp=await fetch(url);var data=await resp.json();if(data.success){showSalesResultsInChat(data.results,data.summary,params)}else{addChatMessage("Sorry, I could not find any matching orders.","assistant")}}catch(err){addChatMessage("Error searching orders: "+err.message,"assistant")}}';
+    
+    // Display sales results in chat
+    html += 'function showSalesResultsInChat(results,summary,params){var filterDesc="";if(params.customer)filterDesc="for customer \\""+params.customer+"\\"";if(params.style)filterDesc=(filterDesc?filterDesc+" and ":"")+"style \\""+params.style+"\\"";if(params.type==="po")filterDesc=(filterDesc?filterDesc+" ":"")+"(Purchase Orders)";if(params.type==="salesorder")filterDesc=(filterDesc?filterDesc+" ":"")+"(Sales Orders)";var h="<div style=\\"font-size:0.85rem\\"><strong>Found "+summary.documentCount+" orders "+filterDesc+"</strong><br>";h+="<span style=\\"color:#666\\">Total: "+summary.totalQty.toLocaleString()+" units, $"+summary.totalAmount.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})+"</span>";if(results.length>0){h+="<table style=\\"width:100%;font-size:0.75rem;margin-top:0.5rem;border-collapse:collapse\\"><tr style=\\"background:#f0f0f0\\"><th style=\\"text-align:left;padding:4px\\">Date</th><th style=\\"text-align:left;padding:4px\\">Customer</th><th style=\\"text-align:left;padding:4px\\">Doc#</th><th style=\\"text-align:right;padding:4px\\">Qty</th></tr>";results.slice(0,15).forEach(function(r){var dt=new Date(r.date).toLocaleDateString();var typeColor=r.documentType.toLowerCase().indexOf("purchase")!==-1?"#1565c0":r.documentType.toLowerCase().indexOf("invoice")!==-1?"#2e7d32":"#ef6c00";h+="<tr style=\\"border-bottom:1px solid #eee\\"><td style=\\"padding:4px\\">"+dt+"</td><td style=\\"padding:4px\\">"+r.customer+"</td><td style=\\"padding:4px;color:"+typeColor+"\\">"+r.documentNumber+"</td><td style=\\"padding:4px;text-align:right\\">"+r.quantity.toLocaleString()+"</td></tr>"});if(results.length>15)h+="<tr><td colspan=\\"4\\" style=\\"padding:4px;color:#999;text-align:center\\">+"+(results.length-15)+" more...</td></tr>";h+="</table>"}h+="</div>";addChatMessage(h,"assistant")}';
     
     html += 'async function sendChatMessage(){var input=document.getElementById("chatInput");var msg=input.value.trim();if(!msg)return;addChatMessage(msg,"user");input.value="";input.style.height="auto";document.getElementById("chatSend").disabled=true;showTyping();try{var resp=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:msg})});var data=await resp.json();hideTyping();if(data.success){addChatMessage(data.message,"assistant");if(data.actions&&data.actions.length>0){executeChatActions(data.actions)}}else{addChatMessage("Sorry, I encountered an error. Please try again.","assistant")}}catch(err){hideTyping();addChatMessage("Sorry, something went wrong. Please try again.","assistant")}document.getElementById("chatSend").disabled=false}';
     

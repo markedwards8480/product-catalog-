@@ -371,49 +371,74 @@ app.get('/api/debug/po-test/:styleId', requireAuth, async function(req, res) {
             debugResults.errors.push({ test: 'List any POs', error: err.message });
         }
         
-        // Test 2: Search for the specific style
+        // Test 2: Search using search_text (should search custom fields too)
         var baseStyle = styleId.split('-')[0];
         try {
-            var searchUrl = 'https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&item_name_contains=' + encodeURIComponent(baseStyle);
-            console.log('Searching POs for style:', searchUrl);
+            var searchUrl = 'https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&search_text=' + encodeURIComponent(baseStyle);
+            console.log('Searching POs with search_text:', searchUrl);
             var searchResponse = await fetch(searchUrl, {
                 headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
             });
             var searchData = await searchResponse.json();
             debugResults.searches.push({
-                test: 'Search by item_name_contains: ' + baseStyle,
+                test: 'Search by search_text: ' + baseStyle,
                 url: searchUrl,
                 status: searchResponse.status,
                 poCount: searchData.purchaseorders ? searchData.purchaseorders.length : 0,
                 message: searchData.message || null,
-                pos: searchData.purchaseorders ? searchData.purchaseorders.map(function(po) {
-                    return { number: po.purchaseorder_number, vendor: po.vendor_name, status: po.status };
+                pos: searchData.purchaseorders ? searchData.purchaseorders.slice(0, 10).map(function(po) {
+                    return { 
+                        number: po.purchaseorder_number, 
+                        vendor: po.vendor_name, 
+                        status: po.status,
+                        date: po.date,
+                        total: po.total
+                    };
                 }) : []
+            });
+            
+            // If we found POs, get detail on the first one to see custom fields
+            if (searchData.purchaseorders && searchData.purchaseorders.length > 0) {
+                var firstPO = searchData.purchaseorders[0];
+                var detailUrl = 'https://www.zohoapis.com/books/v3/purchaseorders/' + firstPO.purchaseorder_id + '?organization_id=' + orgId;
+                var detailResponse = await fetch(detailUrl, {
+                    headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
+                });
+                var detailData = await detailResponse.json();
+                if (detailData.purchaseorder) {
+                    debugResults.samplePODetail = {
+                        number: detailData.purchaseorder.purchaseorder_number,
+                        custom_fields: detailData.purchaseorder.custom_fields,
+                        line_items_count: detailData.purchaseorder.line_items ? detailData.purchaseorder.line_items.length : 0,
+                        first_line_item: detailData.purchaseorder.line_items && detailData.purchaseorder.line_items[0] ? {
+                            name: detailData.purchaseorder.line_items[0].name,
+                            sku: detailData.purchaseorder.line_items[0].sku,
+                            quantity: detailData.purchaseorder.line_items[0].quantity
+                        } : null
+                    };
+                }
+            }
+        } catch (err) {
+            debugResults.errors.push({ test: 'Search by search_text', error: err.message });
+        }
+        
+        // Test 3: Search item_name_contains (for comparison)
+        try {
+            var itemUrl = 'https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&item_name_contains=' + encodeURIComponent(baseStyle);
+            console.log('Searching POs with item_name_contains:', itemUrl);
+            var itemResponse = await fetch(itemUrl, {
+                headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
+            });
+            var itemData = await itemResponse.json();
+            debugResults.searches.push({
+                test: 'Search by item_name_contains: ' + baseStyle,
+                url: itemUrl,
+                status: itemResponse.status,
+                poCount: itemData.purchaseorders ? itemData.purchaseorders.length : 0,
+                message: itemData.message || null
             });
         } catch (err) {
             debugResults.errors.push({ test: 'Search by item_name_contains', error: err.message });
-        }
-        
-        // Test 3: Search with search_text
-        try {
-            var textUrl = 'https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&search_text=' + encodeURIComponent(baseStyle);
-            console.log('Searching POs with search_text:', textUrl);
-            var textResponse = await fetch(textUrl, {
-                headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
-            });
-            var textData = await textResponse.json();
-            debugResults.searches.push({
-                test: 'Search by search_text: ' + baseStyle,
-                url: textUrl,
-                status: textResponse.status,
-                poCount: textData.purchaseorders ? textData.purchaseorders.length : 0,
-                message: textData.message || null,
-                pos: textData.purchaseorders ? textData.purchaseorders.map(function(po) {
-                    return { number: po.purchaseorder_number, vendor: po.vendor_name, status: po.status };
-                }) : []
-            });
-        } catch (err) {
-            debugResults.errors.push({ test: 'Search by search_text', error: err.message });
         }
         
         res.json({ success: true, debug: debugResults });

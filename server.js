@@ -1324,6 +1324,125 @@ app.post('/api/selections/:shareId/record-pdf', requireAuth, async function(req,
 app.get('/', function(req, res) { res.send(getHTML()); });
 app.get('*', function(req, res) { res.send(getHTML()); });
 
+// Chat API endpoint - AI-powered product assistant
+app.post('/api/chat', requireAuth, async function(req, res) {
+    try {
+        var userMessage = req.body.message;
+        var context = req.body.context || {};
+        
+        if (!process.env.ANTHROPIC_API_KEY) {
+            return res.json({ success: false, error: 'AI not configured' });
+        }
+        
+        // Get inventory summary for context
+        var categoriesResult = await pool.query('SELECT DISTINCT category FROM products ORDER BY category');
+        var categories = categoriesResult.rows.map(function(r) { return r.category; });
+        
+        var colorsResult = await pool.query('SELECT DISTINCT color_name FROM product_colors ORDER BY color_name');
+        var colors = colorsResult.rows.map(function(r) { return r.color_name; });
+        
+        var statsResult = await pool.query(`
+            SELECT 
+                COUNT(DISTINCT p.id) as total_styles,
+                COUNT(DISTINCT p.base_style) as total_groups,
+                COALESCE(SUM(pc.available_now), 0) as total_available_now,
+                COALESCE(SUM(pc.left_to_sell), 0) as total_left_to_sell
+            FROM products p
+            LEFT JOIN product_colors pc ON p.id = pc.product_id
+        `);
+        var stats = statsResult.rows[0];
+        
+        var systemPrompt = `You are a helpful assistant for the Mark Edwards Apparel Product Catalog. You help sales reps find products and answer inventory questions.
+
+AVAILABLE DATA:
+- Categories: ${categories.join(', ')}
+- Colors available: ${colors.slice(0, 30).join(', ')}${colors.length > 30 ? '... and more' : ''}
+- Total styles: ${stats.total_styles}
+- Total groups (base styles): ${stats.total_groups}
+- Total Available Now: ${parseInt(stats.total_available_now).toLocaleString()} units
+- Total Left to Sell: ${parseInt(stats.total_left_to_sell).toLocaleString()} units
+
+ACTIONS YOU CAN TRIGGER:
+You can respond with JSON actions that the app will execute. Include an "actions" array in your response.
+
+Available actions:
+1. {"action": "search", "value": "search terms"} - Search for products
+2. {"action": "setCategory", "value": "category name"} - Filter by category (use exact category name from list above, or "all")
+3. {"action": "setColor", "value": "color name"} - Filter by color
+4. {"action": "setMinQty", "value": number} - Set minimum quantity filter
+5. {"action": "setMaxQty", "value": number} - Set maximum quantity filter
+6. {"action": "clearFilters"} - Clear all filters
+7. {"action": "setSort", "value": "qty-high" | "qty-low" | "name-asc" | "name-desc" | "newest"} - Sort products
+8. {"action": "showNewArrivals"} - Show new arrivals filter
+9. {"action": "showPicks"} - Show user's picks
+
+RESPONSE FORMAT:
+Always respond with valid JSON in this format:
+{
+  "message": "Your friendly response to the user",
+  "actions": [{"action": "...", "value": "..."}]
+}
+
+Keep messages concise and helpful. If you're applying filters, briefly confirm what you're showing.
+
+EXAMPLES:
+User: "Do we have any navy sweaters?"
+Response: {"message": "Let me search for navy sweaters for you!", "actions": [{"action": "setCategory", "value": "Sweater"}, {"action": "search", "value": "navy"}]}
+
+User: "Show me joggers with more than 1000 units"
+Response: {"message": "Here are joggers with over 1,000 units available:", "actions": [{"action": "setCategory", "value": "Jogger"}, {"action": "setMinQty", "value": 1000}]}
+
+User: "What categories do we have?"
+Response: {"message": "We have these categories: ${categories.join(', ')}. Which would you like to explore?", "actions": []}
+
+User: "Clear everything and start fresh"
+Response: {"message": "All filters cleared! Showing all products.", "actions": [{"action": "clearFilters"}]}`;
+
+        var response = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': process.env.ANTHROPIC_API_KEY,
+                'anthropic-version': '2023-06-01'
+            },
+            body: JSON.stringify({
+                model: 'claude-sonnet-4-20250514',
+                max_tokens: 500,
+                system: systemPrompt,
+                messages: [{ role: 'user', content: userMessage }]
+            })
+        });
+        
+        var data = await response.json();
+        
+        if (data.content && data.content[0] && data.content[0].text) {
+            var aiResponse = data.content[0].text;
+            
+            // Try to parse as JSON
+            try {
+                var parsed = JSON.parse(aiResponse);
+                return res.json({ 
+                    success: true, 
+                    message: parsed.message || aiResponse,
+                    actions: parsed.actions || []
+                });
+            } catch (e) {
+                // If not valid JSON, return as plain message
+                return res.json({ 
+                    success: true, 
+                    message: aiResponse,
+                    actions: []
+                });
+            }
+        } else {
+            return res.json({ success: false, error: 'No response from AI' });
+        }
+    } catch (err) {
+        console.error('Chat error:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
 function getShareHTML(shareId) {
     return '<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Product Selection - Mark Edwards Apparel</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f5f5f5;padding:2rem}.header{text-align:center;margin-bottom:2rem}.header h1{font-size:1.5rem;color:#333}.header p{color:#666;margin-top:0.5rem}.product-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:1.5rem;max-width:1200px;margin:0 auto}.product-card{background:white;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1)}.product-image{height:200px;background:#f8f8f8;display:flex;align-items:center;justify-content:center}.product-image img{max-width:100%;max-height:100%;object-fit:contain}.product-info{padding:1rem}.product-name{font-size:1.1rem;font-weight:600;margin-bottom:0.5rem}.product-style{font-size:0.75rem;color:#666;margin-bottom:0.75rem}.color-row{display:flex;justify-content:space-between;padding:0.25rem 0;font-size:0.875rem}.total-row{margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid #eee;font-weight:bold;display:flex;justify-content:space-between}.actions{text-align:center;margin-top:2rem}.btn{padding:0.75rem 2rem;border:none;border-radius:4px;cursor:pointer;font-size:1rem;text-decoration:none;display:inline-block;margin:0.5rem}.btn-primary{background:#2c5545;color:white}.loading{text-align:center;padding:3rem;color:#666}</style></head><body><div class="header"><h1 id="selectionName">Product Selection</h1><p id="selectionInfo"></p></div><div class="product-grid" id="productGrid"><div class="loading">Loading products...</div></div><div class="actions"><a class="btn btn-primary" id="pdfBtn" href="/api/selections/' + shareId + '/pdf" target="_blank">Download / Print PDF</a></div><script>fetch("/api/selections/' + shareId + '").then(function(r){return r.json()}).then(function(d){if(d.error){document.getElementById("productGrid").innerHTML="<p>Selection not found</p>";return}document.getElementById("selectionName").textContent=d.selection.name||"Product Selection";document.getElementById("selectionInfo").textContent="Created "+new Date(d.selection.created_at).toLocaleDateString()+" • "+d.products.length+" items";var h="";for(var i=0;i<d.products.length;i++){var p=d.products[i];var cols=p.colors||[];var tot=0;for(var c=0;c<cols.length;c++)tot+=cols[c].available_qty||0;var ch="";for(var j=0;j<cols.length;j++){ch+="<div class=\\"color-row\\"><span>"+cols[j].color_name+"</span><span>"+(cols[j].available_qty||0).toLocaleString()+"</span></div>"}var imgUrl=p.image_url;if(imgUrl&&imgUrl.indexOf("download-accl.zoho.com")!==-1){var parts=imgUrl.split("/");imgUrl="/api/image/"+parts[parts.length-1]}var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";h+="<div class=\\"product-card\\"><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-name\\">"+p.name+"</div><div class=\\"product-style\\">"+p.style_id+"</div>"+ch+"<div class=\\"total-row\\"><span>Total Available</span><span>"+tot.toLocaleString()+"</span></div></div></div>"}document.getElementById("productGrid").innerHTML=h}).catch(function(e){document.getElementById("productGrid").innerHTML="<p>Error loading selection</p>"});</script></body></html>';
 }
@@ -1400,6 +1519,16 @@ function getHTML() {
     html += '.help-steps{display:flex;flex-direction:column;gap:1rem}.help-step{display:flex;align-items:flex-start;gap:1rem}.step-num{width:32px;height:32px;background:#2c5545;color:white;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:bold;flex-shrink:0}.step-content p{margin:0.25rem 0 0;color:#666;font-size:0.875rem}';
     html += '.help-section ul{margin:0.5rem 0 0 1.5rem;color:#666}.help-section ul li{margin-bottom:0.25rem}';
     html += '.faq-item{margin-bottom:1rem;padding:1rem;background:#f8f9fa;border-radius:8px}.faq-item strong{color:#333}.faq-item p{margin:0.5rem 0 0;color:#666;font-size:0.875rem}';
+    
+    // Chat UI CSS
+    html += '.chat-bubble{position:fixed;bottom:24px;right:24px;width:60px;height:60px;background:#2c5545;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,0.2);z-index:999;transition:transform 0.2s}.chat-bubble:hover{transform:scale(1.1)}.chat-bubble svg{width:28px;height:28px;fill:white}';
+    html += '.chat-panel{position:fixed;bottom:100px;right:24px;width:380px;max-width:calc(100vw - 48px);height:500px;max-height:calc(100vh - 150px);background:white;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.15);display:none;flex-direction:column;z-index:998;overflow:hidden}.chat-panel.active{display:flex}';
+    html += '.chat-header{background:#2c5545;color:white;padding:1rem;display:flex;justify-content:space-between;align-items:center}.chat-header h3{margin:0;font-size:1rem;display:flex;align-items:center;gap:0.5rem}.chat-close{background:none;border:none;color:white;font-size:1.5rem;cursor:pointer;padding:0;line-height:1}';
+    html += '.chat-messages{flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:0.75rem}';
+    html += '.chat-message{max-width:85%;padding:0.75rem 1rem;border-radius:12px;font-size:0.9rem;line-height:1.4}.chat-message.user{background:#e3f2fd;align-self:flex-end;border-bottom-right-radius:4px}.chat-message.assistant{background:#f5f5f5;align-self:flex-start;border-bottom-left-radius:4px}.chat-message.system{background:#fff3cd;align-self:center;font-size:0.8rem;color:#856404}';
+    html += '.chat-input-area{padding:1rem;border-top:1px solid #eee;display:flex;gap:0.5rem}.chat-input{flex:1;padding:0.75rem;border:1px solid #ddd;border-radius:8px;font-size:0.9rem;resize:none}.chat-input:focus{outline:none;border-color:#2c5545}.chat-send{background:#2c5545;color:white;border:none;border-radius:8px;padding:0.75rem 1rem;cursor:pointer;font-weight:500}.chat-send:hover{background:#1a3b2e}.chat-send:disabled{background:#ccc;cursor:not-allowed}';
+    html += '.chat-typing{display:flex;gap:4px;padding:0.5rem}.chat-typing span{width:8px;height:8px;background:#999;border-radius:50%;animation:typing 1.4s infinite}.chat-typing span:nth-child(2){animation-delay:0.2s}.chat-typing span:nth-child(3){animation-delay:0.4s}@keyframes typing{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-4px)}}';
+    
     html += 'kbd{background:#eee;border:1px solid #ccc;border-radius:4px;padding:0.2rem 0.5rem;font-family:monospace;font-size:0.875rem}';
     html += 'table{width:100%;border-collapse:collapse}th,td{padding:0.75rem;text-align:left;border-bottom:1px solid #eee}';
     html += '.add-form{display:flex;gap:0.5rem;margin-top:1rem;flex-wrap:wrap}.add-form input,.add-form select{padding:0.5rem;border:1px solid #ddd;border-radius:4px}';
@@ -1441,6 +1570,10 @@ function getHTML() {
     
     // Selection bar
     html += '<div class="selection-bar" id="selectionBar"><span class="selection-count"><span id="selectedCount">0</span> items selected</span><div class="selection-actions"><button class="btn btn-secondary" id="clearSelectionBtn">Clear</button><button class="btn btn-secondary" id="exitSelectionBtn">Exit Selection Mode</button><button class="btn btn-primary" id="shareSelectionBtn">Share / Download</button></div></div>';
+    
+    // Chat UI
+    html += '<div class="chat-bubble" id="chatBubble" title="Ask me anything about inventory"><svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg></div>';
+    html += '<div class="chat-panel" id="chatPanel"><div class="chat-header"><h3>💬 Product Assistant</h3><button class="chat-close" id="chatClose">&times;</button></div><div class="chat-messages" id="chatMessages"><div class="chat-message assistant">Hi! I can help you find products. Try asking me things like:<br><br>• "Show me navy sweaters"<br>• "Joggers with more than 1,000 units"<br>• "What categories do we have?"<br>• "Show new arrivals"</div></div><div class="chat-input-area"><textarea class="chat-input" id="chatInput" placeholder="Ask about products..." rows="1"></textarea><button class="chat-send" id="chatSend">Send</button></div></div>';
     
     // Share modal
     html += '<div class="share-modal" id="shareModal"><div class="share-modal-content"><h3>Share Selection</h3><div id="shareForm"><input type="text" id="selectionName" placeholder="Name this selection (e.g. Spring Collection for Acme Co)"><div class="share-modal-actions"><button class="btn btn-secondary" id="cancelShareBtn">Cancel</button><button class="btn btn-primary" id="createShareBtn">Create Link</button></div></div><div class="share-result hidden" id="shareResult"><p style="margin-bottom:1rem;color:#666" id="shareNameDisplay"></p><div class="share-buttons"><button class="share-action-btn" id="emailLinkBtn">📧 Email Link</button><button class="share-action-btn" id="textLinkBtn">💬 Text Link</button><button class="share-action-btn" id="copyLinkBtn">🔗 Copy Link</button><a class="share-action-btn" id="pdfLink" href="" target="_blank">📄 Download PDF</a></div><div style="margin-top:1.5rem;text-align:center"><button class="btn btn-secondary" id="closeShareModalBtn">Done</button></div></div></div></div>';
@@ -1500,6 +1633,24 @@ function getHTML() {
     html += 'document.getElementById("helpModal").addEventListener("click",function(e){if(e.target.id==="helpModal")document.getElementById("helpModal").classList.remove("active")});';
     html += 'document.getElementById("historyBtn").addEventListener("click",function(){document.getElementById("historyPanel").classList.toggle("hidden");document.getElementById("adminPanel").classList.add("hidden")});';
     html += 'document.getElementById("adminBtn").addEventListener("click",function(){document.getElementById("adminPanel").classList.toggle("hidden");document.getElementById("historyPanel").classList.add("hidden")});';
+    
+    // Chat functionality
+    html += 'var chatOpen=false;';
+    html += 'document.getElementById("chatBubble").addEventListener("click",function(){chatOpen=!chatOpen;document.getElementById("chatPanel").classList.toggle("active",chatOpen);if(chatOpen)document.getElementById("chatInput").focus()});';
+    html += 'document.getElementById("chatClose").addEventListener("click",function(){chatOpen=false;document.getElementById("chatPanel").classList.remove("active")});';
+    html += 'document.getElementById("chatSend").addEventListener("click",sendChatMessage);';
+    html += 'document.getElementById("chatInput").addEventListener("keypress",function(e){if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendChatMessage()}});';
+    html += 'document.getElementById("chatInput").addEventListener("input",function(){this.style.height="auto";this.style.height=Math.min(this.scrollHeight,80)+"px"});';
+    
+    html += 'function addChatMessage(text,type){var msgs=document.getElementById("chatMessages");var div=document.createElement("div");div.className="chat-message "+type;div.innerHTML=text;msgs.appendChild(div);msgs.scrollTop=msgs.scrollHeight}';
+    
+    html += 'function showTyping(){var msgs=document.getElementById("chatMessages");var div=document.createElement("div");div.className="chat-message assistant";div.id="typingIndicator";div.innerHTML="<div class=\\"chat-typing\\"><span></span><span></span><span></span></div>";msgs.appendChild(div);msgs.scrollTop=msgs.scrollHeight}';
+    
+    html += 'function hideTyping(){var el=document.getElementById("typingIndicator");if(el)el.remove()}';
+    
+    html += 'function executeChatActions(actions){if(!actions||!actions.length)return;actions.forEach(function(a){switch(a.action){case"search":document.getElementById("searchInput").value=a.value||"";break;case"setCategory":currentFilter=a.value==="all"?"all":a.value;document.querySelectorAll(".filter-btn[data-cat]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-cat")===currentFilter)});break;case"setColor":colorFilter=a.value||null;var btn=document.getElementById("colorFilterBtn");btn.textContent=colorFilter?"Color: "+colorFilter+" ▼":"Color: All ▼";document.getElementById("clearColorBtn").classList.toggle("hidden",!colorFilter);break;case"setMinQty":document.getElementById("minQty").value=a.value||"";break;case"setMaxQty":document.getElementById("maxQty").value=a.value||"";break;case"clearFilters":document.getElementById("searchInput").value="";document.getElementById("minQty").value="";document.getElementById("maxQty").value="";currentFilter="all";colorFilter=null;specialFilter=null;document.querySelectorAll(".filter-btn").forEach(function(b){b.classList.remove("active")});document.querySelector(".filter-btn[data-cat=\\"all\\"]").classList.add("active");document.getElementById("colorFilterBtn").textContent="Color: All ▼";document.getElementById("clearColorBtn").classList.add("hidden");break;case"setSort":currentSort=a.value||"name-asc";document.getElementById("sortSelect").value=currentSort;break;case"showNewArrivals":specialFilter="new";document.querySelectorAll(".filter-btn[data-special]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-special")==="new")});break;case"showPicks":specialFilter="picks";document.querySelectorAll(".filter-btn[data-special]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-special")==="picks")});break}});renderProducts()}';
+    
+    html += 'async function sendChatMessage(){var input=document.getElementById("chatInput");var msg=input.value.trim();if(!msg)return;addChatMessage(msg,"user");input.value="";input.style.height="auto";document.getElementById("chatSend").disabled=true;showTyping();try{var resp=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:msg})});var data=await resp.json();hideTyping();if(data.success){addChatMessage(data.message,"assistant");if(data.actions&&data.actions.length>0){executeChatActions(data.actions)}}else{addChatMessage("Sorry, I encountered an error. Please try again.","assistant")}}catch(err){hideTyping();addChatMessage("Sorry, something went wrong. Please try again.","assistant")}document.getElementById("chatSend").disabled=false}';
     
     html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var panel=e.target.closest(".admin-panel");panel.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});panel.querySelectorAll(".tab-content").forEach(function(c){c.classList.remove("active")});e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active")})}';
     

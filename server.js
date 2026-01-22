@@ -501,18 +501,18 @@ app.get('/api/data-freshness', requireAuth, async function(req, res) {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Sales History API - Get invoices and sales orders for a style from Zoho Books
+// Sales History API - Get invoices and sales orders for a style
+// DISABLED API CALLS - Will be replaced with CSV import
 app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
     try {
         var styleId = req.params.styleId;
         var baseStyle = styleId.split('-')[0];
-        var orgId = process.env.ZOHO_BOOKS_ORG_ID || process.env.ZOHO_ORGANIZATION_ID || '677681121';
         
-        console.log('Sales History Request - Style:', styleId, 'Base:', baseStyle);
+        console.log('Sales History Request - Style:', styleId, 'Base:', baseStyle, '(API DISABLED - awaiting CSV import)');
         
-        // Check cache first (valid for 4 hours for display)
+        // Check cache first - return cached data if available
         var cacheResult = await pool.query(
-            'SELECT * FROM sales_history_cache WHERE base_style = $1 AND updated_at > NOW() - INTERVAL \'4 hours\'',
+            'SELECT * FROM sales_history_cache WHERE base_style = $1',
             [baseStyle]
         );
         
@@ -529,16 +529,36 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
             });
         }
         
-        console.log('Sales History Cache MISS for', baseStyle, '- fetching from Zoho');
+        // API DISABLED - Return empty results instead of making API calls
+        // This will be replaced with CSV import functionality
+        console.log('Sales History - No cache, API disabled, returning empty for', baseStyle);
+        return res.json({
+            success: true,
+            styleId: styleId,
+            summary: {
+                totalInvoiced: 0,
+                totalInvoiceAmount: 0,
+                invoiceCount: 0,
+                openSOQuantity: 0,
+                openSOAmount: 0,
+                openSOCount: 0,
+                openPOQuantity: 0,
+                openPOAmount: 0,
+                openPOCount: 0
+            },
+            history: [],
+            cached: false,
+            message: 'Sales history API disabled - CSV import coming soon'
+        });
         
-        if (!zohoAccessToken) {
-            var tokenResult = await refreshZohoToken();
-            if (!tokenResult.success) {
-                console.log('Token refresh failed:', tokenResult.error);
-                return res.json({ success: false, error: 'Failed to get Zoho token: ' + tokenResult.error });
-            }
-        }
-        
+    } catch (err) {
+        console.error('Sales history error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+/* DISABLED - API calls commented out, will be replaced with CSV import
+
         var results = [];
         var seenIds = {};
         var debugInfo = { invoiceSearches: [], soSearches: [], errors: [] };
@@ -1064,6 +1084,8 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
         res.status(500).json({ success: false, error: err.message });
     }
 });
+
+END OF DISABLED API CODE */
 
 // Get cache status
 app.get('/api/sales-history-cache/status', requireAuth, async function(req, res) {
@@ -1632,21 +1654,21 @@ async function refreshSalesHistoryCache() {
         // If all styles are fresh, refresh oldest ones anyway (rolling refresh)
         if (stylesToRefresh.length === 0) {
             var oldestResult = await pool.query(
-                'SELECT base_style FROM sales_history_cache ORDER BY updated_at ASC LIMIT 100'
+                'SELECT base_style FROM sales_history_cache ORDER BY updated_at ASC LIMIT 20'
             );
             stylesToRefresh = oldestResult.rows.map(function(r) { return r.base_style; });
             console.log('All fresh - refreshing', stylesToRefresh.length, 'oldest cached styles');
         }
         
-        // Process up to 100 per run (with 500ms delays = ~1 min per run)
-        var batch = stylesToRefresh.slice(0, 100);
+        // Process up to 20 per run (with 2s delays = conservative API usage)
+        var batch = stylesToRefresh.slice(0, 20);
         var refreshed = 0;
         var errors = 0;
         
         for (var i = 0; i < batch.length; i++) {
             try {
-                // 500ms delay between requests 
-                if (i > 0) await new Promise(function(r) { setTimeout(r, 500); });
+                // 2 second delay between requests to stay well under rate limits
+                if (i > 0) await new Promise(function(r) { setTimeout(r, 2000); });
                 
                 // Trigger the sales history endpoint internally
                 var response = await fetch('http://localhost:' + PORT + '/api/sales-history/' + encodeURIComponent(batch[i]), {
@@ -1670,13 +1692,19 @@ async function refreshSalesHistoryCache() {
     }
 }
 
-// Start background cache refresh every 5 minutes
+// Start background cache refresh every 30 minutes (reduced to save API calls)
+// DISABLED - Switching to CSV import instead of API calls
 function startSalesHistoryCacheJob() {
-    console.log('Starting sales history cache job (every 5 minutes)');
-    // Run 30 seconds after startup
-    setTimeout(function() { refreshSalesHistoryCache(); }, 30000);
-    // Then every 5 minutes
-    setInterval(function() { refreshSalesHistoryCache(); }, 5 * 60 * 1000);
+    console.log('Sales history cache job DISABLED - waiting for CSV import feature');
+    // Job disabled to conserve API calls
+    // Will be replaced with CSV import functionality
+    /*
+    console.log('Starting sales history cache job (every 30 minutes, 20 styles per run)');
+    // Run 60 seconds after startup
+    setTimeout(function() { refreshSalesHistoryCache(); }, 60000);
+    // Then every 30 minutes
+    setInterval(function() { refreshSalesHistoryCache(); }, 30 * 60 * 1000);
+    */
 }
 
 initDB().then(function() {

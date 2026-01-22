@@ -5,6 +5,14 @@ const session = require('express-session');
 const bcrypt = require('bcryptjs');
 require('dotenv').config();
 
+// ============================================
+// AUTHENTICATION TOGGLE
+// Set to true to require PIN login
+// Set to false to bypass login (dev mode)
+// ============================================
+const AUTH_ENABLED = false;
+// ============================================
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -29,7 +37,7 @@ var lastImportId = null;
 
 async function initDB() {
     try {
-        await pool.query('CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, username VARCHAR(255) UNIQUE NOT NULL, password VARCHAR(255) NOT NULL, role VARCHAR(50) DEFAULT \'sales_rep\', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
+        await pool.query('CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, username VARCHAR(255) UNIQUE NOT NULL, password VARCHAR(255), pin VARCHAR(4), display_name VARCHAR(255), role VARCHAR(50) DEFAULT \'sales_rep\', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         await pool.query('CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, style_id VARCHAR(100) NOT NULL, base_style VARCHAR(100), name VARCHAR(255) NOT NULL, category VARCHAR(100), image_url TEXT, first_seen_import INTEGER, ai_tags TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         await pool.query('CREATE TABLE IF NOT EXISTS product_colors (id SERIAL PRIMARY KEY, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE, color_name VARCHAR(100) NOT NULL, available_qty INTEGER DEFAULT 0, on_hand INTEGER DEFAULT 0, open_order INTEGER DEFAULT 0, to_come INTEGER DEFAULT 0, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         await pool.query('CREATE TABLE IF NOT EXISTS sync_history (id SERIAL PRIMARY KEY, sync_type VARCHAR(50), status VARCHAR(50), records_synced INTEGER DEFAULT 0, error_message TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
@@ -50,12 +58,17 @@ async function initDB() {
         try { await pool.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS ai_tags TEXT'); } catch (e) {}
         try { await pool.query('ALTER TABLE product_colors ADD COLUMN IF NOT EXISTS left_to_sell INTEGER DEFAULT 0'); } catch (e) {}
         try { await pool.query('ALTER TABLE product_colors ADD COLUMN IF NOT EXISTS available_now INTEGER DEFAULT 0'); } catch (e) {}
+        try { await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS pin VARCHAR(4)'); } catch (e) {}
+        try { await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name VARCHAR(255)'); } catch (e) {}
+        
+        // Migrate existing users: set PIN if not set, set display_name from username
+        await pool.query("UPDATE users SET pin = LPAD(FLOOR(RANDOM() * 10000)::TEXT, 4, '0') WHERE pin IS NULL");
+        await pool.query("UPDATE users SET display_name = username WHERE display_name IS NULL");
         
         var userCheck = await pool.query('SELECT COUNT(*) FROM users');
         if (parseInt(userCheck.rows[0].count) === 0) {
-            var hash = await bcrypt.hash('admin123', 10);
-            await pool.query('INSERT INTO users (username, password, role) VALUES ($1, $2, $3)', ['admin', hash, 'admin']);
-            console.log('Default admin user created (admin/admin123)');
+            await pool.query('INSERT INTO users (username, display_name, pin, role) VALUES ($1, $2, $3, $4)', ['admin', 'Admin', '1234', 'admin']);
+            console.log('Default admin user created (Admin / PIN: 1234)');
         }
         
         var tokenResult = await pool.query('SELECT * FROM zoho_tokens ORDER BY id DESC LIMIT 1');
@@ -79,24 +92,54 @@ function requireAdmin(req, res, next) { next(); }
 
 app.post('/api/login', async function(req, res) {
     try {
-        var username = req.body.username;
-        var password = req.body.password;
-        var result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-        if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
+        var userId = req.body.userId;
+        var pin = req.body.pin;
+        var result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+        if (result.rows.length === 0) return res.status(401).json({ error: 'User not found' });
         var user = result.rows[0];
-        var valid = await bcrypt.compare(password, user.password);
-        if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
+        if (user.pin !== pin) return res.status(401).json({ error: 'Invalid PIN' });
         req.session.userId = user.id;
         req.session.username = user.username;
+        req.session.displayName = user.display_name;
         req.session.role = user.role;
-        res.json({ success: true, username: user.username, role: user.role });
+        res.json({ success: true, username: user.username, displayName: user.display_name, role: user.role });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Get all users for login dropdown (public - no auth required)
+app.get('/api/users/list', async function(req, res) {
+    try {
+        var result = await pool.query('SELECT id, display_name FROM users ORDER BY display_name');
+        res.json(result.rows);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Change own PIN
+app.post('/api/change-pin', async function(req, res) {
+    try {
+        if (!req.session.userId) return res.status(401).json({ error: 'Not logged in' });
+        var currentPin = req.body.currentPin;
+        var newPin = req.body.newPin;
+        if (!newPin || newPin.length !== 4 || !/^\d{4}$/.test(newPin)) {
+            return res.status(400).json({ error: 'PIN must be 4 digits' });
+        }
+        var result = await pool.query('SELECT pin FROM users WHERE id = $1', [req.session.userId]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+        if (result.rows[0].pin !== currentPin) return res.status(401).json({ error: 'Current PIN is incorrect' });
+        await pool.query('UPDATE users SET pin = $1 WHERE id = $2', [newPin, req.session.userId]);
+        res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/logout', function(req, res) { req.session.destroy(); res.json({ success: true }); });
 
 app.get('/api/session', function(req, res) {
-    res.json({ loggedIn: true, username: req.session.username || 'admin', role: req.session.role || 'admin', userId: req.session.userId || 1 });
+    if (!AUTH_ENABLED) {
+        // Auth disabled - auto-login as admin
+        res.json({ loggedIn: true, username: 'admin', displayName: 'Admin', role: 'admin', userId: 1 });
+    } else {
+        res.json({ loggedIn: !!req.session.userId, username: req.session.username || '', displayName: req.session.displayName || '', role: req.session.role || '', userId: req.session.userId || null });
+    }
 });
 
 app.get('/api/products', requireAuth, async function(req, res) {
@@ -1526,7 +1569,7 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
     }
 });
 
-app.get('/api/users', requireAuth, requireAdmin, async function(req, res) { try { var result = await pool.query('SELECT id, username, role, created_at FROM users ORDER BY created_at'); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
+app.get('/api/users', requireAuth, requireAdmin, async function(req, res) { try { var result = await pool.query('SELECT id, username, display_name, pin, role, created_at FROM users ORDER BY display_name'); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
 
 // Sales data stats
 app.get('/api/sales-stats', requireAuth, async function(req, res) {
@@ -1547,7 +1590,32 @@ app.get('/api/sales-stats', requireAuth, async function(req, res) {
         res.json({ success: false, error: err.message });
     }
 });
-app.post('/api/users', requireAuth, requireAdmin, async function(req, res) { try { var hash = await bcrypt.hash(req.body.password, 10); await pool.query('INSERT INTO users (username, password, role) VALUES ($1,$2,$3)', [req.body.username, hash, req.body.role || 'sales_rep']); res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });
+
+app.post('/api/users', requireAuth, requireAdmin, async function(req, res) { 
+    try { 
+        var pin = req.body.pin || String(Math.floor(1000 + Math.random() * 9000));
+        var displayName = req.body.displayName || req.body.username;
+        var username = req.body.username.toLowerCase().replace(/\s+/g, '_');
+        await pool.query('INSERT INTO users (username, display_name, pin, role) VALUES ($1,$2,$3,$4)', [username, displayName, pin, req.body.role || 'sales_rep']); 
+        res.json({ success: true, pin: pin }); 
+    } catch (err) { res.status(500).json({ error: err.message }); } 
+});
+
+app.put('/api/users/:id/reset-pin', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        var newPin = String(Math.floor(1000 + Math.random() * 9000));
+        await pool.query('UPDATE users SET pin = $1 WHERE id = $2', [newPin, req.params.id]);
+        res.json({ success: true, pin: newPin });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/users/:id/role', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        await pool.query('UPDATE users SET role = $1 WHERE id = $2', [req.body.role, req.params.id]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.delete('/api/users/:id', requireAuth, requireAdmin, async function(req, res) { try { await pool.query('DELETE FROM users WHERE id=$1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });
 
 // Create shareable selection
@@ -1945,6 +2013,9 @@ function getHTML() {
     html += '.header{background:rgba(255,255,255,0.8);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);padding:0 2rem;height:48px;border-bottom:1px solid rgba(0,0,0,0.04);display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}.header.compact{height:44px}.header h1{font-size:1rem;font-weight:600;color:#1e3a5f;letter-spacing:-0.01em}.header-right{display:flex;gap:1.5rem;align-items:center}';
     // Header buttons - Apple style text links
     html += '.header-right .btn-secondary{background:none;border:none;color:#1e3a5f;font-size:0.75rem;font-weight:400;padding:0.5rem 0;letter-spacing:0}.header-right .btn-secondary:hover{color:#1e3a5f}';
+    html += '.user-menu{position:absolute;top:100%;right:0;background:white;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,0.12);padding:0.5rem;min-width:160px;z-index:200}.user-menu.hidden{display:none}.user-menu-item{display:block;width:100%;padding:0.75rem 1rem;border:none;background:none;text-align:left;cursor:pointer;border-radius:8px;font-size:0.875rem;color:#1e3a5f}.user-menu-item:hover{background:#f5f5f7}';
+    html += '.pin-modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:none;align-items:center;justify-content:center;z-index:1001}.pin-modal.active{display:flex}.pin-modal-content{background:white;border-radius:18px;padding:2rem;max-width:360px;width:90%}.pin-modal h3{margin-bottom:1.5rem;font-weight:600;color:#1e3a5f}.pin-modal input{width:100%;padding:1rem;border:none;border-radius:12px;margin-bottom:1rem;background:#f5f5f7;text-align:center;font-size:1.5rem;letter-spacing:0.5rem}.pin-modal-actions{display:flex;gap:0.5rem;justify-content:flex-end}';
+    html += '.pin-display{font-family:monospace;font-size:1.1rem;background:#f5f5f7;padding:0.25rem 0.75rem;border-radius:6px;letter-spacing:0.2rem}';
     // Search box - Apple style
     html += '.search-box{position:relative}.search-box input{padding:0.5rem 1rem;border:none;border-radius:8px;width:200px;background:#f5f5f7;font-size:0.875rem;transition:all 0.2s}.search-box input:focus{outline:none;width:260px;background:#ebebed}';
     html += '.ai-search-indicator{position:absolute;top:100%;left:0;font-size:0.7rem;color:#0088c2;margin-top:0.25rem;white-space:nowrap}.ai-search-indicator.hidden{display:none}';
@@ -2031,9 +2102,9 @@ function getHTML() {
     html += '.share-history-table{font-size:0.8125rem}.share-history-table td{padding:0.625rem 0.75rem}.share-type-badge{display:inline-block;padding:0.25rem 0.625rem;border-radius:980px;font-size:0.6875rem;font-weight:500}.share-type-badge.link{background:#e3f2fd;color:#1565c0}.share-type-badge.pdf{background:#fce4ec;color:#c62828}';
     html += '</style></head><body>';
     
-    html += '<div id="loginPage" class="login-page"><div class="login-box"><h1>Mark Edwards Apparel<br><span style="font-size:0.8em;font-weight:normal">Product Catalog</span></h1><form id="loginForm"><div class="form-group"><label>Username</label><input type="text" id="username" required></div><div class="form-group"><label>Password</label><input type="password" id="password" required></div><button type="submit" class="btn btn-primary" style="width:100%">Sign In</button><div id="loginError" class="error hidden"></div></form></div></div>';
+    html += '<div id="loginPage" class="login-page"><div class="login-box"><h1>Mark Edwards Apparel<br><span style="font-size:0.8em;font-weight:normal">Product Catalog</span></h1><form id="loginForm"><div class="form-group"><label>Select User</label><select id="loginUserSelect" required style="width:100%;padding:0.875rem 1rem;border:none;border-radius:12px;font-size:1rem;background:#f5f5f7;appearance:none;cursor:pointer"><option value="">-- Select your name --</option></select></div><div class="form-group"><label>Enter PIN</label><input type="password" id="loginPin" maxlength="4" pattern="[0-9]{4}" inputmode="numeric" placeholder="4-digit PIN" required style="text-align:center;font-size:1.5rem;letter-spacing:0.5rem"></div><button type="submit" class="btn btn-primary" style="width:100%">Sign In</button><div id="loginError" class="error hidden"></div></form></div></div>';
     
-    html += '<div id="mainApp" class="hidden"><header class="header"><h1>Mark Edwards Apparel Product Catalog</h1><div class="search-box"><input type="text" id="searchInput" placeholder="Search products..."><button id="clearSearchBtn" style="margin-left:0.5rem;padding:0.5rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer">Clear</button><div id="aiSearchIndicator" class="ai-search-indicator hidden">🤖 AI-enhanced search active</div></div><div class="header-right"><span id="userInfo"></span><button class="btn btn-secondary" id="helpBtn">Help</button><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn" style="display:none">Admin</button><button class="btn btn-secondary" id="logoutBtn">Sign Out</button></div></header>';
+    html += '<div id="mainApp" class="hidden"><header class="header"><h1>Mark Edwards Apparel Product Catalog</h1><div class="search-box"><input type="text" id="searchInput" placeholder="Search products..."><button id="clearSearchBtn" style="margin-left:0.5rem;padding:0.5rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer">Clear</button><div id="aiSearchIndicator" class="ai-search-indicator hidden">🤖 AI-enhanced search active</div></div><div class="header-right"><div class="user-menu-wrapper" style="position:relative"><button class="btn btn-secondary" id="userMenuBtn" style="display:flex;align-items:center;gap:0.5rem"><span id="userInfo">Welcome</span> ▾</button><div id="userMenu" class="user-menu hidden"><button class="user-menu-item" id="changePinBtn">🔑 Change PIN</button><button class="user-menu-item" id="logoutBtn">🚪 Sign Out</button></div></div><button class="btn btn-secondary" id="helpBtn">Help</button><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn" style="display:none">Admin</button></div></header>';
     
     // History panel (visible to all users)
     html += '<main class="main"><div id="historyPanel" class="admin-panel hidden"><h2>History & Status</h2><div class="tabs"><button class="tab active" data-tab="shares">Sharing History</button><button class="tab" data-tab="freshness">Data Freshness</button><button class="tab" data-tab="history">Sync History</button></div>';
@@ -2047,7 +2118,7 @@ function getHTML() {
     html += '<div id="import2Tab" class="tab-content"><div class="upload-area"><input type="file" id="csvFile" accept=".csv"><label for="csvFile">Click to upload CSV file</label></div><div id="importStatus"></div><button class="btn btn-danger" id="clearBtn" style="margin-top:1rem">Clear All Products</button></div>';
     html += '<div id="sales2Tab" class="tab-content"><p style="margin-bottom:1rem;color:#666">Import sales data (Sales Orders and Purchase Orders) from the PO-SO Query CSV export.</p><div class="upload-area"><input type="file" id="salesCsvFile" accept=".csv"><label for="salesCsvFile">Click to upload Sales CSV file</label></div><div id="salesImportStatus"></div><div id="salesDataStats" style="margin-top:1rem"></div></div>';
     html += '<div id="ai2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">API Status: </span><span class="status-value" id="aiStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Products Analyzed: </span><span class="status-value" id="aiAnalyzedCount">-</span></div><div class="status-item"><span class="status-label">Remaining: </span><span class="status-value" id="aiRemainingCount">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">AI analysis uses Claude Vision to generate searchable tags from product images. This enables searching by garment type (cardigan, hoodie), style (casual, formal), pattern (striped, floral), and more.</p><button class="btn btn-primary" id="runAiBtn">Analyze Next 100 Products</button><button class="btn btn-success" id="runAllAiBtn" style="margin-left:0.5rem">Analyze All (Background)</button><button class="btn btn-secondary" id="stopAiBtn" style="margin-left:0.5rem;display:none">Stop</button><div id="aiMessage" style="margin-top:1rem"></div></div>';
-    html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Username</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUser" placeholder="Username"><input type="password" id="newPass" placeholder="Password"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add</button></div></div>';
+    html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Name</th><th>PIN</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUserName" placeholder="Display Name"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add User</button></div><p style="margin-top:1rem;font-size:0.8rem;color:#666">New users are assigned a random 4-digit PIN. They can change it after logging in.</p></div>';
     html += '<div id="system2Tab" class="tab-content"><div id="systemHealthContent"><p>Loading system health data...</p></div><button class="btn btn-secondary" id="refreshSystemBtn" style="margin-top:1rem">🔄 Refresh</button></div></div>';
     
     html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div id="availNowStat" class="stat-box stat-active"><div class="stat-value" id="totalAvailNow">0</div><div class="stat-label">📦 Avail Now</div></div><div id="leftToSellStat" class="stat-box"><div class="stat-value" id="totalLeftToSell">0</div><div class="stat-label">📊 Left to Sell</div></div><div class="qty-toggle"><button class="qty-toggle-btn active" id="toggleAvailableNow" data-mode="available_now">📦 Available Now</button><button class="qty-toggle-btn" id="toggleLeftToSell" data-mode="left_to_sell">📊 Left to Sell</button></div></div>';
@@ -2067,6 +2138,10 @@ function getHTML() {
     
     // Product modal
     html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button><div class="modal-body"><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div style="margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid #e0e0e0"><div class="product-style" id="modalStyle" style="color:#0088c2;font-size:0.875rem;font-weight:600;margin-bottom:0.25rem"></div><h2 id="modalName" style="margin:0;padding:0;font-size:1.75rem;font-weight:600;color:#1e3a5f;background:none"></h2><p id="modalCategory" style="color:#6e6e73;margin:0.25rem 0 0;font-size:0.875rem"></p></div><div id="modalColors"></div><div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div><div class="modal-actions"><button class="btn btn-secondary btn-sm" id="modalPickBtn">♡ Add to My Picks</button></div><div class="sales-history-section"><h3 style="margin:1.5rem 0 0.75rem;font-size:1rem;display:flex;align-items:center;gap:0.5rem;color:#1e3a5f;background:none">📊 Sales & Import PO History <span id="salesHistoryLoading" style="font-size:0.75rem;color:#666;font-weight:normal">(loading...)</span></h3><div id="salesHistorySummary" style="display:flex;gap:1rem;margin-bottom:1rem"></div><div id="salesHistoryFilter" style="margin-bottom:0.5rem;font-size:0.8rem;color:#666"></div><div id="salesHistoryList" style="max-height:200px;overflow-y:auto;font-size:0.875rem"></div></div><div class="note-section"><label><strong>My Notes:</strong></label><textarea id="modalNote" placeholder="Add private notes about this product..."></textarea><button class="btn btn-sm btn-primary" id="saveNoteBtn">Save Note</button></div></div></div></div></div>';
+    
+    
+    // Change PIN modal
+    html += '<div class="pin-modal" id="pinModal"><div class="pin-modal-content"><h3>Change Your PIN</h3><div class="form-group"><label>Current PIN</label><input type="password" id="currentPinInput" maxlength="4" pattern="[0-9]{4}" inputmode="numeric" placeholder="••••"></div><div class="form-group"><label>New PIN</label><input type="password" id="newPinInput" maxlength="4" pattern="[0-9]{4}" inputmode="numeric" placeholder="••••"></div><div id="pinError" class="error hidden"></div><div id="pinSuccess" class="success hidden"></div><div class="pin-modal-actions"><button class="btn btn-secondary" id="cancelPinBtn">Cancel</button><button class="btn btn-primary" id="savePinBtn">Save PIN</button></div></div></div>';
     
     // Help modal
     html += '<div class="help-modal" id="helpModal"><div class="help-content"><button class="modal-close" id="helpClose">&times;</button><h2>📖 Product Catalog Guide</h2><div class="help-sections">';
@@ -2109,12 +2184,19 @@ function getHTML() {
     html += '<script>';
     html += 'var products=[];var allProducts=[];var groupedProducts=[];var lastImportId=null;var currentFilter="all";var colorFilter=null;var specialFilter=null;var currentSort="name-asc";var currentSize="medium";var selectedProducts=[];var selectionMode=false;var currentShareId=null;var userPicks=[];var userNotes={};var currentModalProductId=null;var focusedIndex=-1;var qtyMode="available_now";var groupByStyle=true;var minColorsFilter=0;';
     
-    html += 'function checkSession(){fetch("/api/session").then(function(r){return r.json()}).then(function(d){if(d.loggedIn){showApp(d.username,d.role);loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();loadShares();loadHistory();if(d.role==="admin"){loadUsers();loadAiStatus()}}})}';
-    html += 'function showApp(u,r){document.getElementById("loginPage").classList.add("hidden");document.getElementById("mainApp").classList.remove("hidden");document.getElementById("userInfo").textContent="Welcome, "+u;if(r==="admin")document.getElementById("adminBtn").style.display="block"}';
+    html += 'function checkSession(){fetch("/api/session").then(function(r){return r.json()}).then(function(d){if(d.loggedIn&&d.userId){currentDisplayName=d.displayName;showApp(d.displayName,d.role);loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();loadShares();loadHistory();if(d.role==="admin"){loadUsers();loadAiStatus()}}else{loadLoginUsers()}})}';
+    html += 'function showApp(displayName,r){document.getElementById("loginPage").classList.add("hidden");document.getElementById("mainApp").classList.remove("hidden");document.getElementById("userInfo").textContent=displayName;if(r==="admin")document.getElementById("adminBtn").style.display="block"}';
+    html += 'function showApp(displayName,r){document.getElementById("loginPage").classList.add("hidden");document.getElementById("mainApp").classList.remove("hidden");document.getElementById("userInfo").textContent=displayName;if(r==="admin")document.getElementById("adminBtn").style.display="block"}';
     
-    html += 'document.getElementById("loginForm").addEventListener("submit",function(e){e.preventDefault();fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("username").value,password:document.getElementById("password").value})}).then(function(r){return r.json()}).then(function(d){if(d.success){showApp(d.username,d.role);loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();loadShares();loadHistory();if(d.role==="admin"){loadUsers();loadAiStatus()}}else{document.getElementById("loginError").textContent=d.error;document.getElementById("loginError").classList.remove("hidden")}})});';
+    html += 'var currentDisplayName="";document.getElementById("loginForm").addEventListener("submit",function(e){e.preventDefault();var userId=document.getElementById("loginUserSelect").value;var pin=document.getElementById("loginPin").value;if(!userId){document.getElementById("loginError").textContent="Please select your name";document.getElementById("loginError").classList.remove("hidden");return}fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({userId:userId,pin:pin})}).then(function(r){return r.json()}).then(function(d){if(d.success){currentDisplayName=d.displayName;showApp(d.displayName,d.role);loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();loadShares();loadHistory();if(d.role==="admin"){loadUsers();loadAiStatus()}}else{document.getElementById("loginError").textContent=d.error;document.getElementById("loginError").classList.remove("hidden")}})});';
+    html += 'function loadLoginUsers(){fetch("/api/users/list").then(function(r){return r.json()}).then(function(users){var sel=document.getElementById("loginUserSelect");if(sel){users.forEach(function(u){var opt=document.createElement("option");opt.value=u.id;opt.textContent=u.display_name;sel.appendChild(opt)})}})}';
     
     html += 'document.getElementById("logoutBtn").addEventListener("click",function(){fetch("/api/logout",{method:"POST"}).then(function(){location.reload()})});';
+    html += 'document.getElementById("userMenuBtn").addEventListener("click",function(e){e.stopPropagation();document.getElementById("userMenu").classList.toggle("hidden")});';
+    html += 'document.addEventListener("click",function(e){if(!e.target.closest(".user-menu-wrapper")){document.getElementById("userMenu").classList.add("hidden")}});';
+    html += 'document.getElementById("changePinBtn").addEventListener("click",function(){document.getElementById("userMenu").classList.add("hidden");document.getElementById("pinModal").classList.add("active");document.getElementById("currentPinInput").value="";document.getElementById("newPinInput").value="";document.getElementById("pinError").classList.add("hidden");document.getElementById("pinSuccess").classList.add("hidden")});';
+    html += 'document.getElementById("cancelPinBtn").addEventListener("click",function(){document.getElementById("pinModal").classList.remove("active")});';
+    html += 'document.getElementById("savePinBtn").addEventListener("click",function(){var currentPin=document.getElementById("currentPinInput").value;var newPin=document.getElementById("newPinInput").value;if(!/^\\d{4}$/.test(newPin)){document.getElementById("pinError").textContent="PIN must be 4 digits";document.getElementById("pinError").classList.remove("hidden");return}fetch("/api/change-pin",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({currentPin:currentPin,newPin:newPin})}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("pinSuccess").textContent="PIN changed successfully!";document.getElementById("pinSuccess").classList.remove("hidden");document.getElementById("pinError").classList.add("hidden");setTimeout(function(){document.getElementById("pinModal").classList.remove("active")},1500)}else{document.getElementById("pinError").textContent=d.error;document.getElementById("pinError").classList.remove("hidden")}})});';
     html += 'document.getElementById("helpBtn").addEventListener("click",function(){document.getElementById("helpModal").classList.add("active")});';
     html += 'document.getElementById("helpClose").addEventListener("click",function(){document.getElementById("helpModal").classList.remove("active")});';
     html += 'document.getElementById("helpModal").addEventListener("click",function(e){if(e.target.id==="helpModal")document.getElementById("helpModal").classList.remove("active")});';
@@ -2248,8 +2330,10 @@ function getHTML() {
     
     html += 'document.getElementById("clearBtn").addEventListener("click",function(){if(!confirm("Delete all products?"))return;fetch("/api/products/clear",{method:"POST"}).then(function(){loadProducts()})});';
     
-    html += 'function loadUsers(){fetch("/api/users").then(function(r){return r.json()}).then(function(u){var h="";u.forEach(function(x){h+="<tr><td>"+x.username+"</td><td>"+x.role+"</td><td><button class=\\"btn btn-danger\\" onclick=\\"deleteUser("+x.id+")\\">Delete</button></td></tr>"});document.getElementById("usersTable").innerHTML=h})}';
-    html += 'document.getElementById("addUserBtn").addEventListener("click",function(){var u=document.getElementById("newUser").value;var p=document.getElementById("newPass").value;if(!u||!p){alert("Enter username and password");return}fetch("/api/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:u,password:p,role:document.getElementById("newRole").value})}).then(function(){document.getElementById("newUser").value="";document.getElementById("newPass").value="";loadUsers()})});';
+    html += 'function loadUsers(){fetch("/api/users").then(function(r){return r.json()}).then(function(u){var h="";u.forEach(function(x){h+="<tr><td>"+x.display_name+"</td><td><span class=\\"pin-display\\">"+x.pin+"</span></td><td><select onchange=\\"changeUserRole("+x.id+",this.value)\\" "+(x.role==="admin"&&u.filter(function(y){return y.role==="admin"}).length===1?"disabled":"")+">"+"<option value=\\"sales_rep\\""+(x.role==="sales_rep"?" selected":"")+">Sales Rep</option>"+"<option value=\\"admin\\""+(x.role==="admin"?" selected":"")+">Admin</option></select></td><td><button class=\\"btn btn-secondary btn-sm\\" onclick=\\"resetUserPin("+x.id+")\\" style=\\"margin-right:0.5rem\\">Reset PIN</button><button class=\\"btn btn-danger btn-sm\\" onclick=\\"deleteUser("+x.id+")\\">Delete</button></td></tr>"});document.getElementById("usersTable").innerHTML=h})}';
+    html += 'function resetUserPin(id){if(!confirm("Generate new random PIN for this user?"))return;fetch("/api/users/"+id+"/reset-pin",{method:"PUT"}).then(function(r){return r.json()}).then(function(d){if(d.success){alert("New PIN: "+d.pin);loadUsers()}})}';
+    html += 'function changeUserRole(id,role){fetch("/api/users/"+id+"/role",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:role})}).then(function(r){return r.json()}).then(function(d){if(d.success)loadUsers()})}';
+    html += 'document.getElementById("addUserBtn").addEventListener("click",function(){var displayName=document.getElementById("newUserName").value;if(!displayName){alert("Enter a name");return}fetch("/api/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({displayName:displayName,username:displayName.toLowerCase().replace(/\\s+/g,"_"),role:document.getElementById("newRole").value})}).then(function(r){return r.json()}).then(function(d){if(d.success){alert("User created! PIN: "+d.pin);document.getElementById("newUserName").value="";loadUsers()}else{alert("Error: "+d.error)}})});';
     html += 'function deleteUser(id){if(!confirm("Delete user?"))return;fetch("/api/users/"+id,{method:"DELETE"}).then(function(){loadUsers()})}';
     
     // System Health functions

@@ -1491,21 +1491,21 @@ async function refreshSalesHistoryCache() {
         // If all styles are fresh, refresh oldest ones anyway (rolling refresh)
         if (stylesToRefresh.length === 0) {
             var oldestResult = await pool.query(
-                'SELECT base_style FROM sales_history_cache ORDER BY updated_at ASC LIMIT 20'
+                'SELECT base_style FROM sales_history_cache ORDER BY updated_at ASC LIMIT 100'
             );
             stylesToRefresh = oldestResult.rows.map(function(r) { return r.base_style; });
             console.log('All fresh - refreshing', stylesToRefresh.length, 'oldest cached styles');
         }
         
-        // Process up to 30 per run (with 2 second delays = ~1 minute per run)
-        var batch = stylesToRefresh.slice(0, 30);
+        // Process up to 100 per run (with 500ms delays = ~1 min per run)
+        var batch = stylesToRefresh.slice(0, 100);
         var refreshed = 0;
         var errors = 0;
         
         for (var i = 0; i < batch.length; i++) {
             try {
-                // 2 second delay between requests to avoid rate limits
-                if (i > 0) await new Promise(function(r) { setTimeout(r, 2000); });
+                // 500ms delay between requests 
+                if (i > 0) await new Promise(function(r) { setTimeout(r, 500); });
                 
                 // Trigger the sales history endpoint internally
                 var response = await fetch('http://localhost:' + PORT + '/api/sales-history/' + encodeURIComponent(batch[i]), {
@@ -1529,13 +1529,13 @@ async function refreshSalesHistoryCache() {
     }
 }
 
-// Start background cache refresh every 15 minutes
+// Start background cache refresh every 5 minutes
 function startSalesHistoryCacheJob() {
-    console.log('Starting sales history cache job (every 15 minutes)');
-    // Run 1 minute after startup (let other things initialize)
-    setTimeout(function() { refreshSalesHistoryCache(); }, 60000);
-    // Then every 15 minutes
-    setInterval(function() { refreshSalesHistoryCache(); }, 15 * 60 * 1000);
+    console.log('Starting sales history cache job (every 5 minutes)');
+    // Run 30 seconds after startup
+    setTimeout(function() { refreshSalesHistoryCache(); }, 30000);
+    // Then every 5 minutes
+    setInterval(function() { refreshSalesHistoryCache(); }, 5 * 60 * 1000);
 }
 
 initDB().then(function() {

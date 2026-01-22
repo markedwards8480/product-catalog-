@@ -703,10 +703,9 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
             var poSearchTerm = searchTerms[pt];
             try {
                 // Strategy 1: item_name_contains (all statuses)
-                var poStatuses = ['draft', 'open', 'billed', 'cancelled'];
+                var poStatuses = ['draft', 'open', 'billed', 'closed'];
                 for (var psi = 0; psi < poStatuses.length; psi++) {
                     var poStatus = poStatuses[psi];
-                    if (poStatus === 'cancelled') continue; // Skip cancelled
                     
                     var poUrl = 'https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&status=' + poStatus + '&item_name_contains=' + encodeURIComponent(poSearchTerm);
                     debugInfo.poSearches.push({ term: poSearchTerm, strategy: 'item_name_contains', status: poStatus });
@@ -727,16 +726,27 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
                             var poTotalQty = 0;
                             var poTotalAmount = 0;
                             var poMatchingItems = [];
+                            var poDetailObj = poDetailData.purchaseorder;
                             
-                            for (var pj = 0; pj < poDetailData.purchaseorder.line_items.length; pj++) {
-                                var poItem = poDetailData.purchaseorder.line_items[pj];
-                                var poItemName = (poItem.name || poItem.item_name || '').toUpperCase();
-                                var poItemSku = (poItem.sku || '').toUpperCase();
+                            // Check if style is in custom fields
+                            var poCustomMatch1 = false;
+                            var poCustomFields1 = JSON.stringify(poDetailObj.custom_fields || []).toUpperCase();
+                            if (poCustomFields1.indexOf(styleId.toUpperCase()) !== -1 || poCustomFields1.indexOf(baseStyle.toUpperCase()) !== -1) {
+                                poCustomMatch1 = true;
+                                console.log('PO custom field match for', po.purchaseorder_number);
+                            }
+                            
+                            for (var pj = 0; pj < poDetailObj.line_items.length; pj++) {
+                                var poItem = poDetailObj.line_items[pj];
+                                var poItemName = (poItem.name || poItem.item_name || poItem.description || '').toUpperCase();
+                                var poItemSku = (poItem.sku || poItem.item_id || '').toUpperCase();
                                 var poSearchStyleUpper = styleId.toUpperCase();
                                 var poBaseStyleUpper = baseStyle.toUpperCase();
                                 
-                                if (poItemName.indexOf(poSearchStyleUpper) !== -1 || poItemSku.indexOf(poSearchStyleUpper) !== -1 ||
-                                    poItemName.indexOf(poBaseStyleUpper) !== -1 || poItemSku.indexOf(poBaseStyleUpper) !== -1) {
+                                var itemMatch1 = poItemName.indexOf(poSearchStyleUpper) !== -1 || poItemSku.indexOf(poSearchStyleUpper) !== -1 ||
+                                    poItemName.indexOf(poBaseStyleUpper) !== -1 || poItemSku.indexOf(poBaseStyleUpper) !== -1;
+                                
+                                if (itemMatch1 || poCustomMatch1) {
                                     poTotalQty += poItem.quantity || 0;
                                     poTotalAmount += poItem.item_total || 0;
                                     poMatchingItems.push({
@@ -787,16 +797,28 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
                             var poTotalQty2 = 0;
                             var poTotalAmount2 = 0;
                             var poMatchingItems2 = [];
+                            var poDetail = poDetailData2.purchaseorder;
                             
-                            for (var pj2 = 0; pj2 < poDetailData2.purchaseorder.line_items.length; pj2++) {
-                                var poItem2 = poDetailData2.purchaseorder.line_items[pj2];
-                                var poItemName2 = (poItem2.name || poItem2.item_name || '').toUpperCase();
-                                var poItemSku2 = (poItem2.sku || '').toUpperCase();
+                            // Check if style is in custom fields
+                            var poCustomMatch = false;
+                            var poCustomFields = JSON.stringify(poDetail.custom_fields || []).toUpperCase();
+                            if (poCustomFields.indexOf(styleId.toUpperCase()) !== -1 || poCustomFields.indexOf(baseStyle.toUpperCase()) !== -1) {
+                                poCustomMatch = true;
+                                console.log('PO custom field match for', po2.purchaseorder_number);
+                            }
+                            
+                            for (var pj2 = 0; pj2 < poDetail.line_items.length; pj2++) {
+                                var poItem2 = poDetail.line_items[pj2];
+                                var poItemName2 = (poItem2.name || poItem2.item_name || poItem2.description || '').toUpperCase();
+                                var poItemSku2 = (poItem2.sku || poItem2.item_id || '').toUpperCase();
                                 var poSearchStyleUpper2 = styleId.toUpperCase();
                                 var poBaseStyleUpper2 = baseStyle.toUpperCase();
                                 
-                                if (poItemName2.indexOf(poSearchStyleUpper2) !== -1 || poItemSku2.indexOf(poSearchStyleUpper2) !== -1 ||
-                                    poItemName2.indexOf(poBaseStyleUpper2) !== -1 || poItemSku2.indexOf(poBaseStyleUpper2) !== -1) {
+                                // Match if item contains style OR if PO custom fields matched (include all items)
+                                var itemMatch = poItemName2.indexOf(poSearchStyleUpper2) !== -1 || poItemSku2.indexOf(poSearchStyleUpper2) !== -1 ||
+                                    poItemName2.indexOf(poBaseStyleUpper2) !== -1 || poItemSku2.indexOf(poBaseStyleUpper2) !== -1;
+                                
+                                if (itemMatch || poCustomMatch) {
                                     poTotalQty2 += poItem2.quantity || 0;
                                     poTotalAmount2 += poItem2.item_total || 0;
                                     poMatchingItems2.push({
@@ -928,6 +950,16 @@ app.delete('/api/sales-history-cache/:styleId', requireAuth, async function(req,
         var baseStyle = req.params.styleId.split('-')[0];
         await pool.query('DELETE FROM sales_history_cache WHERE base_style = $1', [baseStyle]);
         res.json({ success: true, message: 'Cache cleared for ' + baseStyle });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Clear ALL cache
+app.delete('/api/sales-history-cache', requireAuth, async function(req, res) {
+    try {
+        var result = await pool.query('DELETE FROM sales_history_cache');
+        res.json({ success: true, message: 'All cache cleared', deleted: result.rowCount });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

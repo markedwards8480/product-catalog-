@@ -37,6 +37,7 @@ async function initDB() {
         await pool.query('CREATE TABLE IF NOT EXISTS selections (id SERIAL PRIMARY KEY, share_id VARCHAR(50) UNIQUE NOT NULL, name VARCHAR(255), product_ids INTEGER[], created_by VARCHAR(255), share_type VARCHAR(50) DEFAULT \'link\', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         await pool.query('CREATE TABLE IF NOT EXISTS user_picks (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, product_id))');
         await pool.query('CREATE TABLE IF NOT EXISTS user_notes (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE, note TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, product_id))');
+        await pool.query('CREATE TABLE IF NOT EXISTS sales_history_cache (id SERIAL PRIMARY KEY, base_style VARCHAR(100) UNIQUE NOT NULL, summary JSONB, history JSONB, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         
         // Add columns if they don't exist (for existing databases)
         try { await pool.query('ALTER TABLE selections ADD COLUMN IF NOT EXISTS share_type VARCHAR(50) DEFAULT \'link\''); } catch (e) {}
@@ -363,9 +364,31 @@ app.get('/api/data-freshness', requireAuth, async function(req, res) {
 app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
     try {
         var styleId = req.params.styleId;
+        var baseStyle = styleId.split('-')[0];
         var orgId = process.env.ZOHO_BOOKS_ORG_ID || process.env.ZOHO_ORGANIZATION_ID || '677681121';
         
-        console.log('Sales History Request - Style:', styleId, 'Org:', orgId);
+        console.log('Sales History Request - Style:', styleId, 'Base:', baseStyle);
+        
+        // Check cache first (valid for 1 hour)
+        var cacheResult = await pool.query(
+            'SELECT * FROM sales_history_cache WHERE base_style = $1 AND updated_at > NOW() - INTERVAL \'1 hour\'',
+            [baseStyle]
+        );
+        
+        if (cacheResult.rows.length > 0) {
+            console.log('Sales History Cache HIT for', baseStyle);
+            var cached = cacheResult.rows[0];
+            return res.json({
+                success: true,
+                styleId: styleId,
+                summary: cached.summary,
+                history: cached.history,
+                cached: true,
+                cacheAge: Math.round((Date.now() - new Date(cached.updated_at).getTime()) / 60000) + ' minutes'
+            });
+        }
+        
+        console.log('Sales History Cache MISS for', baseStyle, '- fetching from Zoho');
         
         if (!zohoAccessToken) {
             var tokenResult = await refreshZohoToken();
@@ -836,27 +859,71 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
         
         console.log('Sales History Results:', results.length, 'records found');
         
+        var summary = {
+            totalInvoiced: totalInvoicedQty,
+            totalInvoicedDollars: totalInvoicedDollars,
+            invoiceCount: invoiceCount,
+            totalOpenOrders: totalOpenOrdersQty,
+            totalOpenOrdersDollars: totalOpenOrdersDollars,
+            openOrderCount: openOrderCount,
+            totalPO: totalPOQty,
+            totalPODollars: totalPODollars,
+            poCount: poCount
+        };
+        
+        // Save to cache
+        try {
+            await pool.query(
+                'INSERT INTO sales_history_cache (base_style, summary, history, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (base_style) DO UPDATE SET summary = $2, history = $3, updated_at = NOW()',
+                [baseStyle, JSON.stringify(summary), JSON.stringify(results)]
+            );
+            console.log('Sales History cached for', baseStyle);
+        } catch (cacheErr) {
+            console.error('Cache save error:', cacheErr.message);
+        }
+        
         res.json({
             success: true,
             styleId: styleId,
-            summary: {
-                totalInvoiced: totalInvoicedQty,
-                totalInvoicedDollars: totalInvoicedDollars,
-                invoiceCount: invoiceCount,
-                totalOpenOrders: totalOpenOrdersQty,
-                totalOpenOrdersDollars: totalOpenOrdersDollars,
-                openOrderCount: openOrderCount,
-                totalPO: totalPOQty,
-                totalPODollars: totalPODollars,
-                poCount: poCount
-            },
+            summary: summary,
             history: results,
-            debug: debugInfo
+            cached: false
         });
         
     } catch (err) {
         console.error('Sales history error:', err);
         res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Get cache status
+app.get('/api/sales-history-cache/status', requireAuth, async function(req, res) {
+    try {
+        var totalResult = await pool.query('SELECT COUNT(*) as total FROM sales_history_cache');
+        var freshResult = await pool.query('SELECT COUNT(*) as fresh FROM sales_history_cache WHERE updated_at > NOW() - INTERVAL \'1 hour\'');
+        var oldestResult = await pool.query('SELECT MIN(updated_at) as oldest FROM sales_history_cache');
+        var newestResult = await pool.query('SELECT MAX(updated_at) as newest FROM sales_history_cache');
+        
+        res.json({
+            total: parseInt(totalResult.rows[0].total),
+            fresh: parseInt(freshResult.rows[0].fresh),
+            stale: parseInt(totalResult.rows[0].total) - parseInt(freshResult.rows[0].fresh),
+            oldest: oldestResult.rows[0].oldest,
+            newest: newestResult.rows[0].newest
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Clear cache for a style (force refresh next time)
+app.delete('/api/sales-history-cache/:styleId', requireAuth, async function(req, res) {
+    try {
+        var baseStyle = req.params.styleId.split('-')[0];
+        await pool.query('DELETE FROM sales_history_cache WHERE base_style = $1', [baseStyle]);
+        res.json({ success: true, message: 'Cache cleared for ' + baseStyle });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 
@@ -1280,7 +1347,7 @@ function getHTML() {
     // Helper to group products by base style
     html += 'function groupProductsByStyle(prods){var groups={};prods.forEach(function(p){var base=p.style_id.split("-")[0];if(!groups[base]){groups[base]={baseStyle:base,name:p.name.replace(p.style_id,base),category:p.category,variants:[],firstSeenImport:p.first_seen_import}}groups[base].variants.push(p)});return Object.values(groups)}';
     
-    html += 'function renderProducts(){var s=document.getElementById("searchInput").value.toLowerCase().trim();var searchWords=s?s.split(/\\s+/):[];var minQ=parseInt(document.getElementById("minQty").value)||0;var maxQ=parseInt(document.getElementById("maxQty").value)||999999999;var f=allProducts.filter(function(p){var searchText=p.style_id.toLowerCase()+" "+p.name.toLowerCase()+" "+(p.ai_tags||"").toLowerCase();var ms=searchWords.length===0||searchWords.every(function(word){return searchText.indexOf(word)!==-1});var mc=currentFilter==="all"||p.category===currentFilter;var colorNames=(p.colors||[]).map(function(c){return c.color_name});var mcolor=!colorFilter||colorNames.indexOf(colorFilter)!==-1;var tot=0;(p.colors||[]).forEach(function(c){tot+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))});var mq=tot>=minQ&&tot<=maxQ;var msp=true;if(specialFilter==="new"){msp=p.first_seen_import===lastImportId}else if(specialFilter==="picks"){msp=userPicks.indexOf(p.id)!==-1}else if(specialFilter==="notes"){msp=!!userNotes[p.id]}return ms&&mc&&mcolor&&mq&&msp});f.sort(function(a,b){var ta=0,tb=0;(a.colors||[]).forEach(function(c){ta+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))});(b.colors||[]).forEach(function(c){tb+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))});if(currentSort==="qty-high")return tb-ta;if(currentSort==="qty-low")return ta-tb;if(currentSort==="name-desc")return b.name.localeCompare(a.name);if(currentSort==="newest")return(b.first_seen_import||0)-(a.first_seen_import||0);return a.name.localeCompare(b.name)});products=f;if(f.length===0){document.getElementById("productGrid").innerHTML="";document.getElementById("emptyState").classList.remove("hidden")}else{document.getElementById("emptyState").classList.add("hidden");var h="";var isListView=currentSize==="list";if(groupByStyle){var grouped=groupProductsByStyle(f);grouped.sort(function(a,b){var ta=0,tb=0;a.variants.forEach(function(v){(v.colors||[]).forEach(function(c){ta+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))})});b.variants.forEach(function(v){(v.colors||[]).forEach(function(c){tb+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))})});if(currentSort==="qty-high")return tb-ta;if(currentSort==="qty-low")return ta-tb;if(currentSort==="name-desc")return b.name.localeCompare(a.name);return a.name.localeCompare(b.name)});grouped.forEach(function(grp,idx){var totNow=0,totLts=0;grp.variants.forEach(function(v){(v.colors||[]).forEach(function(c){totNow+=(c.available_now||c.available_qty||0);totLts+=(c.left_to_sell||0)})});var primaryQty=qtyMode==="left_to_sell"?totLts:totNow;var secondaryQty=qtyMode==="left_to_sell"?totNow:totLts;var secondaryLabel=qtyMode==="left_to_sell"?"Now":"LTS";var imgUrl=getImageUrl(grp.variants[0].image_url);var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";var colorCount=grp.variants.length;var variantIds=grp.variants.map(function(v){return v.id}).join(",");var selModeClass=selectionMode?"selection-mode":"";h+="<div class=\\"product-card grouped "+selModeClass+"\\" data-idx=\\""+idx+"\\" data-variants=\\""+variantIds+"\\" onclick=\\"handleGroupClick(\'"+grp.baseStyle+"\',event)\\"><div class=\\"color-count-badge\\">"+colorCount+" colors</div><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+grp.baseStyle+"</div><div class=\\"product-name\\">"+grp.name+"</div><div class=\\"total-row\\"><span>Total</span><span>"+primaryQty.toLocaleString()+"</span></div><div style=\\"font-size:0.75rem;color:#999;text-align:right\\">("+secondaryLabel+": "+secondaryQty.toLocaleString()+")</div></div></div>"});document.getElementById("totalStyles").textContent=grouped.length+" groups"}else{f.forEach(function(pr,idx){var cols=pr.colors||[];var totNow=0,totLts=0;cols.forEach(function(c){totNow+=(c.available_now||c.available_qty||0);totLts+=(c.left_to_sell||0)});var primaryQty=qtyMode==="left_to_sell"?totLts:totNow;var secondaryQty=qtyMode==="left_to_sell"?totNow:totLts;var secondaryLabel=qtyMode==="left_to_sell"?"Now":"LTS";var ch="";if(!isListView){var mx=Math.min(cols.length,3);for(var d=0;d<mx;d++){var cq=qtyMode==="left_to_sell"?(cols[d].left_to_sell||0):(cols[d].available_now||cols[d].available_qty||0);ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+cq.toLocaleString()+"</span></div>"}if(cols.length>3)ch+="<div class=\\"color-row\\" style=\\"color:#999\\">+"+(cols.length-3)+" more</div>"}var listCols="";if(isListView){cols.slice(0,5).forEach(function(c){var cq=qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0);listCols+=c.color_name+": "+cq.toLocaleString()+"; "});if(cols.length>5)listCols+="+"+(cols.length-5)+" more"}var imgUrl=getImageUrl(pr.image_url);var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";var sel=selectedProducts.indexOf(pr.id)!==-1?"selected":"";var selModeClass=selectionMode?"selection-mode":"";var listClass=isListView?"list-view":"";var isPicked=userPicks.indexOf(pr.id)!==-1;var hasNote=!!userNotes[pr.id];h+="<div class=\\"product-card "+sel+" "+selModeClass+" "+listClass+"\\" data-idx=\\""+idx+"\\" onclick=\\"handleCardClick("+pr.id+",event)\\"><div class=\\"select-badge\\">✓</div><div class=\\"pick-badge "+(isPicked?"active":"")+"\\">"+(isPicked?"♥":"♡")+"</div><div class=\\"note-badge "+(hasNote?"has-note":"")+"\\">📝</div><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+pr.style_id+"</div><div class=\\"product-name\\">"+pr.name+"</div>"+(isListView?"<div class=\\"list-colors\\">"+listCols+"</div>":"<div class=\\"color-list\\">"+ch+"</div>")+"<div class=\\"total-row\\"><span>Total</span><span>"+primaryQty.toLocaleString()+"</span></div><div style=\\"font-size:0.75rem;color:#999;text-align:right\\">("+secondaryLabel+": "+secondaryQty.toLocaleString()+")</div></div></div>"});document.getElementById("totalStyles").textContent=f.length}document.getElementById("productGrid").innerHTML=h}var tu=0;f.forEach(function(p){(p.colors||[]).forEach(function(c){tu+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))})});document.getElementById("totalUnits").textContent=tu.toLocaleString();focusedIndex=-1}';
+    html += 'function renderProducts(){var s=document.getElementById("searchInput").value.toLowerCase().trim();var searchWords=s?s.split(/\\s+/):[];var minQ=parseInt(document.getElementById("minQty").value)||1;var maxQ=parseInt(document.getElementById("maxQty").value)||999999999;var f=allProducts.filter(function(p){var searchText=p.style_id.toLowerCase()+" "+p.name.toLowerCase()+" "+(p.ai_tags||"").toLowerCase();var ms=searchWords.length===0||searchWords.every(function(word){return searchText.indexOf(word)!==-1});var mc=currentFilter==="all"||p.category===currentFilter;var colorNames=(p.colors||[]).map(function(c){return c.color_name});var mcolor=!colorFilter||colorNames.indexOf(colorFilter)!==-1;var tot=0;(p.colors||[]).forEach(function(c){tot+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))});var mq=tot>=minQ&&tot<=maxQ;var msp=true;if(specialFilter==="new"){msp=p.first_seen_import===lastImportId}else if(specialFilter==="picks"){msp=userPicks.indexOf(p.id)!==-1}else if(specialFilter==="notes"){msp=!!userNotes[p.id]}return ms&&mc&&mcolor&&mq&&msp});f.sort(function(a,b){var ta=0,tb=0;(a.colors||[]).forEach(function(c){ta+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))});(b.colors||[]).forEach(function(c){tb+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))});if(currentSort==="qty-high")return tb-ta;if(currentSort==="qty-low")return ta-tb;if(currentSort==="name-desc")return b.name.localeCompare(a.name);if(currentSort==="newest")return(b.first_seen_import||0)-(a.first_seen_import||0);return a.name.localeCompare(b.name)});products=f;if(f.length===0){document.getElementById("productGrid").innerHTML="";document.getElementById("emptyState").classList.remove("hidden")}else{document.getElementById("emptyState").classList.add("hidden");var h="";var isListView=currentSize==="list";if(groupByStyle){var grouped=groupProductsByStyle(f);grouped.sort(function(a,b){var ta=0,tb=0;a.variants.forEach(function(v){(v.colors||[]).forEach(function(c){ta+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))})});b.variants.forEach(function(v){(v.colors||[]).forEach(function(c){tb+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))})});if(currentSort==="qty-high")return tb-ta;if(currentSort==="qty-low")return ta-tb;if(currentSort==="name-desc")return b.name.localeCompare(a.name);return a.name.localeCompare(b.name)});grouped.forEach(function(grp,idx){var totNow=0,totLts=0;grp.variants.forEach(function(v){(v.colors||[]).forEach(function(c){totNow+=(c.available_now||c.available_qty||0);totLts+=(c.left_to_sell||0)})});var primaryQty=qtyMode==="left_to_sell"?totLts:totNow;var secondaryQty=qtyMode==="left_to_sell"?totNow:totLts;var secondaryLabel=qtyMode==="left_to_sell"?"Now":"LTS";var imgUrl=getImageUrl(grp.variants[0].image_url);var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";var colorCount=grp.variants.length;var variantIds=grp.variants.map(function(v){return v.id}).join(",");var selModeClass=selectionMode?"selection-mode":"";h+="<div class=\\"product-card grouped "+selModeClass+"\\" data-idx=\\""+idx+"\\" data-variants=\\""+variantIds+"\\" onclick=\\"handleGroupClick(\'"+grp.baseStyle+"\',event)\\"><div class=\\"color-count-badge\\">"+colorCount+" colors</div><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+grp.baseStyle+"</div><div class=\\"product-name\\">"+grp.name+"</div><div class=\\"total-row\\"><span>Total</span><span>"+primaryQty.toLocaleString()+"</span></div><div style=\\"font-size:0.75rem;color:#999;text-align:right\\">("+secondaryLabel+": "+secondaryQty.toLocaleString()+")</div></div></div>"});document.getElementById("totalStyles").textContent=grouped.length+" groups"}else{f.forEach(function(pr,idx){var cols=pr.colors||[];var totNow=0,totLts=0;cols.forEach(function(c){totNow+=(c.available_now||c.available_qty||0);totLts+=(c.left_to_sell||0)});var primaryQty=qtyMode==="left_to_sell"?totLts:totNow;var secondaryQty=qtyMode==="left_to_sell"?totNow:totLts;var secondaryLabel=qtyMode==="left_to_sell"?"Now":"LTS";var ch="";if(!isListView){var mx=Math.min(cols.length,3);for(var d=0;d<mx;d++){var cq=qtyMode==="left_to_sell"?(cols[d].left_to_sell||0):(cols[d].available_now||cols[d].available_qty||0);ch+="<div class=\\"color-row\\"><span>"+cols[d].color_name+"</span><span>"+cq.toLocaleString()+"</span></div>"}if(cols.length>3)ch+="<div class=\\"color-row\\" style=\\"color:#999\\">+"+(cols.length-3)+" more</div>"}var listCols="";if(isListView){cols.slice(0,5).forEach(function(c){var cq=qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0);listCols+=c.color_name+": "+cq.toLocaleString()+"; "});if(cols.length>5)listCols+="+"+(cols.length-5)+" more"}var imgUrl=getImageUrl(pr.image_url);var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";var sel=selectedProducts.indexOf(pr.id)!==-1?"selected":"";var selModeClass=selectionMode?"selection-mode":"";var listClass=isListView?"list-view":"";var isPicked=userPicks.indexOf(pr.id)!==-1;var hasNote=!!userNotes[pr.id];h+="<div class=\\"product-card "+sel+" "+selModeClass+" "+listClass+"\\" data-idx=\\""+idx+"\\" onclick=\\"handleCardClick("+pr.id+",event)\\"><div class=\\"select-badge\\">✓</div><div class=\\"pick-badge "+(isPicked?"active":"")+"\\">"+(isPicked?"♥":"♡")+"</div><div class=\\"note-badge "+(hasNote?"has-note":"")+"\\">📝</div><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-style\\">"+pr.style_id+"</div><div class=\\"product-name\\">"+pr.name+"</div>"+(isListView?"<div class=\\"list-colors\\">"+listCols+"</div>":"<div class=\\"color-list\\">"+ch+"</div>")+"<div class=\\"total-row\\"><span>Total</span><span>"+primaryQty.toLocaleString()+"</span></div><div style=\\"font-size:0.75rem;color:#999;text-align:right\\">("+secondaryLabel+": "+secondaryQty.toLocaleString()+")</div></div></div>"});document.getElementById("totalStyles").textContent=f.length}document.getElementById("productGrid").innerHTML=h}var tu=0;f.forEach(function(p){(p.colors||[]).forEach(function(c){tu+=(qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0))})});document.getElementById("totalUnits").textContent=tu.toLocaleString();focusedIndex=-1}';
     
     // Handle click on grouped card - show group modal
     html += 'function handleGroupClick(baseStyle,e){if(e.target.classList.contains("pick-badge"))return;var variants=allProducts.filter(function(p){return p.style_id.split("-")[0]===baseStyle});showGroupModal(baseStyle,variants)}';
@@ -1363,7 +1430,62 @@ function getHTML() {
     return html;
 }
 
+// Background job to refresh sales history cache
+async function refreshSalesHistoryCache() {
+    console.log('Starting sales history cache refresh...');
+    try {
+        // Get unique base styles from products
+        var stylesResult = await pool.query('SELECT DISTINCT split_part(style_id, \'-\', 1) as base_style FROM products');
+        var baseStyles = stylesResult.rows.map(function(r) { return r.base_style; }).filter(function(s) { return s; });
+        
+        console.log('Found', baseStyles.length, 'unique base styles to cache');
+        
+        // Check which ones need refresh (older than 1 hour or missing)
+        var staleResult = await pool.query(
+            'SELECT base_style FROM sales_history_cache WHERE updated_at > NOW() - INTERVAL \'1 hour\''
+        );
+        var freshStyles = {};
+        staleResult.rows.forEach(function(r) { freshStyles[r.base_style] = true; });
+        
+        var stylesToRefresh = baseStyles.filter(function(s) { return !freshStyles[s]; });
+        console.log(stylesToRefresh.length, 'styles need refresh');
+        
+        // Limit to 50 per run to avoid API rate limits
+        var batch = stylesToRefresh.slice(0, 50);
+        var refreshed = 0;
+        
+        for (var i = 0; i < batch.length; i++) {
+            try {
+                // Small delay between requests
+                if (i > 0) await new Promise(function(r) { setTimeout(r, 1000); });
+                
+                // Trigger the sales history endpoint internally
+                var response = await fetch('http://localhost:' + PORT + '/api/sales-history/' + encodeURIComponent(batch[i]), {
+                    headers: { 'Cookie': 'connect.sid=background' }
+                });
+                if (response.ok) refreshed++;
+            } catch (err) {
+                console.error('Cache refresh error for', batch[i], err.message);
+            }
+        }
+        
+        console.log('Sales history cache refresh complete:', refreshed, '/', batch.length, 'styles updated');
+    } catch (err) {
+        console.error('Sales history cache refresh error:', err.message);
+    }
+}
+
+// Start background cache refresh every hour
+function startSalesHistoryCacheJob() {
+    console.log('Starting sales history cache job (every hour)');
+    // Run immediately on startup after a delay
+    setTimeout(function() { refreshSalesHistoryCache(); }, 30000);
+    // Then every hour
+    setInterval(function() { refreshSalesHistoryCache(); }, 60 * 60 * 1000);
+}
+
 initDB().then(function() {
     app.listen(PORT, function() { console.log("Product Catalog running on port " + PORT); });
     setTimeout(function() { startTokenRefreshJob(); }, 5000);
+    setTimeout(function() { startSalesHistoryCacheJob(); }, 10000);
 });

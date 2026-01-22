@@ -422,6 +422,17 @@ app.get('/api/debug/po-test/:styleId', requireAuth, async function(req, res) {
     }
 });
 
+// Clear sales history cache (to force re-fetch with updated logic)
+app.delete('/api/sales-history-cache', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        var result = await pool.query('DELETE FROM sales_history_cache');
+        console.log('Sales history cache cleared');
+        res.json({ success: true, message: 'Cache cleared. ' + result.rowCount + ' entries deleted.' });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
 app.post('/api/zoho/test', requireAuth, requireAdmin, async function(req, res) {
     try {
         if (!zohoAccessToken) { var tokenResult = await refreshZohoToken(); if (!tokenResult.success) return res.json({ success: false, error: tokenResult.error }); }

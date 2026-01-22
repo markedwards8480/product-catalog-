@@ -674,6 +674,134 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
             }
         }
         
+        // Search Purchase Orders (incoming inventory)
+        debugInfo.poSearches = [];
+        for (var pt = 0; pt < searchTerms.length; pt++) {
+            var poSearchTerm = searchTerms[pt];
+            try {
+                // Strategy 1: item_name_contains
+                var poUrl = 'https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&item_name_contains=' + encodeURIComponent(poSearchTerm);
+                debugInfo.poSearches.push({ term: poSearchTerm, strategy: 'item_name_contains' });
+                var poData = await zohoApiCall(poUrl, 'po-item-' + poSearchTerm);
+                
+                if (poData && poData.purchaseorders && poData.purchaseorders.length > 0) {
+                    console.log('Found', poData.purchaseorders.length, 'purchase orders for', poSearchTerm);
+                    
+                    for (var pi = 0; pi < poData.purchaseorders.length; pi++) {
+                        var po = poData.purchaseorders[pi];
+                        if (seenIds['po-' + po.purchaseorder_id]) continue;
+                        seenIds['po-' + po.purchaseorder_id] = true;
+                        
+                        var poDetailUrl = 'https://www.zohoapis.com/books/v3/purchaseorders/' + po.purchaseorder_id + '?organization_id=' + orgId;
+                        var poDetailData = await zohoApiCall(poDetailUrl, 'po-detail-' + po.purchaseorder_id);
+                        
+                        if (poDetailData && poDetailData.purchaseorder && poDetailData.purchaseorder.line_items) {
+                            var poTotalQty = 0;
+                            var poTotalAmount = 0;
+                            var poMatchingItems = [];
+                            
+                            for (var pj = 0; pj < poDetailData.purchaseorder.line_items.length; pj++) {
+                                var poItem = poDetailData.purchaseorder.line_items[pj];
+                                var poItemName = (poItem.name || poItem.item_name || '').toUpperCase();
+                                var poItemSku = (poItem.sku || '').toUpperCase();
+                                var poSearchStyleUpper = styleId.toUpperCase();
+                                var poBaseStyleUpper = baseStyle.toUpperCase();
+                                
+                                if (poItemName.indexOf(poSearchStyleUpper) !== -1 || poItemSku.indexOf(poSearchStyleUpper) !== -1 ||
+                                    poItemName.indexOf(poBaseStyleUpper) !== -1 || poItemSku.indexOf(poBaseStyleUpper) !== -1) {
+                                    poTotalQty += poItem.quantity || 0;
+                                    poTotalAmount += poItem.item_total || 0;
+                                    poMatchingItems.push({
+                                        name: poItem.name || poItem.item_name,
+                                        quantity: poItem.quantity,
+                                        rate: poItem.rate,
+                                        amount: poItem.item_total
+                                    });
+                                }
+                            }
+                            
+                            if (poTotalQty > 0) {
+                                results.push({
+                                    type: 'purchaseorder',
+                                    documentNumber: po.purchaseorder_number,
+                                    date: po.date,
+                                    customerName: po.vendor_name,
+                                    status: po.status,
+                                    quantity: poTotalQty,
+                                    amount: poTotalAmount,
+                                    total: po.total,
+                                    items: poMatchingItems,
+                                    isOpen: po.status === 'open' || po.status === 'draft' || po.status === 'issued'
+                                });
+                            }
+                        }
+                    }
+                }
+                
+                // Strategy 2: search_text
+                var poSearchUrl = 'https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&search_text=' + encodeURIComponent(poSearchTerm);
+                debugInfo.poSearches.push({ term: poSearchTerm, strategy: 'search_text' });
+                var poSearchData = await zohoApiCall(poSearchUrl, 'po-search-' + poSearchTerm);
+                
+                if (poSearchData && poSearchData.purchaseorders && poSearchData.purchaseorders.length > 0) {
+                    console.log('Search found', poSearchData.purchaseorders.length, 'purchase orders for', poSearchTerm);
+                    
+                    for (var pi2 = 0; pi2 < poSearchData.purchaseorders.length; pi2++) {
+                        var po2 = poSearchData.purchaseorders[pi2];
+                        if (seenIds['po-' + po2.purchaseorder_id]) continue;
+                        seenIds['po-' + po2.purchaseorder_id] = true;
+                        
+                        var poDetailUrl2 = 'https://www.zohoapis.com/books/v3/purchaseorders/' + po2.purchaseorder_id + '?organization_id=' + orgId;
+                        var poDetailData2 = await zohoApiCall(poDetailUrl2, 'po-detail2-' + po2.purchaseorder_id);
+                        
+                        if (poDetailData2 && poDetailData2.purchaseorder && poDetailData2.purchaseorder.line_items) {
+                            var poTotalQty2 = 0;
+                            var poTotalAmount2 = 0;
+                            var poMatchingItems2 = [];
+                            
+                            for (var pj2 = 0; pj2 < poDetailData2.purchaseorder.line_items.length; pj2++) {
+                                var poItem2 = poDetailData2.purchaseorder.line_items[pj2];
+                                var poItemName2 = (poItem2.name || poItem2.item_name || '').toUpperCase();
+                                var poItemSku2 = (poItem2.sku || '').toUpperCase();
+                                var poSearchStyleUpper2 = styleId.toUpperCase();
+                                var poBaseStyleUpper2 = baseStyle.toUpperCase();
+                                
+                                if (poItemName2.indexOf(poSearchStyleUpper2) !== -1 || poItemSku2.indexOf(poSearchStyleUpper2) !== -1 ||
+                                    poItemName2.indexOf(poBaseStyleUpper2) !== -1 || poItemSku2.indexOf(poBaseStyleUpper2) !== -1) {
+                                    poTotalQty2 += poItem2.quantity || 0;
+                                    poTotalAmount2 += poItem2.item_total || 0;
+                                    poMatchingItems2.push({
+                                        name: poItem2.name || poItem2.item_name,
+                                        quantity: poItem2.quantity,
+                                        rate: poItem2.rate,
+                                        amount: poItem2.item_total
+                                    });
+                                }
+                            }
+                            
+                            if (poTotalQty2 > 0) {
+                                results.push({
+                                    type: 'purchaseorder',
+                                    documentNumber: po2.purchaseorder_number,
+                                    date: po2.date,
+                                    customerName: po2.vendor_name,
+                                    status: po2.status,
+                                    quantity: poTotalQty2,
+                                    amount: poTotalAmount2,
+                                    total: po2.total,
+                                    items: poMatchingItems2,
+                                    isOpen: po2.status === 'open' || po2.status === 'draft' || po2.status === 'issued'
+                                });
+                            }
+                        }
+                    }
+                }
+            } catch (poErr) {
+                console.error('Purchase order search error:', poErr.message);
+                debugInfo.errors.push({ type: 'purchaseorder', term: poSearchTerm, error: poErr.message });
+            }
+        }
+        
         // Sort by date descending
         results.sort(function(a, b) {
             return new Date(b.date) - new Date(a.date);
@@ -684,14 +812,21 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
         var totalInvoicedDollars = 0;
         var totalOpenOrdersQty = 0;
         var totalOpenOrdersDollars = 0;
+        var totalPOQty = 0;
+        var totalPODollars = 0;
         var invoiceCount = 0;
         var openOrderCount = 0;
+        var poCount = 0;
         
         for (var n = 0; n < results.length; n++) {
             if (results[n].type === 'invoice') {
                 totalInvoicedQty += results[n].quantity;
                 totalInvoicedDollars += results[n].amount || 0;
                 invoiceCount++;
+            } else if (results[n].type === 'purchaseorder') {
+                totalPOQty += results[n].quantity;
+                totalPODollars += results[n].amount || 0;
+                poCount++;
             } else if (results[n].isOpen) {
                 totalOpenOrdersQty += results[n].quantity;
                 totalOpenOrdersDollars += results[n].amount || 0;
@@ -710,7 +845,10 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
                 invoiceCount: invoiceCount,
                 totalOpenOrders: totalOpenOrdersQty,
                 totalOpenOrdersDollars: totalOpenOrdersDollars,
-                openOrderCount: openOrderCount
+                openOrderCount: openOrderCount,
+                totalPO: totalPOQty,
+                totalPODollars: totalPODollars,
+                poCount: poCount
             },
             history: results,
             debug: debugInfo
@@ -980,7 +1118,7 @@ function getHTML() {
     html += '.product-image{height:220px;background:#f8f8f8;display:flex;align-items:center;justify-content:center;overflow:hidden}.product-image img{max-width:100%;max-height:100%;object-fit:contain}';
     html += '.product-info{padding:1rem}.product-style{font-size:0.75rem;color:#666;text-transform:uppercase}.product-name{font-size:1.1rem;font-weight:600;margin:0.25rem 0}.color-list{margin-top:0.75rem}.color-row{display:flex;justify-content:space-between;padding:0.25rem 0;font-size:0.875rem}.total-row{margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid #eee;font-weight:bold;display:flex;justify-content:space-between}';
     html += '.empty{text-align:center;padding:3rem;color:#666}';
-    html += '.modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:none;align-items:center;justify-content:center;z-index:1000}.modal.active{display:flex}.modal-content{background:white;border-radius:8px;max-width:95vw;width:1400px;max-height:95vh;overflow:auto;position:relative}.modal-body{display:flex;min-height:700px}.modal-image{width:65%;background:#f0f0f0;min-height:700px;display:flex;align-items:center;justify-content:center;padding:1.5rem}.modal-image img{max-width:100%;max-height:800px;object-fit:contain}.modal-details{width:35%;padding:2rem}.modal-close{position:absolute;top:1rem;right:1rem;background:white;border:none;font-size:1.5rem;cursor:pointer;border-radius:50%;width:36px;height:36px}';
+    html += '.modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:none;align-items:center;justify-content:center;z-index:1000}.modal.active{display:flex}.modal-content{background:white;border-radius:8px;max-width:98vw;width:1600px;max-height:98vh;overflow:auto;position:relative}.modal-body{display:flex;min-height:850px}.modal-image{width:60%;background:#f0f0f0;min-height:850px;display:flex;align-items:center;justify-content:center;padding:2rem}.modal-image img{max-width:100%;max-height:900px;object-fit:contain}.modal-details{width:40%;padding:2rem;overflow-y:auto;max-height:850px}.modal-close{position:absolute;top:1rem;right:1rem;background:white;border:none;font-size:1.5rem;cursor:pointer;border-radius:50%;width:36px;height:36px;z-index:10}';
     html += '.modal-actions{margin-top:1.5rem;padding-top:1rem;border-top:1px solid #eee;display:flex;gap:0.5rem;flex-wrap:wrap}';
     html += '.note-section{margin-top:1rem;padding-top:1rem;border-top:1px solid #eee}.note-section textarea{width:100%;height:80px;margin-top:0.5rem;padding:0.5rem;border:1px solid #ddd;border-radius:4px;font-family:inherit;resize:vertical}';
     html += '.compare-modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:none;align-items:center;justify-content:center;z-index:1001}.compare-modal.active{display:flex}.compare-content{background:white;border-radius:8px;max-width:95vw;width:1000px;max-height:95vh;overflow:auto;padding:2rem}.compare-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1.5rem}.compare-item{text-align:center}.compare-item img{max-width:100%;max-height:250px;object-fit:contain;margin-bottom:1rem}.compare-item h3{font-size:1rem;margin-bottom:0.5rem}.compare-colors{font-size:0.875rem;text-align:left}';
@@ -1136,7 +1274,7 @@ function getHTML() {
     
     html += 'function showProductModal(id){currentModalProductId=id;var pr=products.find(function(p){return p.id===id});if(!pr)return;var imgUrl=getImageUrl(pr.image_url);document.getElementById("modalImage").src=imgUrl||"";document.getElementById("modalStyle").textContent=pr.style_id;document.getElementById("modalName").textContent=pr.name;document.getElementById("modalCategory").textContent=pr.category||"";var cols=pr.colors||[];var totNow=0,totLts=0;cols.forEach(function(c){var aNow=c.available_now||c.available_qty||0;var lts=c.left_to_sell||0;totNow+=aNow;totLts+=lts});var ch="";if(cols.length>1){ch="<table style=\\"width:100%;border-collapse:collapse;font-size:0.875rem\\"><thead><tr style=\\"border-bottom:1px solid #ddd\\"><th style=\\"text-align:left;padding:0.5rem 0;font-weight:600;color:#666\\">Color</th><th style=\\"text-align:right;padding:0.5rem 0;font-weight:600;color:#666;width:80px\\">Avail Now</th><th style=\\"text-align:right;padding:0.5rem 0;font-weight:600;color:#666;width:80px\\">Left to Sell</th></tr></thead><tbody>";cols.forEach(function(c){var aNow=c.available_now||c.available_qty||0;var lts=c.left_to_sell||0;ch+="<tr><td style=\\"padding:0.4rem 0\\">"+c.color_name+"</td><td style=\\"text-align:right;padding:0.4rem 0\\">"+aNow.toLocaleString()+"</td><td style=\\"text-align:right;padding:0.4rem 0;color:#666\\">"+lts.toLocaleString()+"</td></tr>"});ch+="</tbody></table>"}document.getElementById("modalColors").innerHTML=ch;document.getElementById("modalTotal").innerHTML="<span style=\\"margin-right:2rem\\">📦 Now: "+totNow.toLocaleString()+"</span><span>📊 LTS: "+totLts.toLocaleString()+"</span>";document.getElementById("modalNote").value=userNotes[id]||"";document.getElementById("modalPickBtn").style.display="";document.getElementById("modalCompareBtn").style.display="";var isPicked=userPicks.indexOf(id)!==-1;document.getElementById("modalPickBtn").textContent=isPicked?"♥ In My Picks":"♡ Add to My Picks";document.getElementById("modal").classList.add("active");loadSalesHistory(pr.style_id)}';
     
-    html += 'function loadSalesHistory(styleId){document.getElementById("salesHistoryLoading").textContent="(loading...)";document.getElementById("salesHistorySummary").innerHTML="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#666;padding:0.5rem\\">Loading sales history...</div>";fetch("/api/sales-history/"+encodeURIComponent(styleId)).then(function(r){return r.json()}).then(function(d){document.getElementById("salesHistoryLoading").textContent="";if(!d.success){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">Unable to load sales history"+(d.error?": "+d.error:"")+"</div>";return}var sum=d.summary;var invDollars=sum.totalInvoicedDollars?"$"+sum.totalInvoicedDollars.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"";var openDollars=sum.totalOpenOrdersDollars?"$"+sum.totalOpenOrdersDollars.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"";document.getElementById("salesHistorySummary").innerHTML="<div style=\\"padding:0.5rem 0.75rem;background:#e8f5e9;border-radius:4px\\"><div style=\\"font-weight:bold;color:#2e7d32\\">"+sum.totalInvoiced.toLocaleString()+"</div><div style=\\"font-size:0.75rem;color:#666\\">Units Invoiced ("+sum.invoiceCount+" orders)</div>"+(invDollars?"<div style=\\"font-size:0.8rem;color:#2e7d32;margin-top:0.25rem\\">"+invDollars+"</div>":"")+"</div><div style=\\"padding:0.5rem 0.75rem;background:#fff3e0;border-radius:4px\\"><div style=\\"font-weight:bold;color:#ef6c00\\">"+sum.totalOpenOrders.toLocaleString()+"</div><div style=\\"font-size:0.75rem;color:#666\\">Open Orders ("+sum.openOrderCount+")</div>"+(openDollars?"<div style=\\"font-size:0.8rem;color:#ef6c00;margin-top:0.25rem\\">"+openDollars+"</div>":"")+"</div>";if(d.history.length===0){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">No sales history found for this style</div>";return}var h="<table style=\\"width:100%;border-collapse:collapse;font-size:0.8rem\\"><thead><tr style=\\"background:#f5f5f5\\"><th style=\\"text-align:left;padding:0.4rem\\">Date</th><th style=\\"text-align:left;padding:0.4rem\\">Customer</th><th style=\\"text-align:left;padding:0.4rem\\">Type</th><th style=\\"text-align:right;padding:0.4rem\\">Qty</th><th style=\\"text-align:right;padding:0.4rem\\">Amount</th></tr></thead><tbody>";d.history.forEach(function(rec){var typeLabel=rec.type==="invoice"?"<span style=\\"color:#2e7d32\\">INV "+rec.documentNumber+"</span>":"<span style=\\"color:#ef6c00\\">SO "+rec.documentNumber+(rec.isOpen?" (Open)":"")+"</span>";var dt=new Date(rec.date).toLocaleDateString();var amt=rec.amount?"$"+rec.amount.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"-";h+="<tr style=\\"border-bottom:1px solid #eee\\"><td style=\\"padding:0.4rem\\">"+dt+"</td><td style=\\"padding:0.4rem\\">"+rec.customerName+"</td><td style=\\"padding:0.4rem\\">"+typeLabel+"</td><td style=\\"padding:0.4rem;text-align:right\\">"+rec.quantity.toLocaleString()+"</td><td style=\\"padding:0.4rem;text-align:right\\">"+amt+"</td></tr>"});h+="</tbody></table>";document.getElementById("salesHistoryList").innerHTML=h}).catch(function(err){document.getElementById("salesHistoryLoading").textContent="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">Error loading sales history: "+err.message+"</div>"})}';    
+    html += 'function loadSalesHistory(styleId){document.getElementById("salesHistoryLoading").textContent="(loading...)";document.getElementById("salesHistorySummary").innerHTML="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#666;padding:0.5rem\\">Loading sales history...</div>";fetch("/api/sales-history/"+encodeURIComponent(styleId)).then(function(r){return r.json()}).then(function(d){document.getElementById("salesHistoryLoading").textContent="";if(!d.success){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">Unable to load sales history"+(d.error?": "+d.error:"")+"</div>";return}var sum=d.summary;var invDollars=sum.totalInvoicedDollars?"$"+sum.totalInvoicedDollars.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"";var openDollars=sum.totalOpenOrdersDollars?"$"+sum.totalOpenOrdersDollars.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"";var poDollars=sum.totalPODollars?"$"+sum.totalPODollars.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"";document.getElementById("salesHistorySummary").innerHTML="<div style=\\"padding:0.5rem 0.75rem;background:#e8f5e9;border-radius:4px\\"><div style=\\"font-weight:bold;color:#2e7d32\\">"+sum.totalInvoiced.toLocaleString()+"</div><div style=\\"font-size:0.75rem;color:#666\\">Units Invoiced ("+sum.invoiceCount+")</div>"+(invDollars?"<div style=\\"font-size:0.8rem;color:#2e7d32;margin-top:0.25rem\\">"+invDollars+"</div>":"")+"</div><div style=\\"padding:0.5rem 0.75rem;background:#fff3e0;border-radius:4px\\"><div style=\\"font-weight:bold;color:#ef6c00\\">"+sum.totalOpenOrders.toLocaleString()+"</div><div style=\\"font-size:0.75rem;color:#666\\">Open SO ("+sum.openOrderCount+")</div>"+(openDollars?"<div style=\\"font-size:0.8rem;color:#ef6c00;margin-top:0.25rem\\">"+openDollars+"</div>":"")+"</div><div style=\\"padding:0.5rem 0.75rem;background:#e3f2fd;border-radius:4px\\"><div style=\\"font-weight:bold;color:#1565c0\\">"+(sum.totalPO||0).toLocaleString()+"</div><div style=\\"font-size:0.75rem;color:#666\\">Import PO ("+(sum.poCount||0)+")</div>"+(poDollars?"<div style=\\"font-size:0.8rem;color:#1565c0;margin-top:0.25rem\\">"+poDollars+"</div>":"")+"</div>";if(d.history.length===0){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">No sales history found for this style</div>";return}var h="<table style=\\"width:100%;border-collapse:collapse;font-size:0.8rem\\"><thead><tr style=\\"background:#f5f5f5\\"><th style=\\"text-align:left;padding:0.4rem\\">Date</th><th style=\\"text-align:left;padding:0.4rem\\">Vendor/Customer</th><th style=\\"text-align:left;padding:0.4rem\\">Type</th><th style=\\"text-align:right;padding:0.4rem\\">Qty</th><th style=\\"text-align:right;padding:0.4rem\\">Amount</th></tr></thead><tbody>";d.history.forEach(function(rec){var typeLabel;if(rec.type==="invoice"){typeLabel="<span style=\\"color:#2e7d32\\">INV "+rec.documentNumber+"</span>"}else if(rec.type==="purchaseorder"){typeLabel="<span style=\\"color:#1565c0\\">PO "+rec.documentNumber+(rec.isOpen?" (Open)":"")+"</span>"}else{typeLabel="<span style=\\"color:#ef6c00\\">SO "+rec.documentNumber+(rec.isOpen?" (Open)":"")+"</span>"}var dt=new Date(rec.date).toLocaleDateString();var amt=rec.amount?"$"+rec.amount.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"-";h+="<tr style=\\"border-bottom:1px solid #eee\\"><td style=\\"padding:0.4rem\\">"+dt+"</td><td style=\\"padding:0.4rem\\">"+rec.customerName+"</td><td style=\\"padding:0.4rem\\">"+typeLabel+"</td><td style=\\"padding:0.4rem;text-align:right\\">"+rec.quantity.toLocaleString()+"</td><td style=\\"padding:0.4rem;text-align:right\\">"+amt+"</td></tr>"});h+="</tbody></table>";document.getElementById("salesHistoryList").innerHTML=h}).catch(function(err){document.getElementById("salesHistoryLoading").textContent="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">Error loading sales history: "+err.message+"</div>"})}';
     html += 'function updateSelectionUI(){document.getElementById("selectedCount").textContent=selectedProducts.length;var bar=document.getElementById("selectionBar");if(selectedProducts.length>0&&selectionMode){bar.classList.add("visible")}else{bar.classList.remove("visible")}}';
     
     // Helper to group products by base style

@@ -664,9 +664,19 @@ app.get('/api/sales-search', requireAuth, async function(req, res) {
         if (customer) {
             // Clean up customer name - remove special chars that might cause issues
             var cleanCustomer = customer.replace(/[\/\\'"]/g, '%');
-            conditions.push('LOWER(customer_vendor) LIKE LOWER($' + paramIndex + ')');
-            params.push('%' + cleanCustomer + '%');
-            paramIndex++;
+            // Also try just the first word if it's a multi-word name
+            var firstWord = customer.split(/[\s,\/\\]+/)[0];
+            if (firstWord.length >= 3 && firstWord !== cleanCustomer) {
+                // Search for either the full name OR just the first word
+                conditions.push('(LOWER(customer_vendor) LIKE LOWER($' + paramIndex + ') OR LOWER(customer_vendor) LIKE LOWER($' + (paramIndex + 1) + '))');
+                params.push('%' + cleanCustomer + '%');
+                params.push('%' + firstWord + '%');
+                paramIndex += 2;
+            } else {
+                conditions.push('LOWER(customer_vendor) LIKE LOWER($' + paramIndex + ')');
+                params.push('%' + cleanCustomer + '%');
+                paramIndex++;
+            }
         }
         
         if (style) {

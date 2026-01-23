@@ -51,6 +51,8 @@ async function initDB() {
         await pool.query('CREATE TABLE IF NOT EXISTS sales_data (id SERIAL PRIMARY KEY, document_type VARCHAR(50), document_number VARCHAR(100), doc_date DATE, customer_vendor VARCHAR(255), line_item_sku VARCHAR(255), base_style VARCHAR(100), status VARCHAR(50), quantity DECIMAL(12,2), amount DECIMAL(12,2), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         await pool.query('CREATE INDEX IF NOT EXISTS idx_sales_data_base_style ON sales_data(base_style)');
         await pool.query('CREATE INDEX IF NOT EXISTS idx_sales_data_document_type ON sales_data(document_type)');
+        // Unique constraint for upsert functionality
+        try { await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_data_unique ON sales_data(document_number, line_item_sku)'); } catch (e) { console.log('Unique index may already exist'); }
         
         // Add columns if they don't exist (for existing databases)
         try { await pool.query('ALTER TABLE selections ADD COLUMN IF NOT EXISTS share_type VARCHAR(50) DEFAULT \'link\''); } catch (e) {}
@@ -1484,16 +1486,20 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
             return res.json({ success: false, error: 'Missing required columns: document_type, document_number' });
         }
         
-        // Create unique constraint if it doesn't exist (for upsert)
-        try {
-            await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_data_unique ON sales_data(document_number, line_item_sku)');
-        } catch (e) { /* index may already exist */ }
+        // Load existing document_number + line_item_sku combos to skip duplicates
+        console.log('Loading existing records to check for duplicates...');
+        var existingResult = await pool.query('SELECT document_number, line_item_sku FROM sales_data');
+        var existingKeys = new Set();
+        existingResult.rows.forEach(function(row) {
+            existingKeys.add(row.document_number + '|' + row.line_item_sku);
+        });
+        console.log('Found', existingKeys.size, 'existing records');
         
-        // NO DELETE - we append/update instead of replacing
-        // This preserves historical data when uploading new files
+        // NO DELETE - we append instead of replacing
+        // Skip records that already exist
         
         var imported = 0;
-        var updated = 0;
+        var skipped = 0;
         var errors = 0;
         var batchSize = 500;
         var batch = [];
@@ -1527,21 +1533,28 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
                 var baseStyle = style ? style.split('-')[0] : (sku ? sku.split('-')[0] : '');
                 
                 if (docType && docNum && baseStyle) {
-                    batch.push([docType, docNum, docDate, customer, sku, baseStyle, status, qty, amt]);
+                    // Check if this record already exists
+                    var key = docNum + '|' + sku;
+                    if (existingKeys.has(key)) {
+                        skipped++;
+                    } else {
+                        batch.push([docType, docNum, docDate, customer, sku, baseStyle, status, qty, amt]);
+                        existingKeys.add(key); // Add to set so we don't duplicate within same file
                     
-                    if (batch.length >= batchSize) {
-                        // Batch insert with upsert (update if exists)
-                        var values = [];
-                        var placeholders = [];
-                        var paramIdx = 1;
-                        for (var b = 0; b < batch.length; b++) {
-                            var item = batch[b];
-                            placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
-                            values = values.concat(item);
+                        if (batch.length >= batchSize) {
+                            // Batch insert
+                            var values = [];
+                            var placeholders = [];
+                            var paramIdx = 1;
+                            for (var b = 0; b < batch.length; b++) {
+                                var item = batch[b];
+                                placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
+                                values = values.concat(item);
+                            }
+                            await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+                            imported += batch.length;
+                            batch = [];
                         }
-                        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(',') + ' ON CONFLICT (document_number, line_item_sku) DO UPDATE SET status = EXCLUDED.status, quantity = EXCLUDED.quantity, amount = EXCLUDED.amount', values);
-                        imported += batch.length;
-                        batch = [];
                     }
                 }
             } catch (rowErr) {
@@ -1560,15 +1573,15 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
                 placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
                 values = values.concat(item);
             }
-            await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(',') + ' ON CONFLICT (document_number, line_item_sku) DO UPDATE SET status = EXCLUDED.status, quantity = EXCLUDED.quantity, amount = EXCLUDED.amount', values);
+            await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
             imported += batch.length;
         }
         
         // Log to sync history
         await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1, $2, $3)', ['sales_import', 'success', imported]);
         
-        console.log('Sales data import complete:', imported, 'records imported,', errors, 'errors');
-        res.json({ success: true, imported: imported, errors: errors });
+        console.log('Sales data import complete:', imported, 'new records imported,', skipped, 'duplicates skipped,', errors, 'errors');
+        res.json({ success: true, imported: imported, skipped: skipped, errors: errors });
     } catch (err) {
         console.error('Sales import error:', err);
         res.status(500).json({ error: err.message });
@@ -1592,6 +1605,21 @@ app.get('/api/sales-stats', requireAuth, async function(req, res) {
             purchaseOrders: parseInt(poResult.rows[0].count),
             uniqueStyles: parseInt(stylesResult.rows[0].count)
         });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
+app.post('/api/sales-data/clear', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        // Drop unique index if exists
+        try { await pool.query('DROP INDEX IF EXISTS idx_sales_data_unique'); } catch (e) {}
+        // Clear all sales data
+        await pool.query('DELETE FROM sales_data');
+        // Recreate unique index
+        await pool.query('CREATE UNIQUE INDEX idx_sales_data_unique ON sales_data(document_number, line_item_sku)');
+        console.log('Sales data cleared and unique index created');
+        res.json({ success: true });
     } catch (err) {
         res.json({ success: false, error: err.message });
     }
@@ -2122,7 +2150,7 @@ function getHTML() {
     html += '<div id="adminPanel" class="admin-panel hidden"><h2>Admin Settings</h2><div class="tabs"><button class="tab active" data-tab="zoho2">Zoho Sync</button><button class="tab" data-tab="import2">Import CSV</button><button class="tab" data-tab="sales2">Import Sales</button><button class="tab" data-tab="ai2">AI Analysis</button><button class="tab" data-tab="users2">Users</button><button class="tab" data-tab="system2">System Health</button></div>';
     html += '<div id="zoho2Tab" class="tab-content active"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="zohoStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Workspace ID: </span><span class="status-value" id="zohoWorkspaceId">-</span></div><div class="status-item"><span class="status-label">View ID: </span><span class="status-value" id="zohoViewId">-</span></div></div><div style="display:flex;gap:1rem"><button class="btn btn-secondary" id="testZohoBtn">Test Connection</button><button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div><div id="zohoMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="import2Tab" class="tab-content"><div class="upload-area"><input type="file" id="csvFile" accept=".csv"><label for="csvFile">Click to upload CSV file</label></div><div id="importStatus"></div><button class="btn btn-danger" id="clearBtn" style="margin-top:1rem">Clear All Products</button></div>';
-    html += '<div id="sales2Tab" class="tab-content"><p style="margin-bottom:1rem;color:#666">Import sales data (Sales Orders and Purchase Orders) from the PO-SO Query CSV export.</p><div class="upload-area"><input type="file" id="salesCsvFile" accept=".csv"><label for="salesCsvFile">Click to upload Sales CSV file</label></div><div id="salesImportStatus"></div><div id="salesDataStats" style="margin-top:1rem"></div></div>';
+    html += '<div id="sales2Tab" class="tab-content"><p style="margin-bottom:1rem;color:#666">Import sales data (Sales Orders and Purchase Orders) from the PO-SO Query CSV export.</p><div class="upload-area"><input type="file" id="salesCsvFile" accept=".csv"><label for="salesCsvFile">Click to upload Sales CSV file</label></div><div id="salesImportStatus"></div><div id="salesDataStats" style="margin-top:1rem"></div><button class="btn btn-danger" id="clearSalesBtn" style="margin-top:1rem">Clear All Sales Data</button><p style="margin-top:0.5rem;font-size:0.75rem;color:#999">Use this to start fresh before uploading historical files.</p></div>';
     html += '<div id="ai2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">API Status: </span><span class="status-value" id="aiStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Products Analyzed: </span><span class="status-value" id="aiAnalyzedCount">-</span></div><div class="status-item"><span class="status-label">Remaining: </span><span class="status-value" id="aiRemainingCount">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">AI analysis uses Claude Vision to generate searchable tags from product images. This enables searching by garment type (cardigan, hoodie), style (casual, formal), pattern (striped, floral), and more.</p><button class="btn btn-primary" id="runAiBtn">Analyze Next 100 Products</button><button class="btn btn-success" id="runAllAiBtn" style="margin-left:0.5rem">Analyze All (Background)</button><button class="btn btn-secondary" id="stopAiBtn" style="margin-left:0.5rem;display:none">Stop</button><div id="aiMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Name</th><th>PIN</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUserName" placeholder="Display Name"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add User</button></div><p style="margin-top:1rem;font-size:0.8rem;color:#666">New users are assigned a random 4-digit PIN. They can change it after logging in.</p></div>';
     html += '<div id="system2Tab" class="tab-content"><div id="systemHealthContent"><p>Loading system health data...</p></div><button class="btn btn-secondary" id="refreshSystemBtn" style="margin-top:1rem">🔄 Refresh</button></div></div>';
@@ -2331,10 +2359,11 @@ function getHTML() {
     html += 'document.getElementById("csvFile").addEventListener("change",function(e){var f=e.target.files[0];if(!f)return;var fd=new FormData();fd.append("file",f);document.getElementById("importStatus").innerHTML="Importing...";fetch("/api/import",{method:"POST",body:fd}).then(function(r){return r.json()}).then(function(d){document.getElementById("importStatus").innerHTML=d.success?"<span class=success>Imported "+d.imported+" products"+(d.newArrivals?" ("+d.newArrivals+" new)":"")+"</span>":"<span class=error>"+d.error+"</span>";loadProducts();loadHistory();loadDataFreshness()})});';
     
     // Sales CSV import handler
-    html += 'document.getElementById("salesCsvFile").addEventListener("change",function(e){var f=e.target.files[0];if(!f)return;var fd=new FormData();fd.append("file",f);document.getElementById("salesImportStatus").innerHTML="<span style=\\"color:#666\\">Importing sales data... This may take a moment for large files.</span>";fetch("/api/import-sales",{method:"POST",body:fd}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("salesImportStatus").innerHTML="<span class=\\"success\\">✓ Imported "+d.imported.toLocaleString()+" sales records"+(d.errors?" ("+d.errors+" errors)":"")+"</span>";loadSalesStats()}else{document.getElementById("salesImportStatus").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}}).catch(function(e){document.getElementById("salesImportStatus").innerHTML="<span class=\\"error\\">Error: "+e.message+"</span>"})});';
+    html += 'document.getElementById("salesCsvFile").addEventListener("change",function(e){var f=e.target.files[0];if(!f)return;var fd=new FormData();fd.append("file",f);document.getElementById("salesImportStatus").innerHTML="<span style=\\"color:#666\\">Importing sales data... This may take a moment for large files.</span>";fetch("/api/import-sales",{method:"POST",body:fd}).then(function(r){return r.json()}).then(function(d){if(d.success){var msg="✓ Imported "+d.imported.toLocaleString()+" new records";if(d.skipped>0)msg+=" ("+d.skipped.toLocaleString()+" duplicates skipped)";if(d.errors)msg+=" ("+d.errors+" errors)";document.getElementById("salesImportStatus").innerHTML="<span class=\\"success\\">"+msg+"</span>";loadSalesStats()}else{document.getElementById("salesImportStatus").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}}).catch(function(e){document.getElementById("salesImportStatus").innerHTML="<span class=\\"error\\">Error: "+e.message+"</span>"})});';
     html += 'function loadSalesStats(){fetch("/api/sales-stats").then(function(r){return r.json()}).then(function(d){if(d.success){var h="<div class=\\"status-box\\"><div class=\\"status-item\\"><span class=\\"status-label\\">Total Records: </span><span class=\\"status-value\\">"+d.totalRecords.toLocaleString()+"</span></div><div class=\\"status-item\\"><span class=\\"status-label\\">Sales Orders: </span><span class=\\"status-value\\">"+d.salesOrders.toLocaleString()+"</span></div><div class=\\"status-item\\"><span class=\\"status-label\\">Purchase Orders: </span><span class=\\"status-value\\">"+d.purchaseOrders.toLocaleString()+"</span></div><div class=\\"status-item\\"><span class=\\"status-label\\">Unique Styles: </span><span class=\\"status-value\\">"+d.uniqueStyles.toLocaleString()+"</span></div></div>";document.getElementById("salesDataStats").innerHTML=h}}).catch(function(){})}';
     
     html += 'document.getElementById("clearBtn").addEventListener("click",function(){if(!confirm("Delete all products?"))return;fetch("/api/products/clear",{method:"POST"}).then(function(){loadProducts()})});';
+    html += 'document.getElementById("clearSalesBtn").addEventListener("click",function(){if(!confirm("Delete ALL sales data? This cannot be undone."))return;fetch("/api/sales-data/clear",{method:"POST"}).then(function(r){return r.json()}).then(function(d){if(d.success){alert("Sales data cleared!");loadSalesStats()}else{alert("Error: "+d.error)}})});';
     
     html += 'function loadUsers(){fetch("/api/users").then(function(r){return r.json()}).then(function(u){var h="";u.forEach(function(x){h+="<tr><td>"+x.display_name+"</td><td><span class=\\"pin-display\\">"+x.pin+"</span></td><td><select onchange=\\"changeUserRole("+x.id+",this.value)\\" "+(x.role==="admin"&&u.filter(function(y){return y.role==="admin"}).length===1?"disabled":"")+">"+"<option value=\\"sales_rep\\""+(x.role==="sales_rep"?" selected":"")+">Sales Rep</option>"+"<option value=\\"admin\\""+(x.role==="admin"?" selected":"")+">Admin</option></select></td><td><button class=\\"btn btn-secondary btn-sm\\" onclick=\\"resetUserPin("+x.id+")\\" style=\\"margin-right:0.5rem\\">Reset PIN</button><button class=\\"btn btn-danger btn-sm\\" onclick=\\"deleteUser("+x.id+")\\">Delete</button></td></tr>"});document.getElementById("usersTable").innerHTML=h})}';
     html += 'function resetUserPin(id){if(!confirm("Generate new random PIN for this user?"))return;fetch("/api/users/"+id+"/reset-pin",{method:"PUT"}).then(function(r){return r.json()}).then(function(d){if(d.success){alert("New PIN: "+d.pin);loadUsers()}})}';

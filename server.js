@@ -1484,10 +1484,16 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
             return res.json({ success: false, error: 'Missing required columns: document_type, document_number' });
         }
         
-        // Clear existing sales data
-        await pool.query('DELETE FROM sales_data');
+        // Create unique constraint if it doesn't exist (for upsert)
+        try {
+            await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_data_unique ON sales_data(document_number, line_item_sku)');
+        } catch (e) { /* index may already exist */ }
+        
+        // NO DELETE - we append/update instead of replacing
+        // This preserves historical data when uploading new files
         
         var imported = 0;
+        var updated = 0;
         var errors = 0;
         var batchSize = 500;
         var batch = [];
@@ -1524,7 +1530,7 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
                     batch.push([docType, docNum, docDate, customer, sku, baseStyle, status, qty, amt]);
                     
                     if (batch.length >= batchSize) {
-                        // Batch insert
+                        // Batch insert with upsert (update if exists)
                         var values = [];
                         var placeholders = [];
                         var paramIdx = 1;
@@ -1533,7 +1539,7 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
                             placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
                             values = values.concat(item);
                         }
-                        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+                        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(',') + ' ON CONFLICT (document_number, line_item_sku) DO UPDATE SET status = EXCLUDED.status, quantity = EXCLUDED.quantity, amount = EXCLUDED.amount', values);
                         imported += batch.length;
                         batch = [];
                     }
@@ -1554,7 +1560,7 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
                 placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
                 values = values.concat(item);
             }
-            await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+            await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(',') + ' ON CONFLICT (document_number, line_item_sku) DO UPDATE SET status = EXCLUDED.status, quantity = EXCLUDED.quantity, amount = EXCLUDED.amount', values);
             imported += batch.length;
         }
         

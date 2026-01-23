@@ -662,8 +662,10 @@ app.get('/api/sales-search', requireAuth, async function(req, res) {
         var paramIndex = 1;
         
         if (customer) {
+            // Clean up customer name - remove special chars that might cause issues
+            var cleanCustomer = customer.replace(/[\/\\'"]/g, '%');
             conditions.push('LOWER(customer_vendor) LIKE LOWER($' + paramIndex + ')');
-            params.push('%' + customer + '%');
+            params.push('%' + cleanCustomer + '%');
             paramIndex++;
         }
         
@@ -1899,7 +1901,7 @@ Product filter actions:
 10. {"action": "showPicks"} - Show user's picks
 
 Sales/Order filter actions (these filter the product grid to show styles with inventory that match the criteria):
-11. {"action": "filterByCustomerOrders", "value": "customer name"} - Filter products to show styles IN STOCK that this customer has ordered
+11. {"action": "filterByCustomerOrders", "value": "customer name"} - Filter products to show styles IN STOCK that this customer has ordered. IMPORTANT: Use simple, short search terms like "Ross", "Amazon", "Walmart" - NOT full company names with Inc, LLC, etc. The search uses partial matching.
 12. {"action": "filterByPOStyles"} - Filter products to show styles IN STOCK that have purchase orders
 
 RESPONSE FORMAT:
@@ -1923,6 +1925,9 @@ Response: {"message": "We have these categories: ${categories.join(', ')}. Which
 
 User: "Show me styles that Amazon bought" or "What did Amazon order?" or "What styles does Amazon like?"
 Response: {"message": "Filtering to show styles in stock that Amazon has ordered:", "actions": [{"action": "filterByCustomerOrders", "value": "Amazon"}]}
+
+User: "What did Ross order?" or "Show me Ross Stores styles"
+Response: {"message": "Filtering to show styles in stock that Ross has ordered:", "actions": [{"action": "filterByCustomerOrders", "value": "Ross"}]}
 
 User: "Show me what we have that Nordstrom ordered"
 Response: {"message": "Showing styles in stock that Nordstrom has purchased:", "actions": [{"action": "filterByCustomerOrders", "value": "Nordstrom"}]}

@@ -475,22 +475,50 @@ async function processInventoryCSV(csvContent, filename) {
 
 // Process sales CSV (same logic as manual upload)
 async function processSalesCSV(csvContent, filename) {
-    var lines = csvContent.split('\n');
+    var lines = csvContent.split('\n').filter(function(line) { return line.trim(); });
     if (lines.length < 2) return { success: false, error: 'Empty file', imported: 0 };
     
-    var headers = lines[0].toLowerCase().replace(/^\ufeff/, '').split(',').map(function(h) { return h.trim().replace(/['"]/g, ''); });
+    // Parse headers the same way as manual import - normalize spaces to underscores
+    var headerLine = lines[0].replace(/^\ufeff/, '');
+    var headers = [];
+    var inQuote = false;
+    var current = '';
+    for (var i = 0; i < headerLine.length; i++) {
+        var char = headerLine[i];
+        if (char === '"') { inQuote = !inQuote; }
+        else if (char === ',' && !inQuote) { headers.push(current.trim().toLowerCase().replace(/\s+/g, '_').replace(/['"]/g, '')); current = ''; }
+        else { current += char; }
+    }
+    headers.push(current.trim().toLowerCase().replace(/\s+/g, '_').replace(/['"]/g, ''));
+    
+    console.log('Auto-import Sales CSV Headers:', headers);
+    
     var colMap = {};
     headers.forEach(function(h, i) { colMap[h] = i; });
     
-    var docTypeIdx = colMap['document type'] !== undefined ? colMap['document type'] : 0;
-    var docNumIdx = colMap['document number'] !== undefined ? colMap['document number'] : 1;
-    var dateIdx = colMap['date'] !== undefined ? colMap['date'] : 2;
-    var custIdx = colMap['customer/vendor'] !== undefined ? colMap['customer/vendor'] : 3;
-    var skuIdx = colMap['line item sku'];
-    var styleIdx = colMap['line item style'];
+    // Use normalized column names (with underscores) - same as manual import
+    // Also handle customer/vendor which might be "customer_vendor" or "customer/vendor" after normalization
+    var docTypeIdx = colMap['document_type'];
+    var docNumIdx = colMap['document_number'];
+    var dateIdx = colMap['date'];
+    var custIdx = colMap['customer_vendor'] !== undefined ? colMap['customer_vendor'] : colMap['customer/vendor'];
+    var skuIdx = colMap['line_item_sku'];
+    var styleIdx = colMap['line_item_style'];
     var statusIdx = colMap['status'];
     var qtyIdx = colMap['quantity'];
     var amtIdx = colMap['amount'];
+    
+    console.log('Column mapping:', { docType: docTypeIdx, docNum: docNumIdx, date: dateIdx, cust: custIdx, sku: skuIdx, style: styleIdx, status: statusIdx, qty: qtyIdx, amt: amtIdx });
+    
+    if (docTypeIdx === undefined || docNumIdx === undefined) {
+        console.log('Missing required columns. Available columns:', Object.keys(colMap));
+        return { success: false, error: 'Missing required columns: document_type, document_number. Found: ' + Object.keys(colMap).join(', '), imported: 0 };
+    }
+    
+    // Check for style/sku columns - need at least one to extract baseStyle
+    if (skuIdx === undefined && styleIdx === undefined) {
+        console.log('Warning: No line_item_sku or line_item_style column found. Available:', Object.keys(colMap));
+    }
     
     // Load existing records for duplicate detection
     var existingResult = await pool.query('SELECT document_number, line_item_sku FROM sales_data');
@@ -499,7 +527,10 @@ async function processSalesCSV(csvContent, filename) {
     
     var imported = 0, skipped = 0, errors = 0;
     var batch = [];
-    var batchSize = 100;
+    var batchSize = 500; // Increased batch size to match manual import
+    var noBaseStyleCount = 0;
+    
+    console.log('Processing', lines.length - 1, 'data rows from', filename);
     
     for (var i = 1; i < lines.length; i++) {
         try {
@@ -519,8 +550,8 @@ async function processSalesCSV(csvContent, filename) {
             
             var docType = row[docTypeIdx] || '';
             var docNum = row[docNumIdx] || '';
-            var docDate = row[dateIdx] || null;
-            var customer = row[custIdx] || '';
+            var docDate = dateIdx !== undefined ? row[dateIdx] || null : null;
+            var customer = custIdx !== undefined ? row[custIdx] || '' : '';
             var sku = skuIdx !== undefined ? row[skuIdx] || '' : '';
             var style = styleIdx !== undefined ? row[styleIdx] || '' : '';
             var status = statusIdx !== undefined ? row[statusIdx] || '' : '';
@@ -528,6 +559,11 @@ async function processSalesCSV(csvContent, filename) {
             var amt = amtIdx !== undefined ? parseFloat((row[amtIdx] || '0').replace(/,/g, '')) || 0 : 0;
             
             var baseStyle = style ? style.split('-')[0] : (sku ? sku.split('-')[0] : '');
+            
+            // Debug first few rows
+            if (i <= 3) {
+                console.log('Row', i, '- docType:', docType, 'docNum:', docNum, 'sku:', sku, 'style:', style, 'baseStyle:', baseStyle);
+            }
             
             if (docType && docNum && baseStyle) {
                 var key = docNum + '|' + sku;
@@ -551,9 +587,13 @@ async function processSalesCSV(csvContent, filename) {
                         batch = [];
                     }
                 }
+            } else {
+                // Track rows skipped due to missing required fields
+                if (!baseStyle) noBaseStyleCount++;
             }
         } catch (err) {
             errors++;
+            if (errors <= 3) console.log('Row error:', err.message);
         }
     }
     
@@ -570,6 +610,8 @@ async function processSalesCSV(csvContent, filename) {
         await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
         imported += batch.length;
     }
+    
+    console.log('Sales import complete:', imported, 'imported,', skipped, 'duplicates skipped,', noBaseStyleCount, 'rows without baseStyle,', errors, 'errors');
     
     await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1, $2, $3)', ['sales_import', 'success', imported]);
     

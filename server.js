@@ -78,6 +78,9 @@ async function initDB() {
         try { await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS pin VARCHAR(4)'); } catch (e) {}
         try { await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name VARCHAR(255)'); } catch (e) {}
         
+        // WorkDrive auto-import tracking
+        await pool.query('CREATE TABLE IF NOT EXISTS workdrive_imports (id SERIAL PRIMARY KEY, file_id VARCHAR(255) UNIQUE NOT NULL, file_name VARCHAR(255), file_type VARCHAR(50), processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, records_imported INTEGER DEFAULT 0, status VARCHAR(50), error_message TEXT)');
+        
         // Migrate existing users: set PIN if not set, set display_name from username
         await pool.query("UPDATE users SET pin = LPAD(FLOOR(RANDOM() * 10000)::TEXT, 4, '0') WHERE pin IS NULL");
         await pool.query("UPDATE users SET display_name = username WHERE display_name IS NULL");
@@ -306,6 +309,369 @@ function startTokenRefreshJob() {
     console.log('Starting background token refresh job (every 30 minutes)');
     refreshZohoToken();
     setInterval(function() { refreshZohoToken(); }, 30 * 60 * 1000);
+}
+
+// WorkDrive Auto-Import Configuration
+var WORKDRIVE_INVENTORY_FOLDER_ID = process.env.WORKDRIVE_INVENTORY_FOLDER_ID || '3coje5ffa47c2f53543d9814479ee005e317b';
+var WORKDRIVE_SALES_FOLDER_ID = process.env.WORKDRIVE_SALES_FOLDER_ID || '3coje6ebe1a58ee344469bbe84d67e5395f53';
+var WORKDRIVE_CHECK_INTERVAL = parseInt(process.env.WORKDRIVE_CHECK_INTERVAL) || 6 * 60 * 60 * 1000; // 6 hours default
+
+// List files in WorkDrive folder
+async function listWorkDriveFiles(folderId) {
+    try {
+        if (!zohoAccessToken) await refreshZohoToken();
+        var url = 'https://www.zohoapis.com/workdrive/api/v1/files/' + folderId + '/files';
+        var response = await fetch(url, {
+            headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
+        });
+        if (!response.ok) {
+            console.error('WorkDrive API error:', response.status);
+            return [];
+        }
+        var data = await response.json();
+        return data.data || [];
+    } catch (err) {
+        console.error('Error listing WorkDrive files:', err);
+        return [];
+    }
+}
+
+// Download file from WorkDrive
+async function downloadWorkDriveFile(fileId) {
+    try {
+        if (!zohoAccessToken) await refreshZohoToken();
+        var url = 'https://workdrive.zoho.com/api/v1/download/' + fileId;
+        var response = await fetch(url, {
+            headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken }
+        });
+        if (!response.ok) {
+            console.error('WorkDrive download error:', response.status);
+            return null;
+        }
+        return Buffer.from(await response.arrayBuffer());
+    } catch (err) {
+        console.error('Error downloading WorkDrive file:', err);
+        return null;
+    }
+}
+
+// Determine file type from filename
+function detectImportFileType(filename) {
+    var lower = filename.toLowerCase();
+    if (lower.indexOf('inventory') !== -1 || lower.indexOf('availability') !== -1) {
+        return 'inventory';
+    } else if (lower.indexOf('po-so') !== -1 || lower.indexOf('sales') !== -1 || lower.indexOf('order') !== -1) {
+        return 'sales';
+    }
+    return 'unknown';
+}
+
+// Process inventory CSV (same logic as manual upload)
+async function processInventoryCSV(csvContent, filename) {
+    var lines = csvContent.split('\n');
+    if (lines.length < 2) return { success: false, error: 'Empty file', imported: 0 };
+    
+    var headers = lines[0].toLowerCase().replace(/['"]/g, '').split(',').map(function(h) { return h.trim(); });
+    var headerMap = {};
+    headers.forEach(function(h, i) { headerMap[h] = i; });
+    
+    var syncResult = await pool.query('INSERT INTO sync_history (sync_type, status) VALUES ($1, $2) RETURNING id', ['csv_import', 'in_progress']);
+    var currentImportId = syncResult.rows[0].id;
+    
+    var existingStylesResult = await pool.query('SELECT style_id FROM products');
+    var existingStyleSet = {};
+    existingStylesResult.rows.forEach(function(r) { existingStyleSet[r.style_id] = true; });
+    
+    var imported = 0, skipped = 0, newArrivals = 0;
+    var lastStyleId = '', lastImageUrl = '', lastCategory = '';
+    
+    function parseNumber(val) {
+        if (!val) return 0;
+        return parseInt(String(val).replace(/[,"]/g, '')) || 0;
+    }
+    
+    function parseCSVLine(line) {
+        var result = [];
+        var current = '';
+        var inQuotes = false;
+        for (var i = 0; i < line.length; i++) {
+            var ch = line[i];
+            if (ch === '"') { inQuotes = !inQuotes; }
+            else if (ch === ',' && !inQuotes) { result.push(current.trim()); current = ''; }
+            else { current += ch; }
+        }
+        result.push(current.trim());
+        return result;
+    }
+    
+    for (var li = 1; li < lines.length; li++) {
+        try {
+            var values = parseCSVLine(lines[li]);
+            if (values[0] && values[0].indexOf('Grand Summary') !== -1) { skipped++; continue; }
+            
+            var styleId = values[headerMap['style name']] || values[0];
+            var imageUrl = values[headerMap['style image']] || values[1];
+            var color = values[headerMap['color']] || values[2];
+            var category = values[headerMap['commodity']] || values[3];
+            var onHand = parseNumber(values[headerMap['net on hand']] || values[4]);
+            var availableNow = parseNumber(values[headerMap['available now']] || values[7]);
+            var openOrder = parseNumber(values[headerMap['open order']] || values[8]);
+            var toCome = parseNumber(values[headerMap['to come']] || values[9]);
+            var leftToSell = parseNumber(values[headerMap['left to sell']] || values[10]);
+            
+            if (!styleId && color) {
+                styleId = lastStyleId;
+                if (!imageUrl || imageUrl === '-No Value-') imageUrl = lastImageUrl;
+                if (!category || category === '-No Value-') category = lastCategory;
+            }
+            if (!styleId) { skipped++; continue; }
+            
+            lastStyleId = styleId;
+            if (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) lastImageUrl = imageUrl;
+            if (category && category !== '-No Value-') lastCategory = category;
+            
+            var baseStyle = styleId.split('-')[0];
+            var validCategory = (category && category !== '-No Value-') ? category : 'Uncategorized';
+            var name = validCategory + ' - ' + baseStyle;
+            var validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) ? imageUrl : lastImageUrl;
+            
+            var isNewStyle = !existingStyleSet[styleId];
+            var productResult = await pool.query('SELECT id, image_url FROM products WHERE style_id = $1', [styleId]);
+            var productId;
+            
+            if (productResult.rows.length > 0) {
+                productId = productResult.rows[0].id;
+                var finalImage = validImageUrl || productResult.rows[0].image_url;
+                await pool.query('UPDATE products SET name=$1, category=$2, base_style=$3, image_url=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5', [name, validCategory, baseStyle, finalImage, productId]);
+            } else {
+                var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url, first_seen_import) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl, currentImportId]);
+                productId = ins.rows[0].id;
+                if (isNewStyle) newArrivals++;
+                existingStyleSet[styleId] = true;
+            }
+            
+            if (color && color !== '-No Value-') {
+                var colorResult = await pool.query('SELECT id FROM product_colors WHERE product_id=$1 AND color_name=$2', [productId, color]);
+                if (colorResult.rows.length > 0) {
+                    await pool.query('UPDATE product_colors SET available_now=$1, left_to_sell=$2, on_hand=$3, open_order=$4, to_come=$5, available_qty=$6, updated_at=CURRENT_TIMESTAMP WHERE id=$7',
+                        [availableNow, leftToSell, onHand, openOrder, toCome, availableNow, colorResult.rows[0].id]);
+                } else {
+                    await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+                        [productId, color, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]);
+                }
+            }
+            imported++;
+        } catch (rowErr) {
+            console.error('Row error:', rowErr.message);
+            skipped++;
+        }
+    }
+    
+    await pool.query('UPDATE sync_history SET records_synced = $1, status = $2 WHERE id = $3', [imported, 'success', currentImportId]);
+    lastImportId = currentImportId;
+    
+    return { success: true, imported: imported, skipped: skipped, newArrivals: newArrivals };
+}
+
+// Process sales CSV (same logic as manual upload)
+async function processSalesCSV(csvContent, filename) {
+    var lines = csvContent.split('\n');
+    if (lines.length < 2) return { success: false, error: 'Empty file', imported: 0 };
+    
+    var headers = lines[0].toLowerCase().replace(/^\ufeff/, '').split(',').map(function(h) { return h.trim().replace(/['"]/g, ''); });
+    var colMap = {};
+    headers.forEach(function(h, i) { colMap[h] = i; });
+    
+    var docTypeIdx = colMap['document type'] !== undefined ? colMap['document type'] : 0;
+    var docNumIdx = colMap['document number'] !== undefined ? colMap['document number'] : 1;
+    var dateIdx = colMap['date'] !== undefined ? colMap['date'] : 2;
+    var custIdx = colMap['customer/vendor'] !== undefined ? colMap['customer/vendor'] : 3;
+    var skuIdx = colMap['line item sku'];
+    var styleIdx = colMap['line item style'];
+    var statusIdx = colMap['status'];
+    var qtyIdx = colMap['quantity'];
+    var amtIdx = colMap['amount'];
+    
+    // Load existing records for duplicate detection
+    var existingResult = await pool.query('SELECT document_number, line_item_sku FROM sales_data');
+    var existingKeys = new Set();
+    existingResult.rows.forEach(function(r) { existingKeys.add(r.document_number + '|' + r.line_item_sku); });
+    
+    var imported = 0, skipped = 0, errors = 0;
+    var batch = [];
+    var batchSize = 100;
+    
+    for (var i = 1; i < lines.length; i++) {
+        try {
+            var line = lines[i];
+            if (!line.trim()) continue;
+            
+            var row = [];
+            var cell = '';
+            var inQuotes = false;
+            for (var j = 0; j < line.length; j++) {
+                var ch = line[j];
+                if (ch === '"') { inQuotes = !inQuotes; }
+                else if (ch === ',' && !inQuotes) { row.push(cell.trim()); cell = ''; }
+                else { cell += ch; }
+            }
+            row.push(cell.trim());
+            
+            var docType = row[docTypeIdx] || '';
+            var docNum = row[docNumIdx] || '';
+            var docDate = row[dateIdx] || null;
+            var customer = row[custIdx] || '';
+            var sku = skuIdx !== undefined ? row[skuIdx] || '' : '';
+            var style = styleIdx !== undefined ? row[styleIdx] || '' : '';
+            var status = statusIdx !== undefined ? row[statusIdx] || '' : '';
+            var qty = qtyIdx !== undefined ? parseFloat((row[qtyIdx] || '0').replace(/,/g, '')) || 0 : 0;
+            var amt = amtIdx !== undefined ? parseFloat((row[amtIdx] || '0').replace(/,/g, '')) || 0 : 0;
+            
+            var baseStyle = style ? style.split('-')[0] : (sku ? sku.split('-')[0] : '');
+            
+            if (docType && docNum && baseStyle) {
+                var key = docNum + '|' + sku;
+                if (existingKeys.has(key)) {
+                    skipped++;
+                } else {
+                    batch.push([docType, docNum, docDate, customer, sku, baseStyle, status, qty, amt]);
+                    existingKeys.add(key);
+                    
+                    if (batch.length >= batchSize) {
+                        var values = [];
+                        var placeholders = [];
+                        var paramIdx = 1;
+                        for (var b = 0; b < batch.length; b++) {
+                            var item = batch[b];
+                            placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
+                            values = values.concat(item);
+                        }
+                        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+                        imported += batch.length;
+                        batch = [];
+                    }
+                }
+            }
+        } catch (err) {
+            errors++;
+        }
+    }
+    
+    // Insert remaining batch
+    if (batch.length > 0) {
+        var values = [];
+        var placeholders = [];
+        var paramIdx = 1;
+        for (var b = 0; b < batch.length; b++) {
+            var item = batch[b];
+            placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
+            values = values.concat(item);
+        }
+        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+        imported += batch.length;
+    }
+    
+    await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1, $2, $3)', ['sales_import', 'success', imported]);
+    
+    return { success: true, imported: imported, skipped: skipped, errors: errors };
+}
+
+// Check WorkDrive folders for new files and process them
+async function checkWorkDriveFolderForImports() {
+    console.log('Checking WorkDrive folders for new files...');
+    var totalProcessed = 0;
+    
+    try {
+        // Check Inventory folder
+        console.log('Checking Inventory folder...');
+        var inventoryResult = await processWorkDriveFolder(WORKDRIVE_INVENTORY_FOLDER_ID, 'inventory');
+        totalProcessed += inventoryResult.processed;
+        
+        // Check Sales-PO folder
+        console.log('Checking Sales-PO folder...');
+        var salesResult = await processWorkDriveFolder(WORKDRIVE_SALES_FOLDER_ID, 'sales');
+        totalProcessed += salesResult.processed;
+        
+        console.log('WorkDrive check complete. Processed ' + totalProcessed + ' new files.');
+        return { success: true, processed: totalProcessed, inventory: inventoryResult.processed, sales: salesResult.processed };
+    } catch (err) {
+        console.error('Error checking WorkDrive folders:', err);
+        return { success: false, error: err.message };
+    }
+}
+
+// Process a single WorkDrive folder
+async function processWorkDriveFolder(folderId, fileType) {
+    var processed = 0;
+    try {
+        var files = await listWorkDriveFiles(folderId);
+        console.log('Found ' + files.length + ' files in ' + fileType + ' folder');
+        
+        for (var i = 0; i < files.length; i++) {
+            var file = files[i];
+            var fileId = file.id;
+            var fileName = file.attributes ? file.attributes.name : (file.name || 'unknown');
+            
+            // Skip non-CSV files
+            if (!fileName.toLowerCase().endsWith('.csv')) continue;
+            
+            // Check if already processed
+            var existing = await pool.query('SELECT id FROM workdrive_imports WHERE file_id = $1', [fileId]);
+            if (existing.rows.length > 0) {
+                console.log('Skipping already processed file:', fileName);
+                continue;
+            }
+            
+            console.log('Processing new file:', fileName, 'as', fileType);
+            
+            // Download file
+            var fileBuffer = await downloadWorkDriveFile(fileId);
+            if (!fileBuffer) {
+                await pool.query('INSERT INTO workdrive_imports (file_id, file_name, file_type, status, error_message) VALUES ($1, $2, $3, $4, $5)', 
+                    [fileId, fileName, fileType, 'error', 'Failed to download']);
+                continue;
+            }
+            
+            var csvContent = fileBuffer.toString('utf-8');
+            var result;
+            
+            if (fileType === 'inventory') {
+                result = await processInventoryCSV(csvContent, fileName);
+            } else if (fileType === 'sales') {
+                result = await processSalesCSV(csvContent, fileName);
+            } else {
+                continue;
+            }
+            
+            if (result.success) {
+                await pool.query('INSERT INTO workdrive_imports (file_id, file_name, file_type, status, records_imported) VALUES ($1, $2, $3, $4, $5)', 
+                    [fileId, fileName, fileType, 'success', result.imported]);
+                processed++;
+                console.log('Successfully imported ' + result.imported + ' records from ' + fileName);
+            } else {
+                await pool.query('INSERT INTO workdrive_imports (file_id, file_name, file_type, status, error_message) VALUES ($1, $2, $3, $4, $5)', 
+                    [fileId, fileName, fileType, 'error', result.error]);
+            }
+        }
+        
+        return { success: true, processed: processed };
+    } catch (err) {
+        console.error('Error processing folder:', err);
+        return { success: false, processed: 0, error: err.message };
+    }
+}
+
+// Start WorkDrive folder polling job
+function startWorkDriveImportJob() {
+    console.log('Starting WorkDrive auto-import job (every ' + (WORKDRIVE_CHECK_INTERVAL / 3600000) + ' hours)');
+    // Initial check after 1 minute (let server start up first)
+    setTimeout(function() {
+        checkWorkDriveFolderForImports();
+    }, 60000);
+    // Then check periodically
+    setInterval(function() {
+        checkWorkDriveFolderForImports();
+    }, WORKDRIVE_CHECK_INTERVAL);
 }
 
 // AI Image Analysis using Claude Vision
@@ -1755,6 +2121,48 @@ app.post('/api/image-cache/refresh', requireAuth, requireAdmin, async function(r
     }
 });
 
+// WorkDrive Auto-Import API endpoints
+app.get('/api/workdrive-import/status', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        var recentImports = await pool.query('SELECT * FROM workdrive_imports ORDER BY processed_at DESC LIMIT 10');
+        var stats = await pool.query('SELECT COUNT(*) as total, SUM(records_imported) as total_records FROM workdrive_imports WHERE status = $1', ['success']);
+        var inventoryStats = await pool.query('SELECT COUNT(*) as total, SUM(records_imported) as records FROM workdrive_imports WHERE status = $1 AND file_type = $2', ['success', 'inventory']);
+        var salesStats = await pool.query('SELECT COUNT(*) as total, SUM(records_imported) as records FROM workdrive_imports WHERE status = $1 AND file_type = $2', ['success', 'sales']);
+        res.json({
+            inventoryFolderId: WORKDRIVE_INVENTORY_FOLDER_ID,
+            salesFolderId: WORKDRIVE_SALES_FOLDER_ID,
+            checkIntervalHours: WORKDRIVE_CHECK_INTERVAL / 3600000,
+            recentImports: recentImports.rows,
+            totalFilesProcessed: parseInt(stats.rows[0].total) || 0,
+            totalRecordsImported: parseInt(stats.rows[0].total_records) || 0,
+            inventoryFiles: parseInt(inventoryStats.rows[0].total) || 0,
+            inventoryRecords: parseInt(inventoryStats.rows[0].records) || 0,
+            salesFiles: parseInt(salesStats.rows[0].total) || 0,
+            salesRecords: parseInt(salesStats.rows[0].records) || 0
+        });
+    } catch (err) {
+        res.json({ error: err.message });
+    }
+});
+
+app.post('/api/workdrive-import/check-now', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        var result = await checkWorkDriveFolderForImports();
+        res.json(result);
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
+app.post('/api/workdrive-import/clear-history', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        await pool.query('DELETE FROM workdrive_imports');
+        res.json({ success: true });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
 app.post('/api/users', requireAuth, requireAdmin, async function(req, res) { 
     try { 
         var pin = req.body.pin || String(Math.floor(1000 + Math.random() * 9000));
@@ -2325,10 +2733,11 @@ function getHTML() {
     html += '<div id="historyTab" class="tab-content"><table><thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Records</th><th>Error</th></tr></thead><tbody id="historyTable"></tbody></table></div></div>';
     
     // Admin panel (admin only)
-    html += '<div id="adminPanel" class="admin-panel hidden"><h2>Admin Settings</h2><div class="tabs"><button class="tab active" data-tab="zoho2">Zoho Sync</button><button class="tab" data-tab="import2">Import CSV</button><button class="tab" data-tab="sales2">Import Sales</button><button class="tab" data-tab="ai2">AI Analysis</button><button class="tab" data-tab="cache2">Image Cache</button><button class="tab" data-tab="users2">Users</button><button class="tab" data-tab="system2">System Health</button></div>';
+    html += '<div id="adminPanel" class="admin-panel hidden"><h2>Admin Settings</h2><div class="tabs"><button class="tab active" data-tab="zoho2">Zoho Sync</button><button class="tab" data-tab="import2">Import CSV</button><button class="tab" data-tab="sales2">Import Sales</button><button class="tab" data-tab="autoimport2">Auto Import</button><button class="tab" data-tab="ai2">AI Analysis</button><button class="tab" data-tab="cache2">Image Cache</button><button class="tab" data-tab="users2">Users</button><button class="tab" data-tab="system2">System Health</button></div>';
     html += '<div id="zoho2Tab" class="tab-content active"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="zohoStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Workspace ID: </span><span class="status-value" id="zohoWorkspaceId">-</span></div><div class="status-item"><span class="status-label">View ID: </span><span class="status-value" id="zohoViewId">-</span></div></div><div style="display:flex;gap:1rem"><button class="btn btn-secondary" id="testZohoBtn">Test Connection</button><button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div><div id="zohoMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="import2Tab" class="tab-content"><div class="upload-area"><input type="file" id="csvFile" accept=".csv"><label for="csvFile">Click to upload CSV file</label></div><div id="importStatus"></div><button class="btn btn-danger" id="clearBtn" style="margin-top:1rem">Clear All Products</button></div>';
     html += '<div id="sales2Tab" class="tab-content"><p style="margin-bottom:1rem;color:#666">Import sales data (Sales Orders and Purchase Orders) from the PO-SO Query CSV export.</p><div class="upload-area"><input type="file" id="salesCsvFile" accept=".csv"><label for="salesCsvFile">Click to upload Sales CSV file</label></div><div id="salesImportStatus"></div><div id="salesDataStats" style="margin-top:1rem"></div><button class="btn btn-danger" id="clearSalesBtn" style="margin-top:1rem">Clear All Sales Data</button><p style="margin-top:0.5rem;font-size:0.75rem;color:#999">Use this to start fresh before uploading historical files.</p></div>';
+    html += '<div id="autoimport2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="autoImportStatus">Checking...</span></div><div class="status-item"><span class="status-label">Check Interval: </span><span class="status-value" id="autoImportInterval">-</span></div><div class="status-item"><span class="status-label">Inventory Files: </span><span class="status-value" id="autoImportInventory">-</span></div><div class="status-item"><span class="status-label">Sales-PO Files: </span><span class="status-value" id="autoImportSales">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">Automatically imports CSV files from two WorkDrive folders:<br>• <strong>Inventory folder</strong> - for Inventory Availability reports<br>• <strong>Sales-PO folder</strong> - for PO-SO Query exports</p><button class="btn btn-primary" id="checkWorkDriveBtn">Check Now</button><button class="btn btn-danger" id="clearAutoImportBtn" style="margin-left:0.5rem">Clear History</button><div id="autoImportMessage" style="margin-top:1rem"></div><h4 style="margin-top:1.5rem;margin-bottom:0.5rem">Recent Imports</h4><div id="recentImportsList" style="max-height:200px;overflow-y:auto;font-size:0.8rem"></div></div>';
     html += '<div id="ai2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">API Status: </span><span class="status-value" id="aiStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Products Analyzed: </span><span class="status-value" id="aiAnalyzedCount">-</span></div><div class="status-item"><span class="status-label">Remaining: </span><span class="status-value" id="aiRemainingCount">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">AI analysis uses Claude Vision to generate searchable tags from product images. This enables searching by garment type (cardigan, hoodie), style (casual, formal), pattern (striped, floral), and more.</p><button class="btn btn-primary" id="runAiBtn">Analyze Next 100 Products</button><button class="btn btn-success" id="runAllAiBtn" style="margin-left:0.5rem">Analyze All (Background)</button><button class="btn btn-secondary" id="stopAiBtn" style="margin-left:0.5rem;display:none">Stop</button><div id="aiMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="cache2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">Cache Status: </span><span class="status-value" id="cacheStatus">Checking...</span></div><div class="status-item"><span class="status-label">Cached Images: </span><span class="status-value" id="cachedCount">-</span></div><div class="status-item"><span class="status-label">Total Products with Images: </span><span class="status-value" id="totalImagesCount">-</span></div><div class="status-item"><span class="status-label">Cache Size: </span><span class="status-value" id="cacheSize">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">Image caching stores product images locally to reduce Zoho API calls and speed up image loading. Images are cached on first view and refreshed when you upload a new inventory CSV.</p><button class="btn btn-primary" id="refreshCacheBtn">Refresh All Images</button><button class="btn btn-danger" id="clearCacheBtn" style="margin-left:0.5rem">Clear Cache</button><div id="cacheMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Name</th><th>PIN</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUserName" placeholder="Display Name"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add User</button></div><p style="margin-top:1rem;font-size:0.8rem;color:#666">New users are assigned a random 4-digit PIN. They can change it after logging in.</p></div>';
@@ -2443,7 +2852,7 @@ function getHTML() {
     
     html += 'async function sendChatMessage(){var input=document.getElementById("chatInput");var msg=input.value.trim();if(!msg)return;addChatMessage(msg,"user");input.value="";input.style.height="auto";document.getElementById("chatSend").disabled=true;showTyping();try{var resp=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:msg})});var data=await resp.json();hideTyping();if(data.success){addChatMessage(data.message,"assistant");if(data.actions&&data.actions.length>0){executeChatActions(data.actions)}}else{addChatMessage("Sorry, I encountered an error. Please try again.","assistant")}}catch(err){hideTyping();addChatMessage("Sorry, something went wrong. Please try again.","assistant")}document.getElementById("chatSend").disabled=false}';
     
-    html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var panel=e.target.closest(".admin-panel");panel.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});panel.querySelectorAll(".tab-content").forEach(function(c){c.classList.remove("active")});e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active");if(e.target.getAttribute("data-tab")==="cache2")loadCacheStatus()})}';
+    html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var panel=e.target.closest(".admin-panel");panel.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});panel.querySelectorAll(".tab-content").forEach(function(c){c.classList.remove("active")});e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active");if(e.target.getAttribute("data-tab")==="cache2")loadCacheStatus();if(e.target.getAttribute("data-tab")==="autoimport2")loadAutoImportStatus()})}';
     
     html += 'var sizeBtns=document.querySelectorAll(".size-btn");sizeBtns.forEach(function(btn){btn.addEventListener("click",function(e){sizeBtns.forEach(function(b){b.classList.remove("active")});e.target.classList.add("active");currentSize=e.target.getAttribute("data-size");document.getElementById("productGrid").className="product-grid size-"+currentSize;renderProducts()})});';
     
@@ -2556,6 +2965,11 @@ function getHTML() {
     
     // Image Cache functions
     html += 'function loadCacheStatus(){fetch("/api/image-cache/stats").then(function(r){return r.json()}).then(function(d){if(d.error){document.getElementById("cacheStatus").textContent="Error";document.getElementById("cacheStatus").className="status-value disconnected";return}if(d.available){document.getElementById("cacheStatus").textContent="Active";document.getElementById("cacheStatus").className="status-value connected"}else{document.getElementById("cacheStatus").textContent="Not Available (Volume not mounted)";document.getElementById("cacheStatus").className="status-value disconnected"}document.getElementById("cachedCount").textContent=d.cached||0;document.getElementById("totalImagesCount").textContent=d.totalProducts||0;document.getElementById("cacheSize").textContent=(d.totalSizeMB||0)+" MB"})}';
+    
+    // Auto Import functions
+    html += 'function loadAutoImportStatus(){fetch("/api/workdrive-import/status").then(function(r){return r.json()}).then(function(d){if(d.error){document.getElementById("autoImportStatus").textContent="Error";return}document.getElementById("autoImportStatus").textContent="Active";document.getElementById("autoImportStatus").className="status-value connected";document.getElementById("autoImportInterval").textContent="Every "+d.checkIntervalHours+" hours";document.getElementById("autoImportInventory").textContent=d.inventoryFiles+" files ("+d.inventoryRecords.toLocaleString()+" records)";document.getElementById("autoImportSales").textContent=d.salesFiles+" files ("+d.salesRecords.toLocaleString()+" records)";var listHtml="";if(d.recentImports&&d.recentImports.length>0){listHtml="<table style=\\"width:100%;border-collapse:collapse\\"><thead><tr style=\\"border-bottom:1px solid #ddd\\"><th style=\\"text-align:left;padding:4px\\">File</th><th style=\\"text-align:left;padding:4px\\">Type</th><th style=\\"text-align:right;padding:4px\\">Records</th><th style=\\"text-align:left;padding:4px\\">Status</th><th style=\\"text-align:left;padding:4px\\">Time</th></tr></thead><tbody>";d.recentImports.forEach(function(imp){var statusColor=imp.status==="success"?"#22c55e":"#ef4444";listHtml+="<tr><td style=\\"padding:4px\\">"+imp.file_name+"</td><td style=\\"padding:4px\\">"+imp.file_type+"</td><td style=\\"text-align:right;padding:4px\\">"+(imp.records_imported||0)+"</td><td style=\\"padding:4px;color:"+statusColor+"\\">"+imp.status+"</td><td style=\\"padding:4px\\">"+new Date(imp.processed_at).toLocaleString()+"</td></tr>"});listHtml+="</tbody></table>"}else{listHtml="<p style=\\"color:#666\\">No imports yet</p>"}document.getElementById("recentImportsList").innerHTML=listHtml})}';
+    html += 'document.getElementById("checkWorkDriveBtn").addEventListener("click",function(){var btn=this;btn.disabled=true;btn.textContent="Checking...";document.getElementById("autoImportMessage").innerHTML="<span style=\\"color:#666\\">Checking WorkDrive folder for new files...</span>";fetch("/api/workdrive-import/check-now",{method:"POST"}).then(function(r){return r.json()}).then(function(d){btn.disabled=false;btn.textContent="Check Now";if(d.success){document.getElementById("autoImportMessage").innerHTML="<span class=\\"success\\">Processed "+d.processed+" new files</span>"}else{document.getElementById("autoImportMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadAutoImportStatus();loadProducts()})});';
+    html += 'document.getElementById("clearAutoImportBtn").addEventListener("click",function(){if(!confirm("Clear import history? Files will be re-processed on next check."))return;fetch("/api/workdrive-import/clear-history",{method:"POST"}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("autoImportMessage").innerHTML="<span class=\\"success\\">History cleared</span>"}loadAutoImportStatus()})});';
     html += 'document.getElementById("refreshCacheBtn").addEventListener("click",function(){var btn=this;btn.disabled=true;btn.textContent="Refreshing...";document.getElementById("cacheMessage").innerHTML="<span style=\\"color:#666\\">Downloading images from Zoho WorkDrive... This may take a few minutes.</span>";fetch("/api/image-cache/refresh",{method:"POST"}).then(function(r){return r.json()}).then(function(d){btn.disabled=false;btn.textContent="Refresh All Images";if(d.success){document.getElementById("cacheMessage").innerHTML="<span class=\\"success\\">✓ Refreshed "+d.refreshed+" of "+d.total+" images"+(d.errors?" ("+d.errors+" errors)":"")+"</span>"}else{document.getElementById("cacheMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadCacheStatus()})});';
     html += 'document.getElementById("clearCacheBtn").addEventListener("click",function(){if(!confirm("Clear all cached images? They will be re-downloaded on next view."))return;fetch("/api/image-cache/clear",{method:"POST"}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("cacheMessage").innerHTML="<span class=\\"success\\">✓ Cleared "+d.deleted+" cached files</span>"}else{document.getElementById("cacheMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadCacheStatus()})});';
     
@@ -2673,4 +3087,5 @@ initDB().then(function() {
     app.listen(PORT, function() { console.log("Product Catalog running on port " + PORT); });
     setTimeout(function() { startTokenRefreshJob(); }, 5000);
     setTimeout(function() { startSalesHistoryCacheJob(); }, 10000);
+    setTimeout(function() { startWorkDriveImportJob(); }, 15000);
 });

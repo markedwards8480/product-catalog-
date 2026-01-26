@@ -3071,8 +3071,7 @@ function getHTML() {
     
     html += 'function updateFocus(cards){cards.forEach(function(c,i){c.classList.toggle("focused",i===focusedIndex)});if(focusedIndex>=0&&cards[focusedIndex]){cards[focusedIndex].scrollIntoView({block:"nearest",behavior:"smooth"})}}';
     
-    // Compact header on scroll
-    html += '// Scroll compact handler removed - no longer using multiple sticky elements';
+    // Compact header scroll handler removed
     
     html += 'checkSession();';
     html += '</script></body></html>';

@@ -2871,7 +2871,7 @@ function getHTML() {
     html += '<script>';
     html += 'var products=[];var allProducts=[];var groupedProducts=[];var lastImportId=null;var currentFilter="all";var colorFilter=null;var specialFilter=null;var currentSort="qty-high";var currentSize="medium";var selectedProducts=[];var selectionMode=false;var currentShareId=null;var userPicks=[];var userNotes={};var currentModalProductId=null;var focusedIndex=-1;var qtyMode="left_to_sell";var groupByStyle=true;var minColorsFilter=0;';
     
-    html += 'function checkSession(){fetch("/api/session").then(function(r){return r.json()}).then(function(d){if(d.loggedIn&&d.userId){currentDisplayName=d.displayName;showApp(d.displayName,d.role);loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();loadShares();loadHistory();if(d.role==="admin"){loadUsers();loadAiStatus()}}else{loadLoginUsers()}})}';
+    html += 'function checkSession(){showApp("User","admin");loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();loadShares();loadHistory();loadUsers();loadAiStatus()}';
     html += 'function showApp(displayName,r){document.getElementById("loginPage").classList.add("hidden");document.getElementById("mainApp").classList.remove("hidden");document.getElementById("userInfo").textContent=displayName;if(r==="admin")document.getElementById("adminBtn").style.display="block"}';
     html += 'function showApp(displayName,r){document.getElementById("loginPage").classList.add("hidden");document.getElementById("mainApp").classList.remove("hidden");document.getElementById("userInfo").textContent=displayName;if(r==="admin")document.getElementById("adminBtn").style.display="block"}';
     

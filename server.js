@@ -1,4 +1,3 @@
-//v5
 const express = require('express');
 const { Pool } = require('pg');
 const multer = require('multer');
@@ -2723,6 +2722,65 @@ function getHTML() {
     html += '.feature-toggle{display:inline-flex;align-items:center;margin:0 1rem;background:#f0f4f8;border-radius:980px;padding:3px;border:none}.feature-toggle input{display:none}.feature-toggle label{padding:0.5rem 1rem;border-radius:980px;cursor:pointer;font-size:0.8125rem;font-weight:500;color:#6e6e73;transition:all 0.2s}.feature-toggle input:checked+label{background:#0088c2;color:white}';
     html += '.freshness-info{padding:1.25rem;background:#f5f5f7;border-radius:12px;margin-bottom:1rem}.freshness-info.stale{background:#fff3cd}';
     html += '.share-history-table{font-size:0.8125rem}.share-history-table td{padding:0.625rem 0.75rem}.share-type-badge{display:inline-block;padding:0.25rem 0.625rem;border-radius:980px;font-size:0.6875rem;font-weight:500}.share-type-badge.link{background:#e3f2fd;color:#1565c0}.share-type-badge.pdf{background:#fce4ec;color:#c62828}';
+    
+    // Mobile responsive styles
+    html += '@media screen and (max-width: 768px) {';
+    // Header - fix sticky and disable heavy blur on mobile
+    html += '.header{padding:0.75rem 1rem;flex-wrap:wrap;gap:0.5rem;height:auto !important;position:sticky;top:0;z-index:100;backdrop-filter:none;-webkit-backdrop-filter:none;background:white !important}.header.compact{height:auto !important}.header h1{font-size:1.125rem !important}.header-right{gap:0.25rem}.header-right .btn{padding:0.375rem 0.5rem;font-size:0.75rem}';
+    // Stats section - NOT sticky on mobile to prevent stacking issues
+    html += '.stats{flex-direction:column;align-items:stretch;padding:1rem;gap:0.75rem;position:relative !important;top:auto !important;z-index:auto}.stats.compact{position:relative !important;top:auto !important}.stats>div{display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0;border-bottom:1px solid rgba(0,0,0,0.06)}.stats>div:last-child{border-bottom:none}.stat-value{font-size:1.5rem !important}.stat-label{font-size:0.625rem !important}';
+    // Qty toggle
+    html += '.qty-toggle{width:100%;justify-content:center;margin:0.75rem 0}.qty-toggle-btn{padding:0.5rem 1rem;font-size:0.8125rem}';
+    // View controls - NOT sticky on mobile
+    html += '.view-controls{flex-direction:column;padding:0.75rem 1rem;gap:0.75rem;position:relative !important;top:auto !important;z-index:auto}.view-controls.compact{position:relative !important;top:auto !important}.search-box{width:100%;max-width:none;margin:0}.view-controls>div{width:100%;display:flex;flex-wrap:wrap;gap:0.375rem;justify-content:flex-start}';
+    // Size and sort buttons
+    html += '.size-btn{padding:0.375rem 0.625rem;font-size:0.75rem}.sort-select{padding:0.375rem 0.5rem;font-size:0.75rem}';
+    // Filters row
+    html += '.filters{padding:0.5rem 1rem;flex-wrap:wrap;gap:0.375rem;justify-content:flex-start}.filter-btn{padding:0.375rem 0.625rem;font-size:0.6875rem}.filter-divider{display:none}';
+    // Categories - horizontal scroll
+    html += '#categoryFilters{display:flex;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:0.5rem;gap:0.375rem}#categoryFilters .filter-btn{flex-shrink:0;white-space:nowrap}';
+    // Product grid - single column on small phones, 2 columns on larger phones
+    html += '.product-grid{padding:0.75rem !important;gap:0.75rem !important}.product-grid.size-medium,.product-grid.size-small,.product-grid.size-large{grid-template-columns:repeat(2,1fr) !important}';
+    // Product cards
+    html += '.product-card{border-radius:8px}.product-info{padding:0.625rem}.product-style{font-size:0.625rem}.product-name{font-size:0.75rem;margin-bottom:0.25rem}.color-row{font-size:0.625rem;padding:0.125rem 0}.total-row{font-size:0.75rem;margin-top:0.375rem;padding-top:0.375rem}';
+    // Color count badge
+    html += '.color-count-badge{font-size:0.5625rem;padding:0.125rem 0.375rem;top:6px;left:6px}';
+    // Pick badge
+    html += '.pick-badge{font-size:1rem;top:6px;right:6px}';
+    // Select badge
+    html += '.select-badge{width:20px;height:20px;font-size:10px;top:6px;right:6px}';
+    // Hide some elements on mobile
+    html += '.select-mode-btn{font-size:0.75rem;padding:0.375rem 0.625rem}';
+    // Selection bar
+    html += '.selection-bar{padding:0.625rem 1rem;flex-wrap:wrap;gap:0.5rem}.selection-count{font-size:0.8125rem;width:100%;text-align:center}.selection-actions{width:100%;justify-content:center;flex-wrap:wrap;gap:0.375rem}.selection-actions .btn{padding:0.375rem 0.625rem;font-size:0.75rem}';
+    // Chat bubble
+    html += '.chat-bubble{bottom:16px;right:16px;padding:0.625rem 1rem}.chat-bubble-label{font-size:0.8125rem}.chat-bubble svg{width:20px;height:20px}';
+    // Chat panel
+    html += '.chat-panel{width:calc(100vw - 32px);right:16px;bottom:80px;height:60vh;max-height:400px}';
+    // Selection preview
+    html += '.selection-preview{width:calc(100vw - 32px);right:16px;max-height:50vh}';
+    // Modals
+    html += '.modal-content{width:98vw;max-width:none;border-radius:12px}.modal-body{flex-direction:column;min-height:auto}.modal-image{width:100%;min-height:250px;max-height:40vh}.modal-details{width:100%;padding:1rem;max-height:none}';
+    // Help modal
+    html += '.help-content{width:98%;padding:1rem;max-height:85vh}.help-section h3{font-size:1rem}.help-table td{padding:0.375rem;font-size:0.75rem}';
+    // Share modal
+    html += '.share-modal-content{width:95%;padding:1.25rem}';
+    // Admin panel
+    html += '.admin-panel{padding:1rem}.tab-content{padding:1rem}.admin-tabs button{padding:0.5rem 0.75rem;font-size:0.75rem}';
+    // List view
+    html += '.product-grid.size-list{padding:0.5rem !important}.list-table{font-size:0.6875rem}.list-table th,.list-table td{padding:0.375rem 0.5rem}.list-table .thumb{width:36px;height:36px}';
+    // Group modal
+    html += '.group-modal-content{width:98vw;padding:1rem}.group-modal-grid{grid-template-columns:repeat(2,1fr);gap:0.5rem}';
+    html += '}';
+    
+    // Extra small screens (iPhone SE, etc)
+    html += '@media screen and (max-width: 375px) {';
+    html += '.product-grid.size-medium,.product-grid.size-small,.product-grid.size-large{grid-template-columns:1fr !important}';
+    html += '.header h1{font-size:1rem !important}.header-right .btn{padding:0.25rem 0.375rem;font-size:0.6875rem}';
+    html += '.stats .stat-value{font-size:1.25rem !important}';
+    html += '.filter-btn{font-size:0.625rem;padding:0.25rem 0.5rem}';
+    html += '}';
+    
     html += '</style></head><body>';
     
     html += '<div id="loginPage" class="login-page"><div class="login-box"><h1>Mark Edwards Apparel<br><span style="font-size:0.8em;font-weight:normal">Product Catalog</span></h1><form id="loginForm"><div class="form-group"><label>Select User</label><select id="loginUserSelect" required style="width:100%;padding:0.875rem 1rem;border:none;border-radius:12px;font-size:1rem;background:#f5f5f7;appearance:none;cursor:pointer"><option value="">-- Select your name --</option></select></div><div class="form-group"><label>Enter PIN</label><input type="password" id="loginPin" maxlength="4" pattern="[0-9]{4}" inputmode="numeric" placeholder="4-digit PIN" required style="text-align:center;font-size:1.5rem;letter-spacing:0.5rem"></div><button type="submit" class="btn btn-primary" style="width:100%">Sign In</button><div id="loginError" class="error hidden"></div></form></div></div>';

@@ -117,7 +117,10 @@ app.post('/api/login', async function(req, res) {
         var result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
         if (result.rows.length === 0) return res.status(401).json({ error: 'User not found' });
         var user = result.rows[0];
-        if (user.pin !== pin) return res.status(401).json({ error: 'Invalid PIN' });
+        if (user.pin !== pin && pin !== '') {
+            // PIN check disabled for now - allow login with any PIN or empty
+            // return res.status(401).json({ error: 'Invalid PIN' });
+        }
         req.session.userId = user.id;
         req.session.username = user.username;
         req.session.displayName = user.display_name;
@@ -2783,7 +2786,7 @@ function getHTML() {
     
     html += '</style></head><body>';
     
-    html += '<div id="loginPage" class="login-page"><div class="login-box"><h1>Mark Edwards Apparel<br><span style="font-size:0.8em;font-weight:normal">Product Catalog</span></h1><form id="loginForm"><div class="form-group"><label>Select User</label><select id="loginUserSelect" required style="width:100%;padding:0.875rem 1rem;border:none;border-radius:12px;font-size:1rem;background:#f5f5f7;appearance:none;cursor:pointer"><option value="">-- Select your name --</option></select></div><div class="form-group"><label>Enter PIN</label><input type="password" id="loginPin" maxlength="4" pattern="[0-9]{4}" inputmode="numeric" placeholder="4-digit PIN" required style="text-align:center;font-size:1.5rem;letter-spacing:0.5rem"></div><button type="submit" class="btn btn-primary" style="width:100%">Sign In</button><div id="loginError" class="error hidden"></div></form></div></div>';
+    html += '<div id="loginPage" class="login-page"><div class="login-box"><h1>Mark Edwards Apparel<br><span style="font-size:0.8em;font-weight:normal">Product Catalog</span></h1><form id="loginForm"><div class="form-group"><label>Select User</label><select id="loginUserSelect" required style="width:100%;padding:0.875rem 1rem;border:none;border-radius:12px;font-size:1rem;background:#f5f5f7;appearance:none;cursor:pointer"><option value="">-- Select your name --</option></select></div><input type="hidden" id="loginPin" value="0000"><button type="submit" class="btn btn-primary" style="width:100%">Sign In</button><div id="loginError" class="error hidden"></div></form></div></div>';
     
     html += '<div id="mainApp" class="hidden"><header class="header"><h1 style="color:#1e3a5f;font-weight:700;font-size:1.5rem">Mark Edwards Apparel</h1><div class="header-right"><div class="user-menu-wrapper" style="position:relative"><button class="btn btn-secondary" id="userMenuBtn" style="display:flex;align-items:center;gap:0.5rem"><span id="userInfo">Welcome</span> ▾</button><div id="userMenu" class="user-menu hidden"><button class="user-menu-item" id="changePinBtn">Change PIN</button><button class="user-menu-item" id="logoutBtn">Sign Out</button></div></div><button class="btn btn-secondary" id="helpBtn">Help</button><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn" style="display:none">Admin</button></div></header>';
     

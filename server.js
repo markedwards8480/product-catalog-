@@ -66,8 +66,14 @@ async function initDB() {
         await pool.query('CREATE TABLE IF NOT EXISTS sales_data (id SERIAL PRIMARY KEY, document_type VARCHAR(50), document_number VARCHAR(100), doc_date DATE, customer_vendor VARCHAR(255), line_item_sku VARCHAR(255), base_style VARCHAR(100), status VARCHAR(50), quantity DECIMAL(12,2), amount DECIMAL(12,2), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
         await pool.query('CREATE INDEX IF NOT EXISTS idx_sales_data_base_style ON sales_data(base_style)');
         await pool.query('CREATE INDEX IF NOT EXISTS idx_sales_data_document_type ON sales_data(document_type)');
+        // Clean up duplicates before creating unique index
+        try {
+            // Delete duplicate rows, keeping only the one with the highest id
+            await pool.query('DELETE FROM sales_data a USING sales_data b WHERE a.id < b.id AND a.document_number = b.document_number AND a.line_item_sku = b.line_item_sku');
+            console.log('Cleaned up duplicate sales_data rows');
+        } catch (e) { console.log('No duplicates to clean or table empty'); }
         // Unique constraint for upsert functionality
-        try { await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_data_unique ON sales_data(document_number, line_item_sku)'); } catch (e) { console.log('Unique index may already exist'); }
+        try { await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_data_unique ON sales_data(document_number, line_item_sku)'); } catch (e) { console.log('Unique index may already exist or duplicates remain:', e.message); }
         
         // Add columns if they don't exist (for existing databases)
         try { await pool.query('ALTER TABLE selections ADD COLUMN IF NOT EXISTS share_type VARCHAR(50) DEFAULT \'link\''); } catch (e) {}

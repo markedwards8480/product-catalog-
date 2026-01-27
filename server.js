@@ -677,6 +677,92 @@ function startWorkDriveImportJob() {
     }, WORKDRIVE_CHECK_INTERVAL);
 }
 
+// Nightly image cache refresh - checks for stale images and refreshes them
+var IMAGE_CACHE_MAX_AGE_DAYS = 7;
+async function refreshStaleImageCache() {
+    try {
+        if (!fs.existsSync(IMAGE_CACHE_DIR)) {
+            console.log('Image cache directory not available, skipping refresh');
+            return;
+        }
+        
+        console.log('Starting nightly image cache refresh...');
+        var files = fs.readdirSync(IMAGE_CACHE_DIR).filter(f => f.endsWith('.meta'));
+        var refreshed = 0;
+        var skipped = 0;
+        var errors = 0;
+        var maxAgeMs = IMAGE_CACHE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+        var now = Date.now();
+        
+        for (var i = 0; i < files.length; i++) {
+            try {
+                var metaPath = path.join(IMAGE_CACHE_DIR, files[i]);
+                var meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+                var cachedAt = new Date(meta.cachedAt).getTime();
+                
+                // Skip if cached less than max age days ago
+                if (now - cachedAt < maxAgeMs) {
+                    skipped++;
+                    continue;
+                }
+                
+                // Refresh this image
+                var fileId = meta.fileId;
+                if (!fileId) {
+                    skipped++;
+                    continue;
+                }
+                
+                if (!zohoAccessToken) await refreshZohoToken();
+                var imageUrl = 'https://workdrive.zoho.com/api/v1/download/' + fileId;
+                var response = await fetch(imageUrl, { 
+                    headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } 
+                });
+                
+                if (response.ok) {
+                    var contentType = response.headers.get('content-type') || 'image/jpeg';
+                    var imageBuffer = Buffer.from(await response.arrayBuffer());
+                    var cachePath = path.join(IMAGE_CACHE_DIR, fileId);
+                    fs.writeFileSync(cachePath, imageBuffer);
+                    fs.writeFileSync(metaPath, JSON.stringify({
+                        contentType: contentType,
+                        cachedAt: new Date().toISOString(),
+                        fileId: fileId
+                    }));
+                    refreshed++;
+                } else {
+                    errors++;
+                }
+                
+                // Rate limit - wait 200ms between API calls
+                await new Promise(resolve => setTimeout(resolve, 200));
+                
+            } catch (err) {
+                errors++;
+            }
+        }
+        
+        console.log('Nightly image cache refresh complete: ' + refreshed + ' refreshed, ' + skipped + ' skipped (< ' + IMAGE_CACHE_MAX_AGE_DAYS + ' days old), ' + errors + ' errors');
+    } catch (err) {
+        console.log('Error in nightly image cache refresh:', err.message);
+    }
+}
+
+// Start nightly image refresh job (runs at 2 AM server time, checks every hour if it's time)
+var lastImageRefreshDate = null;
+setInterval(function() {
+    var now = new Date();
+    var hour = now.getUTCHours();
+    var dateStr = now.toISOString().split('T')[0];
+    
+    // Run at 7 UTC (2 AM EST) if we haven't run today
+    if (hour === 7 && lastImageRefreshDate !== dateStr) {
+        lastImageRefreshDate = dateStr;
+        refreshStaleImageCache();
+    }
+}, 60 * 60 * 1000); // Check every hour
+console.log('Started nightly image cache refresh job (runs at 2 AM EST, refreshes images older than ' + IMAGE_CACHE_MAX_AGE_DAYS + ' days)');
+
 // AI Image Analysis using Claude Vision
 async function analyzeProductImage(imageUrl, productName) {
     try {
@@ -2137,21 +2223,79 @@ app.post('/api/sales-data/clear', requireAuth, requireAdmin, async function(req,
     }
 });
 
+// Fix duplicate sales data and recreate unique index
+app.post('/api/sales-data/fix-duplicates', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        console.log('Starting sales data duplicate fix...');
+        
+        // Count duplicates first
+        var dupCount = await pool.query(`
+            SELECT COUNT(*) as count FROM (
+                SELECT document_number, line_item_sku, COUNT(*) as cnt 
+                FROM sales_data 
+                GROUP BY document_number, line_item_sku 
+                HAVING COUNT(*) > 1
+            ) as dups
+        `);
+        var duplicatesFound = parseInt(dupCount.rows[0].count);
+        console.log('Found ' + duplicatesFound + ' duplicate key combinations');
+        
+        // Drop the index if it exists
+        try { await pool.query('DROP INDEX IF EXISTS idx_sales_data_unique'); } catch (e) {}
+        
+        // Delete duplicates keeping only the one with the highest id
+        var deleteResult = await pool.query(`
+            DELETE FROM sales_data a USING sales_data b 
+            WHERE a.id < b.id 
+            AND a.document_number = b.document_number 
+            AND a.line_item_sku = b.line_item_sku
+        `);
+        var rowsDeleted = deleteResult.rowCount;
+        console.log('Deleted ' + rowsDeleted + ' duplicate rows');
+        
+        // Recreate the unique index
+        await pool.query('CREATE UNIQUE INDEX idx_sales_data_unique ON sales_data(document_number, line_item_sku)');
+        console.log('Unique index created successfully');
+        
+        res.json({ 
+            success: true, 
+            duplicatesFound: duplicatesFound,
+            rowsDeleted: rowsDeleted,
+            message: 'Fixed ' + rowsDeleted + ' duplicate rows and recreated unique index'
+        });
+    } catch (err) {
+        console.log('Error fixing duplicates:', err.message);
+        res.json({ success: false, error: err.message });
+    }
+});
+
 // Image cache management endpoints
 app.get('/api/image-cache/stats', requireAuth, requireAdmin, async function(req, res) {
     try {
-        var stats = { cached: 0, totalSize: 0, cacheDir: IMAGE_CACHE_DIR, available: false };
+        var stats = { cached: 0, totalSize: 0, cacheDir: IMAGE_CACHE_DIR, available: false, staleCount: 0 };
         if (fs.existsSync(IMAGE_CACHE_DIR)) {
             stats.available = true;
             var files = fs.readdirSync(IMAGE_CACHE_DIR).filter(f => !f.endsWith('.meta'));
             stats.cached = files.length;
+            var maxAgeMs = IMAGE_CACHE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+            var now = Date.now();
             files.forEach(function(f) {
                 try {
                     var filePath = path.join(IMAGE_CACHE_DIR, f);
                     stats.totalSize += fs.statSync(filePath).size;
+                    // Check if stale
+                    var metaPath = filePath + '.meta';
+                    if (fs.existsSync(metaPath)) {
+                        var meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+                        var cachedAt = new Date(meta.cachedAt).getTime();
+                        if (now - cachedAt >= maxAgeMs) {
+                            stats.staleCount++;
+                        }
+                    }
                 } catch (e) {}
             });
             stats.totalSizeMB = (stats.totalSize / (1024 * 1024)).toFixed(2);
+            stats.maxAgeDays = IMAGE_CACHE_MAX_AGE_DAYS;
         }
         // Get total products with images
         var productCount = await pool.query("SELECT COUNT(*) FROM products WHERE image_url IS NOT NULL AND image_url != ''");

@@ -72,6 +72,9 @@ async function initDB() {
         await pool.query('CREATE TABLE IF NOT EXISTS user_notes (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, product_id INTEGER REFERENCES products(id) ON DELETE CASCADE, note TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, product_id))');
         // Add base_style column for storing notes by style instead of individual product
         await pool.query('ALTER TABLE user_notes ADD COLUMN IF NOT EXISTS base_style VARCHAR(100)');
+        // Make product_id and user_id nullable since we're using base_style now
+        await pool.query('ALTER TABLE user_notes ALTER COLUMN product_id DROP NOT NULL');
+        await pool.query('ALTER TABLE user_notes ALTER COLUMN user_id DROP NOT NULL');
         // Create index for faster lookups by base_style
         await pool.query('CREATE INDEX IF NOT EXISTS idx_user_notes_base_style ON user_notes(base_style)');
         await pool.query('CREATE TABLE IF NOT EXISTS sales_history_cache (id SERIAL PRIMARY KEY, base_style VARCHAR(100) UNIQUE NOT NULL, summary JSONB, history JSONB, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
@@ -325,7 +328,7 @@ app.post('/api/notes/:baseStyle', requireAuth, async function(req, res) {
         res.json({ success: true });
     } catch (err) { 
         console.error('Error saving note:', err);
-        res.status(500).json({ error: err.message }); 
+        res.status(500).json({ success: false, error: err.message }); 
     }
 });
 

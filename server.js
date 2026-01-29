@@ -395,9 +395,11 @@ async function processInventoryCSV(csvContent, filename) {
     var syncResult = await pool.query('INSERT INTO sync_history (sync_type, status) VALUES ($1, $2) RETURNING id', ['csv_import', 'in_progress']);
     var currentImportId = syncResult.rows[0].id;
     
-    var existingStylesResult = await pool.query('SELECT style_id FROM products');
-    var existingStyleSet = {};
-    existingStylesResult.rows.forEach(function(r) { existingStyleSet[r.style_id] = true; });
+    // FULL REPLACE: Delete all existing products and colors before importing fresh data
+    console.log('Full replace: Clearing all existing products and colors...');
+    await pool.query('DELETE FROM product_colors');
+    await pool.query('DELETE FROM products');
+    console.log('Existing data cleared. Importing fresh inventory...');
     
     var imported = 0, skipped = 0, newArrivals = 0;
     var lastStyleId = '', lastImageUrl = '', lastCategory = '';
@@ -452,30 +454,14 @@ async function processInventoryCSV(csvContent, filename) {
             var name = validCategory + ' - ' + baseStyle;
             var validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) ? imageUrl : lastImageUrl;
             
-            var isNewStyle = !existingStyleSet[styleId];
-            var productResult = await pool.query('SELECT id, image_url FROM products WHERE style_id = $1', [styleId]);
-            var productId;
-            
-            if (productResult.rows.length > 0) {
-                productId = productResult.rows[0].id;
-                var finalImage = validImageUrl || productResult.rows[0].image_url;
-                await pool.query('UPDATE products SET name=$1, category=$2, base_style=$3, image_url=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5', [name, validCategory, baseStyle, finalImage, productId]);
-            } else {
-                var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url, first_seen_import) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl, currentImportId]);
-                productId = ins.rows[0].id;
-                if (isNewStyle) newArrivals++;
-                existingStyleSet[styleId] = true;
-            }
+            // Since we deleted all products, just insert directly
+            var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url, first_seen_import) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl, currentImportId]);
+            var productId = ins.rows[0].id;
             
             if (color && color !== '-No Value-') {
-                var colorResult = await pool.query('SELECT id FROM product_colors WHERE product_id=$1 AND color_name=$2', [productId, color]);
-                if (colorResult.rows.length > 0) {
-                    await pool.query('UPDATE product_colors SET available_now=$1, left_to_sell=$2, on_hand=$3, open_order=$4, to_come=$5, available_qty=$6, updated_at=CURRENT_TIMESTAMP WHERE id=$7',
-                        [availableNow, leftToSell, onHand, openOrder, toCome, availableNow, colorResult.rows[0].id]);
-                } else {
-                    await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-                        [productId, color, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]);
-                }
+                // Since we deleted all colors, just insert directly
+                await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+                    [productId, color, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]);
             }
             imported++;
         } catch (rowErr) {
@@ -509,10 +495,10 @@ async function processSalesCSV(csvContent, filename) {
     var qtyIdx = colMap['quantity'];
     var amtIdx = colMap['amount'];
     
-    // Load existing records for duplicate detection
-    var existingResult = await pool.query('SELECT document_number, line_item_sku FROM sales_data');
-    var existingKeys = new Set();
-    existingResult.rows.forEach(function(r) { existingKeys.add(r.document_number + '|' + r.line_item_sku); });
+    // FULL REPLACE: Delete all existing sales data before importing fresh data
+    console.log('Full replace: Clearing all existing sales data...');
+    await pool.query('DELETE FROM sales_data');
+    console.log('Existing sales data cleared. Importing fresh sales data...');
     
     var imported = 0, skipped = 0, errors = 0;
     var batch = [];
@@ -547,26 +533,21 @@ async function processSalesCSV(csvContent, filename) {
             var baseStyle = style ? style.split('-')[0] : (sku ? sku.split('-')[0] : '');
             
             if (docType && docNum && baseStyle) {
-                var key = docNum + '|' + sku;
-                if (existingKeys.has(key)) {
-                    skipped++;
-                } else {
-                    batch.push([docType, docNum, docDate, customer, sku, baseStyle, status, qty, amt]);
-                    existingKeys.add(key);
-                    
-                    if (batch.length >= batchSize) {
-                        var values = [];
-                        var placeholders = [];
-                        var paramIdx = 1;
-                        for (var b = 0; b < batch.length; b++) {
-                            var item = batch[b];
-                            placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
-                            values = values.concat(item);
-                        }
-                        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
-                        imported += batch.length;
-                        batch = [];
+                // Since we deleted all data, just add to batch
+                batch.push([docType, docNum, docDate, customer, sku, baseStyle, status, qty, amt]);
+                
+                if (batch.length >= batchSize) {
+                    var values = [];
+                    var placeholders = [];
+                    var paramIdx = 1;
+                    for (var b = 0; b < batch.length; b++) {
+                        var item = batch[b];
+                        placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
+                        values = values.concat(item);
                     }
+                    await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+                    imported += batch.length;
+                    batch = [];
                 }
             }
         } catch (err) {
@@ -3172,7 +3153,7 @@ function getHTML() {
     html += '<div class="share-modal" id="shareModal"><div class="share-modal-content"><h3>Share Selection</h3><div id="shareForm"><input type="text" id="selectionName" placeholder="Name this selection (e.g. Spring Collection for Acme Co)"><div style="margin:1rem 0"><label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.875rem;color:#4a5568"><input type="checkbox" id="hideQuantities" style="width:18px;height:18px;accent-color:#0088c2"> Hide quantities (Available Now & Left to Sell)</label></div><div class="share-modal-actions"><button class="btn btn-secondary" id="cancelShareBtn">Cancel</button><button class="btn btn-primary" id="createShareBtn">Create Link</button></div></div><div class="share-result hidden" id="shareResult"><p style="margin-bottom:1rem;color:#666" id="shareNameDisplay"></p><div class="share-buttons"><button class="share-action-btn" id="emailLinkBtn">Email Link</button><button class="share-action-btn" id="textLinkBtn">Text Link</button><button class="share-action-btn" id="copyLinkBtn">Copy Link</button><a class="share-action-btn" id="pdfLink" href="" target="_blank">Download PDF</a></div><div style="margin-top:1.5rem;text-align:center"><button class="btn btn-secondary" id="closeShareModalBtn">Done</button></div></div></div></div>';
     
     // Product modal
-    html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button><div class="modal-body"><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div style="margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid #e0e0e0"><div class="product-style" id="modalStyle" style="color:#0088c2;font-size:0.875rem;font-weight:600;margin-bottom:0.25rem"></div><h2 id="modalName" style="margin:0;padding:0;font-size:1.75rem;font-weight:600;color:#1e3a5f;background:none"></h2><p id="modalCategory" style="color:#6e6e73;margin:0.25rem 0 0;font-size:0.875rem"></p></div><div id="modalColors"></div><div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div><div class="modal-actions"><button class="btn btn-secondary btn-sm" id="modalPickBtn">♡ Add to My Picks</button></div><div class="sales-history-section"><h3 style="margin:1.5rem 0 0.75rem;font-size:1rem;display:flex;align-items:center;gap:0.5rem;color:#1e3a5f;background:none">Sales & Import PO History <span id="salesHistoryLoading" style="font-size:0.75rem;color:#666;font-weight:normal">(loading...)</span></h3><div id="salesHistorySummary" style="display:flex;gap:0.5rem;margin-bottom:0.75rem"></div><div id="salesHistoryFilter" style="margin-bottom:0.5rem;font-size:0.8rem;color:#666"></div><div id="salesHistoryList" style="max-height:200px;overflow-y:auto;font-size:0.875rem"></div></div><div class="note-section"><label><strong>Notes:</strong></label><textarea id="modalNote" placeholder="Add notes about this product..."></textarea><button class="btn btn-sm btn-primary" id="saveNoteBtn">Save Note</button></div></div></div></div></div>';
+    html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button><div class="modal-body"><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div style="margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid #e0e0e0"><div class="product-style" id="modalStyle" style="color:#0088c2;font-size:0.875rem;font-weight:600;margin-bottom:0.25rem"></div><h2 id="modalName" style="margin:0;padding:0;font-size:1.75rem;font-weight:600;color:#1e3a5f;background:none"></h2><p id="modalCategory" style="color:#6e6e73;margin:0.25rem 0 0;font-size:0.875rem"></p></div><div id="modalColors"></div><div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div><div class="modal-actions"><button class="btn btn-secondary btn-sm" id="modalPickBtn">♡ Add to My Picks</button></div><div class="sales-history-section"><h3 style="margin:1.5rem 0 0.5rem;font-size:1rem;display:flex;align-items:center;gap:0.5rem;color:#1e3a5f;background:none">Sales & Import PO History <span id="salesHistoryLoading" style="font-size:0.75rem;color:#666;font-weight:normal">(loading...)</span></h3><p style="margin:0 0 0.75rem;font-size:0.75rem;color:#999;font-style:italic">(Showing trailing 12 months)</p><div id="salesHistorySummary" style="display:flex;gap:0.5rem;margin-bottom:0.75rem"></div><div id="salesHistoryFilter" style="margin-bottom:0.5rem;font-size:0.8rem;color:#666"></div><div id="salesHistoryList" style="max-height:200px;overflow-y:auto;font-size:0.875rem"></div></div><div class="note-section"><label><strong>Notes:</strong></label><textarea id="modalNote" placeholder="Add notes about this product..."></textarea><button class="btn btn-sm btn-primary" id="saveNoteBtn">Save Note</button></div></div></div></div></div>';
     
     
     // Change PIN modal

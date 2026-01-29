@@ -277,8 +277,8 @@ app.delete('/api/picks/:productId', requireAuth, async function(req, res) {
 // User notes
 app.get('/api/notes', requireAuth, async function(req, res) {
     try {
-        var userId = req.session.userId || 1;
-        var result = await pool.query('SELECT product_id, note FROM user_notes WHERE user_id = $1', [userId]);
+        // Notes are now communal - not tied to specific users
+        var result = await pool.query('SELECT product_id, note FROM user_notes');
         var notes = {};
         result.rows.forEach(function(r) { notes[r.product_id] = r.note; });
         res.json(notes);
@@ -287,13 +287,14 @@ app.get('/api/notes', requireAuth, async function(req, res) {
 
 app.post('/api/notes/:productId', requireAuth, async function(req, res) {
     try {
-        var userId = req.session.userId || 1;
+        // Notes are now communal - use a fixed user_id for all notes
+        var communalUserId = 1;
         var productId = parseInt(req.params.productId);
         var note = req.body.note || '';
         if (note.trim() === '') {
-            await pool.query('DELETE FROM user_notes WHERE user_id = $1 AND product_id = $2', [userId, productId]);
+            await pool.query('DELETE FROM user_notes WHERE user_id = $1 AND product_id = $2', [communalUserId, productId]);
         } else {
-            await pool.query('INSERT INTO user_notes (user_id, product_id, note, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (user_id, product_id) DO UPDATE SET note = $3, updated_at = NOW()', [userId, productId, note]);
+            await pool.query('INSERT INTO user_notes (user_id, product_id, note, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (user_id, product_id) DO UPDATE SET note = $3, updated_at = NOW()', [communalUserId, productId, note]);
         }
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
@@ -3399,7 +3400,7 @@ function getHTML() {
     html += 'document.getElementById("closeShareModalBtn").addEventListener("click",function(){document.getElementById("shareModal").classList.remove("active")});';
     
     html += 'var currentShareUrl="";';
-    html += 'document.getElementById("createShareBtn").addEventListener("click",function(){var name=document.getElementById("selectionName").value||"Product Selection";var hideQuantities=document.getElementById("hideQuantities").checked;var notesObj={};selectedProducts.forEach(function(pid){if(userNotes[pid]&&userNotes[pid].trim()){notesObj[pid]=userNotes[pid]}});fetch("/api/selections",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({productIds:selectedProducts,name:name,shareType:"link",hideQuantities:hideQuantities,notes:notesObj})}).then(function(r){return r.json()}).then(function(d){if(d.success){currentShareId=d.shareId;currentShareUrl=window.location.origin+"/share/"+d.shareId;document.getElementById("shareNameDisplay").textContent=name+" • "+selectedProducts.length+" items";document.getElementById("pdfLink").href="/api/selections/"+d.shareId+"/pdf";document.getElementById("shareForm").classList.add("hidden");document.getElementById("shareResult").classList.remove("hidden");loadShares()}else{alert(d.error)}})});';
+    html += 'document.getElementById("createShareBtn").addEventListener("click",function(){var name=document.getElementById("selectionName").value||"Product Selection";var hideQuantities=document.getElementById("hideQuantities").checked;fetch("/api/selections",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({productIds:selectedProducts,name:name,shareType:"link",hideQuantities:hideQuantities})}).then(function(r){return r.json()}).then(function(d){if(d.success){currentShareId=d.shareId;currentShareUrl=window.location.origin+"/share/"+d.shareId;document.getElementById("shareNameDisplay").textContent=name+" • "+selectedProducts.length+" items";document.getElementById("pdfLink").href="/api/selections/"+d.shareId+"/pdf";document.getElementById("shareForm").classList.add("hidden");document.getElementById("shareResult").classList.remove("hidden");loadShares()}else{alert(d.error)}})});';
     
     html += 'document.getElementById("copyLinkBtn").addEventListener("click",function(){navigator.clipboard.writeText(currentShareUrl).then(function(){var btn=document.getElementById("copyLinkBtn");btn.textContent="✓ Copied!";setTimeout(function(){btn.textContent="Copy Link"},2000)})});';
     
@@ -3458,7 +3459,7 @@ function getHTML() {
     html += 'document.getElementById("modalPickBtn").addEventListener("click",function(){if(currentModalProductId){togglePick(currentModalProductId,{stopPropagation:function(){}});var isPicked=userPicks.indexOf(currentModalProductId)!==-1;this.textContent=isPicked?"♥ In My Picks":"♡ Add to My Picks"}});';
     
     // Save note button
-    html += 'document.getElementById("saveNoteBtn").addEventListener("click",function(){if(currentModalProductId){var note=document.getElementById("modalNote").value;fetch("/api/notes/"+currentModalProductId,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({note:note})}).then(function(){if(note.trim()){userNotes[currentModalProductId]=note}else{delete userNotes[currentModalProductId]}renderProducts()})}});';
+    html += 'document.getElementById("saveNoteBtn").addEventListener("click",function(){if(currentModalProductId){var btn=this;var originalText=btn.textContent;btn.textContent="Saving...";btn.disabled=true;var note=document.getElementById("modalNote").value;fetch("/api/notes/"+currentModalProductId,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({note:note})}).then(function(r){return r.json()}).then(function(d){if(d.success){if(note.trim()){userNotes[currentModalProductId]=note}else{delete userNotes[currentModalProductId]}renderProducts();btn.textContent="✓ Saved!";setTimeout(function(){btn.textContent=originalText;btn.disabled=false},1500)}else{btn.textContent="Error";setTimeout(function(){btn.textContent=originalText;btn.disabled=false},1500)}}).catch(function(err){btn.textContent="Error";setTimeout(function(){btn.textContent=originalText;btn.disabled=false},1500)})}});';
     
     // Keyboard navigation
     html += 'document.addEventListener("keydown",function(e){if(document.getElementById("modal").classList.contains("active")){if(e.key==="Escape"){document.getElementById("modal").classList.remove("active")}return}if(document.getElementById("shareModal").classList.contains("active")){if(e.key==="Escape"){document.getElementById("shareModal").classList.remove("active")}return}if(document.activeElement.tagName==="INPUT"||document.activeElement.tagName==="TEXTAREA")return;var cards=document.querySelectorAll(".product-card");if(cards.length===0)return;if(e.key==="ArrowRight"||e.key==="ArrowDown"){e.preventDefault();focusedIndex=Math.min(focusedIndex+1,cards.length-1);updateFocus(cards)}else if(e.key==="ArrowLeft"||e.key==="ArrowUp"){e.preventDefault();focusedIndex=Math.max(focusedIndex-1,0);updateFocus(cards)}else if(e.key==="Enter"&&focusedIndex>=0){e.preventDefault();var id=parseInt(products[focusedIndex].id);if(selectionMode){var idx=selectedProducts.indexOf(id);if(idx===-1){selectedProducts.push(id)}else{selectedProducts.splice(idx,1)}updateSelectionUI();renderProducts()}else{showProductModal(id)}}else if(e.key===" "&&focusedIndex>=0&&selectionMode){e.preventDefault();var id=parseInt(products[focusedIndex].id);var idx=selectedProducts.indexOf(id);if(idx===-1){selectedProducts.push(id)}else{selectedProducts.splice(idx,1)}updateSelectionUI();renderProducts()}});';

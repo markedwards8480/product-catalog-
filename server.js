@@ -20,7 +20,7 @@ const AUTH_ENABLED = false;
 // Set to true to enable Supply vs Demand view
 // Set to false to disable this feature
 // ============================================
-const SUPPLY_DEMAND_FEATURE_ENABLED = true;
+const SUPPLY_DEMAND_FEATURE_ENABLED = false;
 // ============================================
 
 // Image cache directory (Railway Volume mount point)

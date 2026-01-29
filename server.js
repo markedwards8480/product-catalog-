@@ -2262,14 +2262,14 @@ app.get('/api/open-orders-by-style', requireAuth, async function(req, res) {
             var qty = parseInt(row.total_qty) || 0;
 
             if (docType.indexOf('purchase') !== -1) {
-                // Purchase Orders - only count OPEN ones (not yet received)
-                if (status !== 'received' && status !== 'closed' && status !== 'fulfilled') {
+                // Purchase Orders - only count OPEN ones
+                if (status === 'open') {
                     if (!importPOsByStyle[row.base_style]) importPOsByStyle[row.base_style] = 0;
                     importPOsByStyle[row.base_style] += qty;
                 }
             } else if (docType.indexOf('sales') !== -1) {
-                // Sales Orders - check if open (not invoiced/closed/fulfilled)
-                if (status !== 'invoiced' && status !== 'closed' && status !== 'fulfilled') {
+                // Sales Orders - only count OPEN ones
+                if (status === 'open') {
                     if (!openOrdersByStyle[row.base_style]) openOrdersByStyle[row.base_style] = 0;
                     openOrdersByStyle[row.base_style] += qty;
                 }

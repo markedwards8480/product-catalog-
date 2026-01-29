@@ -304,24 +304,23 @@ app.get('/api/notes', requireAuth, async function(req, res) {
 app.post('/api/notes/:baseStyle', requireAuth, async function(req, res) {
     try {
         console.log('POST /api/notes/:baseStyle - Saving note');
-        var communalUserId = 1;
         var baseStyle = req.params.baseStyle;
         var note = req.body.note || '';
         console.log('Base Style:', baseStyle, 'Note length:', note.length, 'chars');
         
         if (note.trim() === '') {
             console.log('Deleting note for style', baseStyle);
-            await pool.query('DELETE FROM user_notes WHERE user_id = $1 AND base_style = $2', [communalUserId, baseStyle]);
+            await pool.query('DELETE FROM user_notes WHERE base_style = $1', [baseStyle]);
         } else {
             console.log('Saving note for style', baseStyle);
-            // First, check if a note exists for this base_style
-            var existing = await pool.query('SELECT id FROM user_notes WHERE user_id = $1 AND base_style = $2', [communalUserId, baseStyle]);
+            // Check if a note exists for this base_style
+            var existing = await pool.query('SELECT id FROM user_notes WHERE base_style = $1', [baseStyle]);
             if (existing.rows.length > 0) {
                 // Update existing note
-                await pool.query('UPDATE user_notes SET note = $1, updated_at = NOW() WHERE user_id = $2 AND base_style = $3', [note, communalUserId, baseStyle]);
+                await pool.query('UPDATE user_notes SET note = $1, updated_at = NOW() WHERE base_style = $2', [note, baseStyle]);
             } else {
-                // Insert new note (product_id can be null since we're using base_style)
-                await pool.query('INSERT INTO user_notes (user_id, base_style, note, updated_at) VALUES ($1, $2, $3, NOW())', [communalUserId, baseStyle, note]);
+                // Insert new note - only base_style and note (user_id and product_id will be NULL)
+                await pool.query('INSERT INTO user_notes (base_style, note, updated_at) VALUES ($1, $2, NOW())', [baseStyle, note]);
             }
         }
         console.log('Note save SUCCESS');

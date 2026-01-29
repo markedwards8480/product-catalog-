@@ -277,27 +277,41 @@ app.delete('/api/picks/:productId', requireAuth, async function(req, res) {
 // User notes
 app.get('/api/notes', requireAuth, async function(req, res) {
     try {
+        console.log('GET /api/notes - Fetching all communal notes');
         // Notes are now communal - not tied to specific users
         var result = await pool.query('SELECT product_id, note FROM user_notes');
         var notes = {};
         result.rows.forEach(function(r) { notes[r.product_id] = r.note; });
+        console.log('Returning', Object.keys(notes).length, 'notes');
         res.json(notes);
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { 
+        console.error('Error fetching notes:', err);
+        res.status(500).json({ error: err.message }); 
+    }
 });
 
 app.post('/api/notes/:productId', requireAuth, async function(req, res) {
     try {
+        console.log('POST /api/notes/:productId - Saving note');
         // Notes are now communal - use a fixed user_id for all notes
         var communalUserId = 1;
         var productId = parseInt(req.params.productId);
         var note = req.body.note || '';
+        console.log('Product ID:', productId, 'Note length:', note.length, 'chars');
+        
         if (note.trim() === '') {
+            console.log('Deleting note for product', productId);
             await pool.query('DELETE FROM user_notes WHERE user_id = $1 AND product_id = $2', [communalUserId, productId]);
         } else {
+            console.log('Saving note for product', productId);
             await pool.query('INSERT INTO user_notes (user_id, product_id, note, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (user_id, product_id) DO UPDATE SET note = $3, updated_at = NOW()', [communalUserId, productId, note]);
         }
+        console.log('Note save SUCCESS');
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { 
+        console.error('Error saving note:', err);
+        res.status(500).json({ error: err.message }); 
+    }
 });
 
 async function refreshZohoToken() {
@@ -3459,7 +3473,7 @@ function getHTML() {
     html += 'document.getElementById("modalPickBtn").addEventListener("click",function(){if(currentModalProductId){togglePick(currentModalProductId,{stopPropagation:function(){}});var isPicked=userPicks.indexOf(currentModalProductId)!==-1;this.textContent=isPicked?"♥ In My Picks":"♡ Add to My Picks"}});';
     
     // Save note button
-    html += 'document.getElementById("saveNoteBtn").addEventListener("click",function(){if(currentModalProductId){var btn=this;var originalText=btn.textContent;btn.textContent="Saving...";btn.disabled=true;var note=document.getElementById("modalNote").value;fetch("/api/notes/"+currentModalProductId,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({note:note})}).then(function(r){return r.json()}).then(function(d){if(d.success){if(note.trim()){userNotes[currentModalProductId]=note}else{delete userNotes[currentModalProductId]}renderProducts();btn.textContent="✓ Saved!";setTimeout(function(){btn.textContent=originalText;btn.disabled=false},1500)}else{btn.textContent="Error";setTimeout(function(){btn.textContent=originalText;btn.disabled=false},1500)}}).catch(function(err){btn.textContent="Error";setTimeout(function(){btn.textContent=originalText;btn.disabled=false},1500)})}});';
+    html += 'document.getElementById("saveNoteBtn").addEventListener("click",function(){console.log("Save note button clicked");if(currentModalProductId){console.log("Product ID:",currentModalProductId);var btn=this;var originalText=btn.textContent;btn.textContent="Saving...";btn.disabled=true;var note=document.getElementById("modalNote").value;console.log("Note value:",note);fetch("/api/notes/"+currentModalProductId,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({note:note})}).then(function(r){console.log("Response status:",r.status);return r.json()}).then(function(d){console.log("Response data:",d);if(d.success){if(note.trim()){userNotes[currentModalProductId]=note}else{delete userNotes[currentModalProductId]}renderProducts();btn.textContent="✓ Saved!";setTimeout(function(){btn.textContent=originalText;btn.disabled=false},1500)}else{console.error("Save failed:",d);btn.textContent="Error";setTimeout(function(){btn.textContent=originalText;btn.disabled=false},1500)}}).catch(function(err){console.error("Fetch error:",err);btn.textContent="Error";setTimeout(function(){btn.textContent=originalText;btn.disabled=false},1500)})}else{console.error("No currentModalProductId")}});';
     
     // Keyboard navigation
     html += 'document.addEventListener("keydown",function(e){if(document.getElementById("modal").classList.contains("active")){if(e.key==="Escape"){document.getElementById("modal").classList.remove("active")}return}if(document.getElementById("shareModal").classList.contains("active")){if(e.key==="Escape"){document.getElementById("shareModal").classList.remove("active")}return}if(document.activeElement.tagName==="INPUT"||document.activeElement.tagName==="TEXTAREA")return;var cards=document.querySelectorAll(".product-card");if(cards.length===0)return;if(e.key==="ArrowRight"||e.key==="ArrowDown"){e.preventDefault();focusedIndex=Math.min(focusedIndex+1,cards.length-1);updateFocus(cards)}else if(e.key==="ArrowLeft"||e.key==="ArrowUp"){e.preventDefault();focusedIndex=Math.max(focusedIndex-1,0);updateFocus(cards)}else if(e.key==="Enter"&&focusedIndex>=0){e.preventDefault();var id=parseInt(products[focusedIndex].id);if(selectionMode){var idx=selectedProducts.indexOf(id);if(idx===-1){selectedProducts.push(id)}else{selectedProducts.splice(idx,1)}updateSelectionUI();renderProducts()}else{showProductModal(id)}}else if(e.key===" "&&focusedIndex>=0&&selectionMode){e.preventDefault();var id=parseInt(products[focusedIndex].id);var idx=selectedProducts.indexOf(id);if(idx===-1){selectedProducts.push(id)}else{selectedProducts.splice(idx,1)}updateSelectionUI();renderProducts()}});';

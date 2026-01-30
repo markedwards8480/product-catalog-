@@ -415,32 +415,47 @@ function detectImportFileType(filename) {
     return 'unknown';
 }
 
-// Process inventory CSV (same logic as manual upload)
+// Process inventory CSV (supports both two-file mode and legacy combined mode)
 async function processInventoryCSV(csvContent, filename) {
     var lines = csvContent.split('\n');
     if (lines.length < 2) return { success: false, error: 'Empty file', imported: 0 };
-    
-    var headers = lines[0].toLowerCase().replace(/['"]/g, '').split(',').map(function(h) { return h.trim(); });
+
+    // Detect file type from filename
+    var lowerFilename = filename.toLowerCase();
+    var isAvailableNowFile = lowerFilename.indexOf('available now') !== -1 || lowerFilename.indexOf('available_now') !== -1;
+    var isLeftToSellFile = lowerFilename.indexOf('left to sell') !== -1 || lowerFilename.indexOf('left_to_sell') !== -1;
+    var fileType = isAvailableNowFile ? 'available_now' : (isLeftToSellFile ? 'left_to_sell' : 'combined');
+    var isTwoFileMode = isAvailableNowFile || isLeftToSellFile;
+    console.log('Processing inventory file as type:', fileType, '- filename:', filename);
+
+    var headers = lines[0].toLowerCase().replace(/['"]/g, '').replace(/^\ufeff/, '').split(',').map(function(h) { return h.trim(); });
     var headerMap = {};
     headers.forEach(function(h, i) { headerMap[h] = i; });
-    
+
     var syncResult = await pool.query('INSERT INTO sync_history (sync_type, status) VALUES ($1, $2) RETURNING id', ['csv_import', 'in_progress']);
     var currentImportId = syncResult.rows[0].id;
-    
-    // FULL REPLACE: Delete all existing products and colors before importing fresh data
-    console.log('Full replace: Clearing all existing products and colors...');
-    await pool.query('DELETE FROM product_colors');
-    await pool.query('DELETE FROM products');
-    console.log('Existing data cleared. Importing fresh inventory...');
-    
+
+    // Only do FULL REPLACE for legacy combined file, NOT for two-file mode
+    var existingStyleSet = {};
+    if (!isTwoFileMode) {
+        console.log('Full replace mode: Clearing all existing products and colors...');
+        await pool.query('DELETE FROM product_colors');
+        await pool.query('DELETE FROM products');
+        console.log('Existing data cleared. Importing fresh inventory...');
+    } else {
+        console.log('Two-file mode: Incremental update (preserving existing data from other file)');
+        var existingStylesResult = await pool.query('SELECT style_id FROM products');
+        existingStylesResult.rows.forEach(function(r) { existingStyleSet[r.style_id] = true; });
+    }
+
     var imported = 0, skipped = 0, newArrivals = 0;
     var lastStyleId = '', lastImageUrl = '', lastCategory = '';
-    
+
     function parseNumber(val) {
         if (!val) return 0;
         return parseInt(String(val).replace(/[,"]/g, '')) || 0;
     }
-    
+
     function parseCSVLine(line) {
         var result = [];
         var current = '';
@@ -454,46 +469,99 @@ async function processInventoryCSV(csvContent, filename) {
         result.push(current.trim());
         return result;
     }
-    
+
     for (var li = 1; li < lines.length; li++) {
         try {
             var values = parseCSVLine(lines[li]);
             if (values[0] && values[0].indexOf('Grand Summary') !== -1) { skipped++; continue; }
-            
+
             var styleId = values[headerMap['style name']] || values[0];
             var imageUrl = values[headerMap['style image']] || values[1];
             var color = values[headerMap['color']] || values[2];
             var category = values[headerMap['commodity']] || values[3];
-            var onHand = parseNumber(values[headerMap['net on hand']] || values[4]);
-            var availableNow = parseNumber(values[headerMap['available now']] || values[7]);
-            var openOrder = parseNumber(values[headerMap['open order']] || values[8]);
-            var toCome = parseNumber(values[headerMap['to come']] || values[9]);
-            var leftToSell = parseNumber(values[headerMap['left to sell']] || values[10]);
-            
+
+            // Parse values based on file type
+            var onHand = 0, availableNow = 0, openOrder = 0, toCome = 0, leftToSell = 0;
+
+            if (fileType === 'available_now') {
+                // Available Now file: Style, Image, Color, Commodity, Date, On Hand(5), Allocated(6), Picked(7), Available Now(8)
+                onHand = parseNumber(values[headerMap['on hand']] || values[5]);
+                availableNow = parseNumber(values[headerMap['available now']] || values[8]);
+            } else if (fileType === 'left_to_sell') {
+                // Left to Sell file: Style, Image, Color, Commodity, Date, On Hand(5), To Come(6), Open Order(7), Left to Sell(8)
+                onHand = parseNumber(values[headerMap['on hand']] || values[5]);
+                toCome = parseNumber(values[headerMap['to come']] || values[6]);
+                openOrder = parseNumber(values[headerMap['open order']] || values[7]);
+                leftToSell = parseNumber(values[headerMap['left to sell']] || values[8]);
+            } else {
+                // Legacy combined file format
+                onHand = parseNumber(values[headerMap['net on hand']] || values[4]);
+                availableNow = parseNumber(values[headerMap['available now']] || values[7]);
+                openOrder = parseNumber(values[headerMap['open order']] || values[8]);
+                toCome = parseNumber(values[headerMap['to come']] || values[9]);
+                leftToSell = parseNumber(values[headerMap['left to sell']] || values[10]);
+            }
+
             if (!styleId && color) {
                 styleId = lastStyleId;
                 if (!imageUrl || imageUrl === '-No Value-') imageUrl = lastImageUrl;
                 if (!category || category === '-No Value-') category = lastCategory;
             }
             if (!styleId) { skipped++; continue; }
-            
+
             lastStyleId = styleId;
             if (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) lastImageUrl = imageUrl;
             if (category && category !== '-No Value-') lastCategory = category;
-            
+
             var baseStyle = styleId.split('-')[0];
             var validCategory = (category && category !== '-No Value-') ? category : 'Uncategorized';
             var name = validCategory + ' - ' + baseStyle;
             var validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) ? imageUrl : lastImageUrl;
-            
-            // Since we deleted all products, just insert directly
-            var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url, first_seen_import) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl, currentImportId]);
-            var productId = ins.rows[0].id;
-            
+
+            var productId;
+            if (isTwoFileMode) {
+                // Two-file mode: upsert products
+                var isNewStyle = !existingStyleSet[styleId];
+                var productResult = await pool.query('SELECT id, image_url FROM products WHERE style_id = $1', [styleId]);
+                if (productResult.rows.length > 0) {
+                    productId = productResult.rows[0].id;
+                    var finalImage = validImageUrl || productResult.rows[0].image_url;
+                    await pool.query('UPDATE products SET name=$1, category=$2, base_style=$3, image_url=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5', [name, validCategory, baseStyle, finalImage, productId]);
+                } else {
+                    var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url, first_seen_import) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl, currentImportId]);
+                    productId = ins.rows[0].id;
+                    if (isNewStyle) newArrivals++;
+                    existingStyleSet[styleId] = true;
+                }
+            } else {
+                // Combined file mode: just insert (we deleted all data)
+                var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url, first_seen_import) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl, currentImportId]);
+                productId = ins.rows[0].id;
+            }
+
             if (color && color !== '-No Value-') {
-                // Since we deleted all colors, just insert directly
-                await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-                    [productId, color, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]);
+                if (isTwoFileMode) {
+                    // Two-file mode: partial update based on file type
+                    var colorResult = await pool.query('SELECT id, available_now, left_to_sell, on_hand, open_order, to_come FROM product_colors WHERE product_id=$1 AND color_name=$2', [productId, color]);
+                    if (colorResult.rows.length > 0) {
+                        var existing = colorResult.rows[0];
+                        if (fileType === 'available_now') {
+                            await pool.query('UPDATE product_colors SET available_now=$1, available_qty=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3',
+                                [availableNow, availableNow, existing.id]);
+                        } else if (fileType === 'left_to_sell') {
+                            await pool.query('UPDATE product_colors SET left_to_sell=$1, on_hand=$2, open_order=$3, to_come=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5',
+                                [leftToSell, onHand, openOrder, toCome, existing.id]);
+                        }
+                    } else {
+                        // New color - insert with whatever values we have
+                        await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+                            [productId, color, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]);
+                    }
+                } else {
+                    // Combined file mode: just insert all values
+                    await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+                        [productId, color, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]);
+                }
             }
             imported++;
         } catch (rowErr) {
@@ -501,11 +569,11 @@ async function processInventoryCSV(csvContent, filename) {
             skipped++;
         }
     }
-    
+
     await pool.query('UPDATE sync_history SET records_synced = $1, status = $2 WHERE id = $3', [imported, 'success', currentImportId]);
     lastImportId = currentImportId;
-    
-    return { success: true, imported: imported, skipped: skipped, newArrivals: newArrivals };
+
+    return { success: true, imported: imported, skipped: skipped, newArrivals: newArrivals, fileType: fileType };
 }
 
 // Process sales CSV (same logic as manual upload)

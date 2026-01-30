@@ -428,6 +428,11 @@ async function processInventoryCSV(csvContent, filename) {
     var isTwoFileMode = isAvailableNowFile || isLeftToSellFile;
     console.log('Processing inventory file as type:', fileType, '- filename:', filename);
 
+    // Extract date from filename (e.g., "2026-01-30" from "Inventory Availability Report (Available Now) 2026-01-30.csv")
+    var dateMatch = filename.match(/(\d{4}-\d{2}-\d{2})/);
+    var fileDate = dateMatch ? dateMatch[1] : null;
+    console.log('Extracted file date:', fileDate);
+
     var headers = lines[0].toLowerCase().replace(/['"]/g, '').replace(/^\ufeff/, '').split(',').map(function(h) { return h.trim(); });
     var headerMap = {};
     headers.forEach(function(h, i) { headerMap[h] = i; });
@@ -435,15 +440,41 @@ async function processInventoryCSV(csvContent, filename) {
     var syncResult = await pool.query('INSERT INTO sync_history (sync_type, status) VALUES ($1, $2) RETURNING id', ['csv_import', 'in_progress']);
     var currentImportId = syncResult.rows[0].id;
 
-    // Only do FULL REPLACE for legacy combined file, NOT for two-file mode
+    // Determine if we need to do a full delete
+    var shouldDelete = false;
     var existingStyleSet = {};
+
     if (!isTwoFileMode) {
-        console.log('Full replace mode: Clearing all existing products and colors...');
+        // Legacy combined file: always do full replace
+        shouldDelete = true;
+        console.log('Full replace mode (combined file): Will clear all existing data');
+    } else if (fileDate) {
+        // Two-file mode: check if partner file with same date was already processed today
+        // If this is the first file of the pair, do the delete; if second, skip delete
+        var partnerCheck = await pool.query(
+            "SELECT id FROM workdrive_imports WHERE file_name LIKE $1 AND status = 'success' AND created_at > NOW() - INTERVAL '1 hour'",
+            ['%' + fileDate + '%']
+        );
+        if (partnerCheck.rows.length === 0) {
+            // First file of this date batch - do the delete
+            shouldDelete = true;
+            console.log('Two-file mode: First file of batch, will clear all existing data');
+        } else {
+            console.log('Two-file mode: Partner file already processed, preserving data from partner');
+        }
+    } else {
+        // No date in filename, treat as first file and delete
+        shouldDelete = true;
+        console.log('Two-file mode (no date detected): Will clear all existing data');
+    }
+
+    if (shouldDelete) {
+        console.log('Clearing all existing products and colors...');
         await pool.query('DELETE FROM product_colors');
         await pool.query('DELETE FROM products');
         console.log('Existing data cleared. Importing fresh inventory...');
     } else {
-        console.log('Two-file mode: Incremental update (preserving existing data from other file)');
+        // Load existing styles for upsert
         var existingStylesResult = await pool.query('SELECT style_id FROM products');
         existingStylesResult.rows.forEach(function(r) { existingStyleSet[r.style_id] = true; });
     }

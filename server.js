@@ -571,14 +571,19 @@ async function processInventoryCSV(csvContent, filename) {
             }
 
             if (color && color !== '-No Value-') {
+                // Normalize color name for consistent matching
+                var normalizedColor = color.trim();
+
                 if (isTwoFileMode) {
                     // Two-file mode: partial update based on file type
-                    var colorResult = await pool.query('SELECT id, available_now, left_to_sell, on_hand, open_order, to_come FROM product_colors WHERE product_id=$1 AND color_name=$2', [productId, color]);
+                    // Use case-insensitive matching for colors
+                    var colorResult = await pool.query('SELECT id, available_now, left_to_sell, on_hand, open_order, to_come, color_name FROM product_colors WHERE product_id=$1 AND LOWER(TRIM(color_name))=LOWER($2)', [productId, normalizedColor]);
                     if (colorResult.rows.length > 0) {
                         var existing = colorResult.rows[0];
                         if (fileType === 'available_now') {
                             await pool.query('UPDATE product_colors SET available_now=$1, available_qty=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3',
                                 [availableNow, availableNow, existing.id]);
+                            if (imported < 5) console.log('Updated available_now for', styleId, normalizedColor, ':', availableNow);
                         } else if (fileType === 'left_to_sell') {
                             await pool.query('UPDATE product_colors SET left_to_sell=$1, on_hand=$2, open_order=$3, to_come=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5',
                                 [leftToSell, onHand, openOrder, toCome, existing.id]);
@@ -586,12 +591,13 @@ async function processInventoryCSV(csvContent, filename) {
                     } else {
                         // New color - insert with whatever values we have
                         await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-                            [productId, color, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]);
+                            [productId, normalizedColor, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]);
+                        if (imported < 5) console.log('Inserted NEW color for', styleId, normalizedColor, '- avail:', availableNow, 'lts:', leftToSell);
                     }
                 } else {
                     // Combined file mode: just insert all values
                     await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-                        [productId, color, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]);
+                        [productId, normalizedColor, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]);
                 }
             }
             imported++;
@@ -2066,109 +2072,30 @@ function parseNumber(val) { if (!val) return 0; return parseInt(val.toString().r
 app.post('/api/import', requireAuth, requireAdmin, upload.single('file'), async function(req, res) {
     try {
         if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-        
-        // Create sync history entry first to get the import ID
-        var syncResult = await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1, $2, $3) RETURNING id', ['csv_import', 'success', 0]);
-        var currentImportId = syncResult.rows[0].id;
-        
-        // Get existing style_ids before import to track new arrivals
-        var existingStyles = await pool.query('SELECT DISTINCT style_id FROM products');
-        var existingStyleSet = {};
-        existingStyles.rows.forEach(function(r) { existingStyleSet[r.style_id] = true; });
-        
-        var content = req.file.buffer.toString('utf-8'); 
-        var allLines = content.split('\n'); 
-        var lines = []; 
-        for (var i = 0; i < allLines.length; i++) { 
-            if (allLines[i].trim()) lines.push(allLines[i]); 
-        } 
-        if (lines.length < 2) return res.status(400).json({ error: 'File appears empty' });
-        
-        var headerLine = lines[0]; 
-        if (headerLine.charCodeAt(0) === 0xFEFF) headerLine = headerLine.slice(1); 
-        var headersRaw = parseCSVLine(headerLine); 
-        var headers = []; 
-        for (var h = 0; h < headersRaw.length; h++) { 
-            headers.push(headersRaw[h].toLowerCase().replace(/[^\w\s]/g, '').trim()); 
+
+        var content = req.file.buffer.toString('utf-8');
+        var filename = req.file.originalname || 'uploaded.csv';
+
+        console.log('Manual CSV import - filename:', filename);
+
+        // Use the same processInventoryCSV function as auto-import
+        var result = await processInventoryCSV(content, filename);
+
+        if (result.success) {
+            res.json({
+                success: true,
+                imported: result.imported,
+                skipped: result.skipped,
+                newArrivals: result.newArrivals,
+                fileType: result.fileType
+            });
+        } else {
+            res.status(400).json({ error: result.error });
         }
-        var headerMap = {}; 
-        for (var hi = 0; hi < headers.length; hi++) { 
-            headerMap[headers[hi]] = hi; 
-        }
-        
-        var imported = 0, skipped = 0, newArrivals = 0; 
-        var lastStyleId = null, lastImageUrl = null, lastCategory = null;
-        
-        for (var li = 1; li < lines.length; li++) { 
-            try { 
-                var values = parseCSVLine(lines[li]); 
-                if (values[0] && values[0].indexOf('Grand Summary') !== -1) { skipped++; continue; } 
-                
-                var styleId = values[headerMap['style name']] || values[0]; 
-                var imageUrl = values[headerMap['style image']] || values[1]; 
-                var color = values[headerMap['color']] || values[2]; 
-                var category = values[headerMap['commodity']] || values[3]; 
-                var onHand = parseNumber(values[headerMap['net on hand']] || values[4]); 
-                var availableNow = parseNumber(values[headerMap['available now']] || values[7]); 
-                var openOrder = parseNumber(values[headerMap['open order']] || values[8]); 
-                var toCome = parseNumber(values[headerMap['to come']] || values[9]); 
-                var leftToSell = parseNumber(values[headerMap['left to sell']] || values[10]); 
-                
-                // Handle rows where style is inherited from previous row
-                if (!styleId && color) { 
-                    styleId = lastStyleId; 
-                    if (!imageUrl || imageUrl === '-No Value-') imageUrl = lastImageUrl; 
-                    if (!category || category === '-No Value-') category = lastCategory; 
-                } 
-                if (!styleId) { skipped++; continue; } 
-                
-                lastStyleId = styleId; 
-                if (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) lastImageUrl = imageUrl; 
-                if (category && category !== '-No Value-') lastCategory = category; 
-                
-                var baseStyle = styleId.split('-')[0]; 
-                var validCategory = (category && category !== '-No Value-') ? category : 'Uncategorized'; 
-                var name = validCategory + ' - ' + baseStyle; 
-                var validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) ? imageUrl : lastImageUrl; 
-                
-                var isNewStyle = !existingStyleSet[styleId];
-                var productResult = await pool.query('SELECT id, image_url FROM products WHERE style_id = $1', [styleId]); 
-                var productId; 
-                
-                if (productResult.rows.length > 0) { 
-                    productId = productResult.rows[0].id; 
-                    var finalImage = validImageUrl || productResult.rows[0].image_url; 
-                    await pool.query('UPDATE products SET name=$1, category=$2, base_style=$3, image_url=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5', [name, validCategory, baseStyle, finalImage, productId]); 
-                } else { 
-                    var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url, first_seen_import) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl, currentImportId]); 
-                    productId = ins.rows[0].id;
-                    if (isNewStyle) newArrivals++;
-                    existingStyleSet[styleId] = true;
-                } 
-                
-                if (color && color !== '-No Value-') { 
-                    var colorResult = await pool.query('SELECT id FROM product_colors WHERE product_id=$1 AND color_name=$2', [productId, color]); 
-                    if (colorResult.rows.length > 0) { 
-                        await pool.query('UPDATE product_colors SET available_now=$1, left_to_sell=$2, on_hand=$3, open_order=$4, to_come=$5, available_qty=$6, updated_at=CURRENT_TIMESTAMP WHERE id=$7', 
-                            [availableNow, leftToSell, onHand, openOrder, toCome, availableNow, colorResult.rows[0].id]); 
-                    } else { 
-                        await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', 
-                            [productId, color, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]); 
-                    } 
-                } 
-                imported++; 
-            } catch (rowErr) { 
-                console.error('Row error:', rowErr.message);
-                skipped++; 
-            } 
-        }
-        
-        // Update sync history with actual count
-        await pool.query('UPDATE sync_history SET records_synced = $1 WHERE id = $2', [imported, currentImportId]);
-        lastImportId = currentImportId;
-        
-        res.json({ success: true, imported: imported, skipped: skipped, newArrivals: newArrivals });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+        console.error('Import error:', err);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.post('/api/products/clear', requireAuth, requireAdmin, async function(req, res) { try { await pool.query('DELETE FROM product_colors'); await pool.query('DELETE FROM products'); res.json({ success: true }); } catch (err) { res.status(500).json({ error: err.message }); } });

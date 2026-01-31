@@ -744,10 +744,14 @@ async function processWorkDriveFolder(folderId, fileType) {
             // Skip non-CSV files
             if (!fileName.toLowerCase().endsWith('.csv')) continue;
             
-            // Check if already processed
-            var existing = await pool.query('SELECT id FROM workdrive_imports WHERE file_id = $1', [fileId]);
+            // Check if already processed RECENTLY (within last 5 hours)
+            // This allows re-processing files that are overwritten/updated every 6 hours
+            var existing = await pool.query(
+                "SELECT id FROM workdrive_imports WHERE file_id = $1 AND created_at > NOW() - INTERVAL '5 hours'",
+                [fileId]
+            );
             if (existing.rows.length > 0) {
-                console.log('Skipping already processed file:', fileName);
+                console.log('Skipping recently processed file:', fileName);
                 continue;
             }
             

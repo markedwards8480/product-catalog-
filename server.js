@@ -452,7 +452,7 @@ async function processInventoryCSV(csvContent, filename) {
         // Two-file mode: check if partner file with same date was already processed today
         // If this is the first file of the pair, do the delete; if second, skip delete
         var partnerCheck = await pool.query(
-            "SELECT id FROM workdrive_imports WHERE file_name LIKE $1 AND status = 'success' AND created_at > NOW() - INTERVAL '1 hour'",
+            "SELECT id FROM workdrive_imports WHERE file_name LIKE $1 AND status = 'success' AND processed_at > NOW() - INTERVAL '1 hour'",
             ['%' + fileDate + '%']
         );
         if (partnerCheck.rows.length === 0) {
@@ -747,7 +747,7 @@ async function processWorkDriveFolder(folderId, fileType) {
             // Check if already processed RECENTLY (within last 5 hours)
             // This allows re-processing files that are overwritten/updated every 6 hours
             var existing = await pool.query(
-                "SELECT id FROM workdrive_imports WHERE file_id = $1 AND created_at > NOW() - INTERVAL '5 hours'",
+                "SELECT id FROM workdrive_imports WHERE file_id = $1 AND processed_at > NOW() - INTERVAL '5 hours'",
                 [fileId]
             );
             if (existing.rows.length > 0) {
@@ -2617,7 +2617,7 @@ app.get('/api/workdrive-import/debug', requireAuth, requireAdmin, async function
 
         // Get recent import history
         var recentImports = await pool.query(
-            "SELECT file_id, file_name, status, created_at FROM workdrive_imports ORDER BY created_at DESC LIMIT 20"
+            "SELECT file_id, file_name, file_type, status, records_imported, processed_at FROM workdrive_imports ORDER BY processed_at DESC LIMIT 20"
         );
 
         res.json({

@@ -2609,6 +2609,44 @@ app.post('/api/workdrive-import/clear-history', requireAuth, requireAdmin, async
     }
 });
 
+// Debug endpoint to see what files WorkDrive API returns
+app.get('/api/workdrive-import/debug', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        var inventoryFiles = await listWorkDriveFiles(WORKDRIVE_INVENTORY_FOLDER_ID);
+        var salesFiles = await listWorkDriveFiles(WORKDRIVE_SALES_FOLDER_ID);
+
+        // Get recent import history
+        var recentImports = await pool.query(
+            "SELECT file_id, file_name, status, created_at FROM workdrive_imports ORDER BY created_at DESC LIMIT 20"
+        );
+
+        res.json({
+            success: true,
+            inventoryFolderId: WORKDRIVE_INVENTORY_FOLDER_ID,
+            salesFolderId: WORKDRIVE_SALES_FOLDER_ID,
+            inventoryFilesFound: inventoryFiles.length,
+            inventoryFiles: inventoryFiles.map(function(f) {
+                return {
+                    id: f.id,
+                    name: f.attributes ? f.attributes.name : f.name,
+                    modified: f.attributes ? f.attributes.modified_time : null
+                };
+            }),
+            salesFilesFound: salesFiles.length,
+            salesFiles: salesFiles.map(function(f) {
+                return {
+                    id: f.id,
+                    name: f.attributes ? f.attributes.name : f.name,
+                    modified: f.attributes ? f.attributes.modified_time : null
+                };
+            }),
+            recentImports: recentImports.rows
+        });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
 app.post('/api/users', requireAuth, requireAdmin, async function(req, res) { 
     try { 
         var pin = req.body.pin || String(Math.floor(1000 + Math.random() * 9000));

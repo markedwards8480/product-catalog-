@@ -448,24 +448,18 @@ async function processInventoryCSV(csvContent, filename) {
         // Legacy combined file: always do full replace
         shouldDelete = true;
         console.log('Full replace mode (combined file): Will clear all existing data');
-    } else if (fileDate) {
-        // Two-file mode: check if partner file with same date was already processed today
-        // If this is the first file of the pair, do the delete; if second, skip delete
-        var partnerCheck = await pool.query(
-            "SELECT id FROM workdrive_imports WHERE file_name LIKE $1 AND status = 'success' AND processed_at > NOW() - INTERVAL '1 hour'",
-            ['%' + fileDate + '%']
-        );
-        if (partnerCheck.rows.length === 0) {
-            // First file of this date batch - do the delete
-            shouldDelete = true;
-            console.log('Two-file mode: First file of batch, will clear all existing data');
-        } else {
-            console.log('Two-file mode: Partner file already processed, preserving data from partner');
-        }
-    } else {
-        // No date in filename, treat as first file and delete
+    } else if (fileType === 'available_now') {
+        // Available Now files should NEVER delete - they always add to existing Left to Sell data
+        shouldDelete = false;
+        console.log('Two-file mode: Available Now file - preserving existing data');
+    } else if (fileType === 'left_to_sell') {
+        // Left to Sell is always processed first, so it does the delete
         shouldDelete = true;
-        console.log('Two-file mode (no date detected): Will clear all existing data');
+        console.log('Two-file mode: Left to Sell file - clearing existing data for fresh import');
+    } else {
+        // Unknown two-file type, be safe and delete
+        shouldDelete = true;
+        console.log('Two-file mode (unknown type): Will clear all existing data');
     }
 
     if (shouldDelete) {

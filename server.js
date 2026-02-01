@@ -3282,7 +3282,7 @@ function getHTML() {
     html += '.dashboard-total{font-size:0.8125rem;color:#34c759;font-weight:600;margin-bottom:1rem;display:block}';
     html += '.dashboard-treemap{display:flex;flex-wrap:wrap;gap:4px}';
     // Treemap styles - compact for sidebar
-    html += '.treemap-item{padding:8px;color:white;border-radius:6px;cursor:pointer;transition:transform 0.15s,box-shadow 0.15s;flex-grow:1;min-width:calc(50% - 4px)}';
+    html += '.treemap-item{padding:8px;color:white;border-radius:6px;cursor:pointer;transition:transform 0.15s,box-shadow 0.15s;flex-grow:1;min-width:60px;display:flex;flex-direction:column;justify-content:center}';
     html += '.treemap-item:hover{transform:scale(1.02);box-shadow:0 4px 12px rgba(0,0,0,0.15)}';
     html += '.treemap-label{font-weight:600;font-size:0.7rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}';
     html += '.treemap-value{font-size:0.75rem;opacity:0.95;margin-top:1px}';
@@ -3487,8 +3487,8 @@ function getHTML() {
     // Update total display
     html += 'var totalEl=document.getElementById("dashboardTotal");if(totalEl)totalEl.textContent=(total/1000).toFixed(0)+"K total units";';
 
-    // Render treemap items into sidebar
-    html += 'var treemap=document.getElementById("dashboardTreemap");var treemapHtml="";cats.forEach(function(c,idx){var pct=(c.leftToSell/total*100);treemapHtml+="<div class=\\"treemap-item\\" style=\\"background:"+colors[idx%colors.length]+"\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div class=\\"treemap-label\\">"+c.category+"</div><div class=\\"treemap-value\\">"+(c.leftToSell/1000).toFixed(0)+"K</div><div class=\\"treemap-pct\\">"+pct.toFixed(1)+"%</div></div>"});treemap.innerHTML=treemapHtml}';
+    // Render treemap items into sidebar - dynamic sizing based on value
+    html += 'var treemap=document.getElementById("dashboardTreemap");var treemapHtml="";cats.forEach(function(c,idx){var pct=(c.leftToSell/total*100);var width=Math.max(Math.sqrt(pct)*22,30);var height=Math.max(pct*2.5,40);if(pct>15)height=Math.max(pct*3,60);treemapHtml+="<div class=\\"treemap-item\\" style=\\"flex-basis:calc("+Math.min(width,100)+"% - 4px);min-height:"+height+"px;background:"+colors[idx%colors.length]+"\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div class=\\"treemap-label\\">"+c.category+"</div><div class=\\"treemap-value\\">"+(c.leftToSell/1000).toFixed(0)+"K</div><div class=\\"treemap-pct\\">"+pct.toFixed(1)+"%</div></div>"});treemap.innerHTML=treemapHtml}';
 
     // Filter by category from chart click
     html += 'function filterByCategory(cat){dashboardOpen=false;document.getElementById("dashboardSidebar").classList.remove("open");document.getElementById("mainWrapper").classList.remove("sidebar-open");document.getElementById("dashboardOverlay").classList.remove("visible");document.getElementById("dashboardToggle").classList.remove("active");document.getElementById("dashboardToggle").textContent="📊 Charts";selectedCategories=[cat];document.querySelectorAll(".filter-btn[data-cat]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-cat")===cat)});renderProducts();window.scrollTo(0,document.getElementById("productGrid").offsetTop-100)}';

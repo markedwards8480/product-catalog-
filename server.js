@@ -785,7 +785,30 @@ async function processWorkDriveFolder(folderId, fileType) {
     try {
         var files = await listWorkDriveFiles(folderId);
         console.log('Found ' + files.length + ' files in ' + fileType + ' folder');
-        
+
+        // For INVENTORY files: Only process the most recent date batch
+        // This prevents accumulating data from multiple dates
+        if (fileType === 'inventory') {
+            var filesByDate = {};
+            for (var f = 0; f < files.length; f++) {
+                var fl = files[f];
+                var fn = fl.attributes ? fl.attributes.name : (fl.name || 'unknown');
+                if (!fn.toLowerCase().endsWith('.csv')) continue;
+                var dateMatch = fn.match(/(\d{4}-\d{2}-\d{2})/);
+                if (dateMatch) {
+                    var dt = dateMatch[1];
+                    if (!filesByDate[dt]) filesByDate[dt] = [];
+                    filesByDate[dt].push(fl);
+                }
+            }
+            var dates = Object.keys(filesByDate).sort().reverse();
+            if (dates.length > 0) {
+                var latestDate = dates[0];
+                console.log('Inventory: Processing only latest date batch:', latestDate, '- skipping', dates.length - 1, 'older dates');
+                files = filesByDate[latestDate];
+            }
+        }
+
         for (var i = 0; i < files.length; i++) {
             var file = files[i];
             var fileId = file.id;

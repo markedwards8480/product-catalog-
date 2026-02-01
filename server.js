@@ -3272,24 +3272,33 @@ function getHTML() {
     html += '.filter-btn{font-size:0.625rem;padding:0.25rem 0.5rem}';
     html += '}';
 
-    // Inventory Dashboard Visualization Styles - matching open orders dashboard
-    html += '.inventory-dashboard{display:flex;flex-wrap:wrap;gap:4px;padding:1rem 2.5rem;background:#f5f5f7;border-bottom:1px solid rgba(0,0,0,0.06)}';
-    html += '.inventory-dashboard.collapsed{display:none}';
-    html += '.dashboard-header{width:100%;display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem}';
-    html += '.dashboard-header h3{font-size:0.9375rem;font-weight:600;color:#1e3a5f;margin:0}';
-    html += '.dashboard-header span{font-size:0.75rem;color:#86868b}';
-    html += '.dashboard-total{font-size:0.875rem;color:#34c759;font-weight:600}';
-    // Treemap styles - matching open orders dashboard
-    html += '.treemap-item{padding:8px 10px;color:white;border-radius:6px;cursor:pointer;transition:transform 0.15s,box-shadow 0.15s;min-width:80px}';
+    // Slide-out Sidebar Dashboard Styles
+    html += '.dashboard-sidebar{position:fixed;top:48px;left:0;width:280px;height:calc(100vh - 48px);background:white;box-shadow:2px 0 12px rgba(0,0,0,0.1);transform:translateX(-100%);transition:transform 0.3s ease;z-index:99;overflow-y:auto;padding:1rem}';
+    html += '.dashboard-sidebar.open{transform:translateX(0)}';
+    html += '.dashboard-sidebar-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid #e0e0e0}';
+    html += '.dashboard-sidebar-header h3{font-size:1rem;font-weight:600;color:#1e3a5f;margin:0}';
+    html += '.dashboard-sidebar-close{background:none;border:none;font-size:1.25rem;cursor:pointer;color:#86868b;padding:0.25rem}';
+    html += '.dashboard-sidebar-close:hover{color:#1e3a5f}';
+    html += '.dashboard-total{font-size:0.8125rem;color:#34c759;font-weight:600;margin-bottom:1rem;display:block}';
+    html += '.dashboard-treemap{display:flex;flex-wrap:wrap;gap:4px}';
+    // Treemap styles - compact for sidebar
+    html += '.treemap-item{padding:8px;color:white;border-radius:6px;cursor:pointer;transition:transform 0.15s,box-shadow 0.15s;flex-grow:1;min-width:calc(50% - 4px)}';
     html += '.treemap-item:hover{transform:scale(1.02);box-shadow:0 4px 12px rgba(0,0,0,0.15)}';
-    html += '.treemap-label{font-weight:600;font-size:0.75rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}';
-    html += '.treemap-value{font-size:0.8125rem;opacity:0.95;margin-top:2px}';
-    html += '.treemap-pct{font-size:0.6875rem;opacity:0.8}';
-    // Dashboard toggle button
-    html += '.dashboard-toggle{background:#0088c2;color:white;border:none;padding:0.5rem 1rem;border-radius:980px;cursor:pointer;font-size:0.8125rem;font-weight:500;margin-left:auto}';
+    html += '.treemap-label{font-weight:600;font-size:0.7rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}';
+    html += '.treemap-value{font-size:0.75rem;opacity:0.95;margin-top:1px}';
+    html += '.treemap-pct{font-size:0.625rem;opacity:0.8}';
+    // Dashboard toggle button in stats bar
+    html += '.dashboard-toggle{background:#0088c2;color:white;border:none;padding:0.5rem 1rem;border-radius:980px;cursor:pointer;font-size:0.8125rem;font-weight:500}';
     html += '.dashboard-toggle:hover{background:#006fa0}';
-    // Mobile responsive for dashboard
-    html += '@media screen and (max-width: 768px) {.inventory-dashboard{padding:0.75rem 1rem}}';
+    html += '.dashboard-toggle.active{background:#1e3a5f}';
+    // Main content shift when sidebar open
+    html += '.main-wrapper{transition:margin-left 0.3s ease,width 0.3s ease}';
+    html += '.main-wrapper.sidebar-open{margin-left:280px}';
+    // Overlay for mobile
+    html += '.dashboard-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.3);z-index:98;display:none}';
+    html += '.dashboard-overlay.visible{display:block}';
+    // Mobile responsive
+    html += '@media screen and (max-width: 768px) {.dashboard-sidebar{width:85vw;max-width:320px}.main-wrapper.sidebar-open{margin-left:0}}';
 
     html += '</style></head><body>';
     
@@ -3299,6 +3308,17 @@ function getHTML() {
     html += '<div id="loginPage" class="login-page" style="display:none"><div class="login-box"><h1>Mark Edwards Apparel<br><span style="font-size:0.8em;font-weight:normal">Product Catalog</span></h1><form id="loginForm"><div class="form-group"><label>Select User</label><select id="loginUserSelect" required style="width:100%;padding:0.875rem 1rem;border:none;border-radius:12px;font-size:1rem;background:#f5f5f7;appearance:none;cursor:pointer"><option value="">-- Select your name --</option></select></div><input type="hidden" id="loginPin" value="0000"><button type="submit" class="btn btn-primary" style="width:100%">Sign In</button><div id="loginError" class="error hidden"></div></form></div></div>';
     
     html += '<div id="mainApp"><header class="header"><h1 style="color:#1e3a5f;font-weight:700;font-size:1.5rem">Mark Edwards Apparel</h1><div class="header-right"><div class="user-menu-wrapper" style="position:relative"><button class="btn btn-secondary" id="userMenuBtn" style="display:flex;align-items:center;gap:0.5rem"><span id="userInfo">Welcome</span> ▾</button><div id="userMenu" class="user-menu hidden"><button class="user-menu-item" id="changePinBtn">Change PIN</button><button class="user-menu-item" id="logoutBtn">Sign Out</button></div></div><button class="btn btn-secondary" id="helpBtn">User Guide</button><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn">Admin</button></div></header>';
+
+    // Slide-out sidebar for category treemap
+    html += '<div class="dashboard-overlay" id="dashboardOverlay"></div>';
+    html += '<div class="dashboard-sidebar" id="dashboardSidebar">';
+    html += '<div class="dashboard-sidebar-header"><h3>🗺️ By Category</h3><button class="dashboard-sidebar-close" id="dashboardClose">×</button></div>';
+    html += '<span class="dashboard-total" id="dashboardTotal">Loading...</span>';
+    html += '<div class="dashboard-treemap" id="dashboardTreemap"></div>';
+    html += '</div>';
+
+    // Main content wrapper
+    html += '<div class="main-wrapper" id="mainWrapper">';
     
     // History panel (visible to all users)
     html += '<main class="main"><div id="historyPanel" class="admin-panel hidden"><h2>History & Status</h2><div class="tabs"><button class="tab active" data-tab="shares">Sharing History</button><button class="tab" data-tab="freshness">Data Freshness</button><button class="tab" data-tab="history">Sync History</button></div>';
@@ -3319,14 +3339,9 @@ function getHTML() {
     
     html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div id="availNowStat" class="stat-box"><div class="stat-value" id="totalAvailNow">0</div><div class="stat-label">Avail Now</div></div><div id="leftToSellStat" class="stat-box stat-active"><div class="stat-value" id="totalLeftToSell">0</div><div class="stat-label">Left to Sell</div></div>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div id="availToSellStat" class="stat-box" style="display:none"><div class="stat-value" id="totalAvailToSell" style="color:#1e3a5f">0</div><div class="stat-label">Avail to Sell</div></div><div id="oversoldStat" class="stat-box" style="display:none"><div class="stat-value" id="totalOversold" style="color:#ff3b30">0</div><div class="stat-label">Oversold</div></div>' : '') + '<div class="qty-toggle"><button class="qty-toggle-btn" id="toggleAvailableNow" data-mode="available_now">Available Now</button><button class="qty-toggle-btn active" id="toggleLeftToSell" data-mode="left_to_sell">Left to Sell</button>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div style="display:flex;align-items:center;gap:0.5rem;margin-left:1rem;padding-left:1rem;border-left:1px solid #ddd"><input type="checkbox" id="supplyDemandToggle" style="cursor:pointer"><label for="supplyDemandToggle" style="cursor:pointer;font-size:0.75rem;white-space:nowrap">Supply vs Demand</label></div>' : '') + '</div><button class="dashboard-toggle" id="dashboardToggle">📊 Charts</button><div style="margin-left:1rem;text-align:right;font-size:0.7rem;color:#999"><span id="dataFreshness">Loading...</span></div></div>';
 
-    // Inventory Dashboard Section - matching open orders dashboard style
-    html += '<div class="inventory-dashboard" id="inventoryDashboard">';
-    html += '<div class="dashboard-header"><h3>🗺️ By Category <span style="font-size:0.75rem;color:#86868b;font-weight:normal">(click to filter)</span></h3><span class="dashboard-total" id="dashboardTotal"></span></div>';
-    html += '</div>';
-
     html += '<div class="view-controls"><div class="search-box" style="display:flex;align-items:center;gap:0.5rem;margin-right:1.5rem;position:relative"><input type="text" id="searchInput" placeholder="Search products..." style="padding:0.5rem 0.75rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;width:200px"><button id="clearSearchBtn" style="padding:0.4rem 0.6rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.75rem">Clear</button><span id="aiSearchIndicator" class="hidden" style="position:absolute;top:100%;left:0;font-size:0.65rem;color:#0088c2;white-space:nowrap">AI-enhanced search</span></div><label>View:</label><button class="size-btn" data-size="list">List</button><button class="size-btn" data-size="small">Small</button><button class="size-btn active" data-size="medium">Medium</button><button class="size-btn" data-size="large">Large</button><div class="feature-toggle active-indicator" id="groupByStyleWrapper"><input type="checkbox" id="groupByStyleToggle" checked><label for="groupByStyleToggle">Group by Style</label></div><label style="margin-left:1.5rem">Sort:</label><select id="sortSelect" style="padding:0.5rem 0.75rem;border:2px solid #1e3a5f;border-radius:8px;font-size:0.8125rem;background:#1e3a5f;color:white;font-weight:500;cursor:pointer"><option value="name-asc">Name A-Z</option><option value="name-desc">Name Z-A</option><option value="qty-high" selected>Qty High-Low</option><option value="qty-low">Qty Low-High</option><option value="newest">Newest First</option></select><div class="qty-filter-group" style="margin-left:1.5rem"><label>Qty:</label><input type="number" id="minQty" placeholder="Min"><span>-</span><input type="number" id="maxQty" placeholder="Max"><button id="resetQtyBtn" style="padding:0.4rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.75rem">Reset</button></div><span style="margin-left:auto"></span><button class="select-mode-btn" id="selectModeBtn">Select for Sharing</button></div>';
     html += '<div class="filters"><button class="filter-btn special" data-special="new">New Arrivals</button><button class="filter-btn special" data-special="picks">My Picks</button><button class="filter-btn special" data-special="notes">Has Notes</button>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<button class="filter-btn special" data-special="oversold" style="background:#fff0f0;border-color:#ff3b30;color:#ff3b30">Oversold</button>' : '') + '<button id="resetAllFiltersBtn" style="padding:0.5rem 1rem;border:1px solid #86868b;background:#f5f5f7;color:#1e3a5f;border-radius:980px;cursor:pointer;font-weight:600;font-size:0.8125rem;margin-left:1rem">✕ Clear All Filters</button><div class="filter-summary-badge" id="filterSummaryBadge" onclick="openFilterPanel()"><span>📋 View Active</span><span class="filter-count-badge" id="filterCountBadge">0</span></div><span class="filter-divider"></span><div style="display:inline-flex;position:relative;align-items:center;margin-right:0.5rem"><button class="filter-btn" id="colorFilterBtn" style="font-weight:500">Color: All ▼</button><button class="filter-btn hidden" id="clearColorBtn" style="margin-left:0.25rem;padding:0.4rem 0.625rem">✕</button><div id="colorDropdown" class="color-dropdown hidden"></div></div><div style="display:inline-flex;position:relative;align-items:center;margin-right:0.5rem"><button class="filter-btn" id="customerFilterBtn" style="font-weight:500">Customer: All ▼</button><button class="filter-btn hidden" id="clearCustomerBtn" style="margin-left:0.25rem;padding:0.4rem 0.625rem">✕</button><div id="customerDropdown" class="multi-dropdown hidden"><div class="multi-dropdown-header"><input type="text" id="customerSearch" placeholder="Search customers..." style="width:100%;padding:0.5rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;margin-bottom:0.5rem"><div style="display:flex;gap:0.5rem"><button id="applyCustomerFilter" class="btn btn-primary btn-sm">Apply</button><button id="clearCustomerFilter" class="btn btn-secondary btn-sm">Clear</button></div></div><div id="customerList" class="multi-dropdown-list"></div></div></div><div style="display:inline-flex;position:relative;align-items:center;margin-right:0.5rem"><button class="filter-btn" id="supplierFilterBtn" style="font-weight:500">Supplier: All ▼</button><button class="filter-btn hidden" id="clearSupplierBtn" style="margin-left:0.25rem;padding:0.4rem 0.625rem">✕</button><div id="supplierDropdown" class="multi-dropdown hidden"><div class="multi-dropdown-header"><input type="text" id="supplierSearch" placeholder="Search suppliers..." style="width:100%;padding:0.5rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;margin-bottom:0.5rem"><div style="display:flex;gap:0.5rem"><button id="applySupplierFilter" class="btn btn-primary btn-sm">Apply</button><button id="clearSupplierFilter" class="btn btn-secondary btn-sm">Clear</button></div></div><div id="supplierList" class="multi-dropdown-list"></div></div></div><span class="filter-divider"></span><span id="categoryFilters"></span></div>';
-    html += '<div class="product-grid size-medium" id="productGrid"></div><div class="empty hidden" id="emptyState">No products found.</div></main></div>';
+    html += '<div class="product-grid size-medium" id="productGrid"></div><div class="empty hidden" id="emptyState">No products found.</div></main></div></div>';
     
     // Selection bar
     html += '<div class="selection-bar" id="selectionBar"><span class="selection-count"><span id="selectedCount">0</span> items selected</span><div class="selection-actions"><button class="btn btn-secondary" id="togglePreviewBtn">Preview</button><button class="btn btn-secondary" id="clearSelectionBtn">Clear</button><button class="btn btn-secondary" id="exitSelectionBtn">Exit Selection Mode</button><button class="btn btn-primary" id="shareSelectionBtn">Share / Download</button></div></div>';
@@ -3452,24 +3467,31 @@ function getHTML() {
     // Supply vs Demand toggle event listener
     html += 'if(document.getElementById("supplyDemandToggle")){document.getElementById("supplyDemandToggle").addEventListener("change",function(){supplyDemandMode=this.checked;renderProducts()})}';
 
-    // Dashboard toggle and visualization
-    html += 'var dashboardVisible=true;var dashboardData=null;';
-    html += 'document.getElementById("dashboardToggle").addEventListener("click",function(){dashboardVisible=!dashboardVisible;var dashboard=document.getElementById("inventoryDashboard");dashboard.classList.toggle("collapsed",!dashboardVisible);this.textContent=dashboardVisible?"📊 Hide Charts":"📊 Charts"});';
+    // Dashboard sidebar toggle and visualization
+    html += 'var dashboardOpen=false;var dashboardData=null;';
+
+    // Toggle sidebar open/close
+    html += 'function toggleDashboard(){dashboardOpen=!dashboardOpen;document.getElementById("dashboardSidebar").classList.toggle("open",dashboardOpen);document.getElementById("mainWrapper").classList.toggle("sidebar-open",dashboardOpen);document.getElementById("dashboardOverlay").classList.toggle("visible",dashboardOpen);document.getElementById("dashboardToggle").classList.toggle("active",dashboardOpen);document.getElementById("dashboardToggle").textContent=dashboardOpen?"✕ Close":"📊 Charts"}';
+
+    // Event listeners for dashboard
+    html += 'document.getElementById("dashboardToggle").addEventListener("click",toggleDashboard);';
+    html += 'document.getElementById("dashboardClose").addEventListener("click",toggleDashboard);';
+    html += 'document.getElementById("dashboardOverlay").addEventListener("click",toggleDashboard);';
 
     // Load inventory dashboard data
     html += 'async function loadDashboard(){try{var resp=await fetch("/api/inventory-by-category");var data=await resp.json();if(data.success){dashboardData=data;renderDashboard()}}catch(err){console.error("Error loading dashboard:",err)}}';
 
-    // Render dashboard visualizations - treemap matching open orders style
+    // Render dashboard visualizations - treemap in sidebar
     html += 'function renderDashboard(){if(!dashboardData||!dashboardData.categories)return;var cats=dashboardData.categories;var total=dashboardData.totals.leftToSell;var colors=["#0088c2","#34c759","#ff9500","#ff3b30","#af52de","#5ac8fa","#ffcc00","#ff2d55","#8e8e93","#5856d6","#ff6961","#77dd77","#aec6cf","#fdfd96","#c7d1d9"];';
 
     // Update total display
-    html += 'var totalEl=document.getElementById("dashboardTotal");if(totalEl)totalEl.textContent=(total/1000).toFixed(0)+"K units";';
+    html += 'var totalEl=document.getElementById("dashboardTotal");if(totalEl)totalEl.textContent=(total/1000).toFixed(0)+"K total units";';
 
-    // Render treemap items directly into dashboard
-    html += 'var dashboard=document.getElementById("inventoryDashboard");var headerHtml=\'<div class="dashboard-header"><h3>🗺️ By Category <span style="font-size:0.75rem;color:#86868b;font-weight:normal">(click to filter)</span></h3><span class="dashboard-total">\'+(total/1000).toFixed(0)+\'K units</span></div>\';var treemapHtml="";cats.forEach(function(c,idx){var pct=(c.leftToSell/total*100);var size=Math.max(Math.sqrt(pct)*20,10);treemapHtml+="<div class=\\"treemap-item\\" style=\\"flex-basis:"+Math.max(size,8)+"%;background:"+colors[idx%colors.length]+"\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div class=\\"treemap-label\\">"+c.category+"</div><div class=\\"treemap-value\\">"+(c.leftToSell/1000).toFixed(0)+"K</div><div class=\\"treemap-pct\\">"+pct.toFixed(1)+"%</div></div>"});dashboard.innerHTML=headerHtml+treemapHtml}';
+    // Render treemap items into sidebar
+    html += 'var treemap=document.getElementById("dashboardTreemap");var treemapHtml="";cats.forEach(function(c,idx){var pct=(c.leftToSell/total*100);treemapHtml+="<div class=\\"treemap-item\\" style=\\"background:"+colors[idx%colors.length]+"\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div class=\\"treemap-label\\">"+c.category+"</div><div class=\\"treemap-value\\">"+(c.leftToSell/1000).toFixed(0)+"K</div><div class=\\"treemap-pct\\">"+pct.toFixed(1)+"%</div></div>"});treemap.innerHTML=treemapHtml}';
 
     // Filter by category from chart click
-    html += 'function filterByCategory(cat){selectedCategories=[cat];document.querySelectorAll(".filter-btn[data-cat]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-cat")===cat)});renderProducts();window.scrollTo(0,document.getElementById("productGrid").offsetTop-100)}';
+    html += 'function filterByCategory(cat){dashboardOpen=false;document.getElementById("dashboardSidebar").classList.remove("open");document.getElementById("mainWrapper").classList.remove("sidebar-open");document.getElementById("dashboardOverlay").classList.remove("visible");document.getElementById("dashboardToggle").classList.remove("active");document.getElementById("dashboardToggle").textContent="📊 Charts";selectedCategories=[cat];document.querySelectorAll(".filter-btn[data-cat]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-cat")===cat)});renderProducts();window.scrollTo(0,document.getElementById("productGrid").offsetTop-100)}';
 
     html += 'function loadZohoStatus(){fetch("/api/zoho/status").then(function(r){return r.json()}).then(function(d){var st=document.getElementById("zohoStatusText");if(d.connected){st.textContent="Connected";st.className="status-value connected"}else{st.textContent="Not connected";st.className="status-value disconnected"}document.getElementById("zohoWorkspaceId").textContent=d.workspaceId||"Not set";document.getElementById("zohoViewId").textContent=d.viewId||"Not set"})}';
     

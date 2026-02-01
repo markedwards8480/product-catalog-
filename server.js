@@ -3272,33 +3272,24 @@ function getHTML() {
     html += '.filter-btn{font-size:0.625rem;padding:0.25rem 0.5rem}';
     html += '}';
 
-    // Inventory Dashboard Visualization Styles
-    html += '.inventory-dashboard{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;padding:1.5rem 2.5rem;background:#f5f5f7;border-bottom:1px solid rgba(0,0,0,0.06)}';
+    // Inventory Dashboard Visualization Styles - matching open orders dashboard
+    html += '.inventory-dashboard{display:flex;flex-wrap:wrap;gap:4px;padding:1rem 2.5rem;background:#f5f5f7;border-bottom:1px solid rgba(0,0,0,0.06)}';
     html += '.inventory-dashboard.collapsed{display:none}';
-    html += '.dashboard-card{background:white;border-radius:16px;padding:1rem;border:1px solid rgba(0,0,0,0.04)}';
-    html += '.dashboard-card h3{font-size:0.9375rem;font-weight:600;color:#1e3a5f;margin:0 0 0.75rem 0}';
-    // Mini stacked bar chart
-    html += '.mini-stacked{display:flex;gap:3px;align-items:flex-end;height:120px}';
-    html += '.mini-stacked-bar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;cursor:pointer;transition:opacity 0.15s}';
-    html += '.mini-stacked-bar:hover{opacity:0.85}';
-    html += '.mini-stacked-segment{transition:height 0.3s}';
-    html += '.mini-stacked-label{font-size:0.6rem;color:#666;text-align:center;margin-top:4px;white-space:nowrap}';
-    html += '.mini-stacked-legend{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid #eee}';
-    html += '.legend-item{display:flex;align-items:center;gap:3px;font-size:0.65rem;color:#666;cursor:pointer;padding:2px 4px;border-radius:3px}';
-    html += '.legend-item:hover{background:#f0f4f8}';
-    html += '.legend-color{width:10px;height:10px;border-radius:2px}';
-    // Treemap styles
-    html += '.dashboard-treemap{display:flex;flex-wrap:wrap;gap:4px}';
-    html += '.treemap-item{padding:8px;color:white;border-radius:6px;cursor:pointer;transition:transform 0.15s,box-shadow 0.15s;min-width:60px;flex-grow:1}';
-    html += '.treemap-item:hover{transform:scale(1.03);box-shadow:0 4px 12px rgba(0,0,0,0.15)}';
+    html += '.dashboard-header{width:100%;display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem}';
+    html += '.dashboard-header h3{font-size:0.9375rem;font-weight:600;color:#1e3a5f;margin:0}';
+    html += '.dashboard-header span{font-size:0.75rem;color:#86868b}';
+    html += '.dashboard-total{font-size:0.875rem;color:#34c759;font-weight:600}';
+    // Treemap styles - matching open orders dashboard
+    html += '.treemap-item{padding:8px 10px;color:white;border-radius:6px;cursor:pointer;transition:transform 0.15s,box-shadow 0.15s;min-width:80px}';
+    html += '.treemap-item:hover{transform:scale(1.02);box-shadow:0 4px 12px rgba(0,0,0,0.15)}';
     html += '.treemap-label{font-weight:600;font-size:0.75rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}';
-    html += '.treemap-value{font-size:0.8125rem;opacity:0.9}';
-    html += '.treemap-pct{font-size:0.6875rem;opacity:0.7}';
+    html += '.treemap-value{font-size:0.8125rem;opacity:0.95;margin-top:2px}';
+    html += '.treemap-pct{font-size:0.6875rem;opacity:0.8}';
     // Dashboard toggle button
     html += '.dashboard-toggle{background:#0088c2;color:white;border:none;padding:0.5rem 1rem;border-radius:980px;cursor:pointer;font-size:0.8125rem;font-weight:500;margin-left:auto}';
     html += '.dashboard-toggle:hover{background:#006fa0}';
     // Mobile responsive for dashboard
-    html += '@media screen and (max-width: 768px) {.inventory-dashboard{grid-template-columns:1fr;padding:1rem}}';
+    html += '@media screen and (max-width: 768px) {.inventory-dashboard{padding:0.75rem 1rem}}';
 
     html += '</style></head><body>';
     
@@ -3328,10 +3319,9 @@ function getHTML() {
     
     html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div id="availNowStat" class="stat-box"><div class="stat-value" id="totalAvailNow">0</div><div class="stat-label">Avail Now</div></div><div id="leftToSellStat" class="stat-box stat-active"><div class="stat-value" id="totalLeftToSell">0</div><div class="stat-label">Left to Sell</div></div>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div id="availToSellStat" class="stat-box" style="display:none"><div class="stat-value" id="totalAvailToSell" style="color:#1e3a5f">0</div><div class="stat-label">Avail to Sell</div></div><div id="oversoldStat" class="stat-box" style="display:none"><div class="stat-value" id="totalOversold" style="color:#ff3b30">0</div><div class="stat-label">Oversold</div></div>' : '') + '<div class="qty-toggle"><button class="qty-toggle-btn" id="toggleAvailableNow" data-mode="available_now">Available Now</button><button class="qty-toggle-btn active" id="toggleLeftToSell" data-mode="left_to_sell">Left to Sell</button>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div style="display:flex;align-items:center;gap:0.5rem;margin-left:1rem;padding-left:1rem;border-left:1px solid #ddd"><input type="checkbox" id="supplyDemandToggle" style="cursor:pointer"><label for="supplyDemandToggle" style="cursor:pointer;font-size:0.75rem;white-space:nowrap">Supply vs Demand</label></div>' : '') + '</div><button class="dashboard-toggle" id="dashboardToggle">📊 Charts</button><div style="margin-left:1rem;text-align:right;font-size:0.7rem;color:#999"><span id="dataFreshness">Loading...</span></div></div>';
 
-    // Inventory Dashboard Section
+    // Inventory Dashboard Section - matching open orders dashboard style
     html += '<div class="inventory-dashboard" id="inventoryDashboard">';
-    html += '<div class="dashboard-card"><h3>📊 Inventory by Category <span style="font-size:0.75rem;color:#86868b">(click to filter)</span></h3><div class="mini-stacked" id="categoryStackedChart"><div style="text-align:center;padding:2rem;color:#86868b">Loading chart...</div></div><div class="mini-stacked-legend" id="categoryLegend"></div></div>';
-    html += '<div class="dashboard-card"><h3>🗺️ Category Treemap <span style="font-size:0.75rem;color:#86868b">(click to filter)</span></h3><div class="dashboard-treemap" id="categoryTreemap"><div style="text-align:center;padding:2rem;color:#86868b">Loading treemap...</div></div></div>';
+    html += '<div class="dashboard-header"><h3>🗺️ By Category <span style="font-size:0.75rem;color:#86868b;font-weight:normal">(click to filter)</span></h3><span class="dashboard-total" id="dashboardTotal"></span></div>';
     html += '</div>';
 
     html += '<div class="view-controls"><div class="search-box" style="display:flex;align-items:center;gap:0.5rem;margin-right:1.5rem;position:relative"><input type="text" id="searchInput" placeholder="Search products..." style="padding:0.5rem 0.75rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;width:200px"><button id="clearSearchBtn" style="padding:0.4rem 0.6rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.75rem">Clear</button><span id="aiSearchIndicator" class="hidden" style="position:absolute;top:100%;left:0;font-size:0.65rem;color:#0088c2;white-space:nowrap">AI-enhanced search</span></div><label>View:</label><button class="size-btn" data-size="list">List</button><button class="size-btn" data-size="small">Small</button><button class="size-btn active" data-size="medium">Medium</button><button class="size-btn" data-size="large">Large</button><div class="feature-toggle active-indicator" id="groupByStyleWrapper"><input type="checkbox" id="groupByStyleToggle" checked><label for="groupByStyleToggle">Group by Style</label></div><label style="margin-left:1.5rem">Sort:</label><select id="sortSelect" style="padding:0.5rem 0.75rem;border:2px solid #1e3a5f;border-radius:8px;font-size:0.8125rem;background:#1e3a5f;color:white;font-weight:500;cursor:pointer"><option value="name-asc">Name A-Z</option><option value="name-desc">Name Z-A</option><option value="qty-high" selected>Qty High-Low</option><option value="qty-low">Qty Low-High</option><option value="newest">Newest First</option></select><div class="qty-filter-group" style="margin-left:1.5rem"><label>Qty:</label><input type="number" id="minQty" placeholder="Min"><span>-</span><input type="number" id="maxQty" placeholder="Max"><button id="resetQtyBtn" style="padding:0.4rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.75rem">Reset</button></div><span style="margin-left:auto"></span><button class="select-mode-btn" id="selectModeBtn">Select for Sharing</button></div>';
@@ -3469,17 +3459,14 @@ function getHTML() {
     // Load inventory dashboard data
     html += 'async function loadDashboard(){try{var resp=await fetch("/api/inventory-by-category");var data=await resp.json();if(data.success){dashboardData=data;renderDashboard()}}catch(err){console.error("Error loading dashboard:",err)}}';
 
-    // Render dashboard visualizations
-    html += 'function renderDashboard(){if(!dashboardData||!dashboardData.categories)return;var cats=dashboardData.categories;var total=dashboardData.totals.leftToSell;var colors=["#0088c2","#34c759","#ff9500","#ff3b30","#af52de","#5ac8fa","#ffcc00","#ff2d55","#8e8e93","#c7d1d9"];';
+    // Render dashboard visualizations - treemap matching open orders style
+    html += 'function renderDashboard(){if(!dashboardData||!dashboardData.categories)return;var cats=dashboardData.categories;var total=dashboardData.totals.leftToSell;var colors=["#0088c2","#34c759","#ff9500","#ff3b30","#af52de","#5ac8fa","#ffcc00","#ff2d55","#8e8e93","#5856d6","#ff6961","#77dd77","#aec6cf","#fdfd96","#c7d1d9"];';
 
-    // Render stacked bar chart (showing top categories)
-    html += 'var chartHtml="";var maxVal=cats.length>0?cats[0].leftToSell:1;cats.slice(0,8).forEach(function(c,idx){var pct=(c.leftToSell/maxVal*100).toFixed(1);chartHtml+="<div class=\\"mini-stacked-bar\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div style=\\"height:"+pct+"%;display:flex;flex-direction:column;justify-content:flex-end\\"><div class=\\"mini-stacked-segment\\" style=\\"height:100%;background:"+colors[idx%colors.length]+"\\" title=\\""+c.category+": "+(c.leftToSell/1000).toFixed(0)+"K units\\"></div></div><div class=\\"mini-stacked-label\\">"+c.category.substring(0,6)+"</div></div>"});document.getElementById("categoryStackedChart").innerHTML=chartHtml;';
+    // Update total display
+    html += 'var totalEl=document.getElementById("dashboardTotal");if(totalEl)totalEl.textContent=(total/1000).toFixed(0)+"K units";';
 
-    // Render legend
-    html += 'var legendHtml="";cats.slice(0,6).forEach(function(c,idx){legendHtml+="<div class=\\"legend-item\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div class=\\"legend-color\\" style=\\"background:"+colors[idx%colors.length]+"\\"></div>"+c.category+"</div>"});document.getElementById("categoryLegend").innerHTML=legendHtml;';
-
-    // Render treemap
-    html += 'var treemapHtml="";cats.forEach(function(c,idx){var pct=(c.leftToSell/total*100);var size=Math.max(Math.sqrt(pct)*18,8);treemapHtml+="<div class=\\"treemap-item\\" style=\\"flex-basis:"+Math.max(size,12)+"%;background:"+colors[idx%colors.length]+"\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div class=\\"treemap-label\\">"+c.category+"</div><div class=\\"treemap-value\\">"+(c.leftToSell/1000).toFixed(0)+"K</div><div class=\\"treemap-pct\\">"+pct.toFixed(1)+"%</div></div>"});document.getElementById("categoryTreemap").innerHTML=treemapHtml}';
+    // Render treemap items directly into dashboard
+    html += 'var dashboard=document.getElementById("inventoryDashboard");var headerHtml=\'<div class="dashboard-header"><h3>🗺️ By Category <span style="font-size:0.75rem;color:#86868b;font-weight:normal">(click to filter)</span></h3><span class="dashboard-total">\'+(total/1000).toFixed(0)+\'K units</span></div>\';var treemapHtml="";cats.forEach(function(c,idx){var pct=(c.leftToSell/total*100);var size=Math.max(Math.sqrt(pct)*20,10);treemapHtml+="<div class=\\"treemap-item\\" style=\\"flex-basis:"+Math.max(size,8)+"%;background:"+colors[idx%colors.length]+"\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div class=\\"treemap-label\\">"+c.category+"</div><div class=\\"treemap-value\\">"+(c.leftToSell/1000).toFixed(0)+"K</div><div class=\\"treemap-pct\\">"+pct.toFixed(1)+"%</div></div>"});dashboard.innerHTML=headerHtml+treemapHtml}';
 
     // Filter by category from chart click
     html += 'function filterByCategory(cat){selectedCategories=[cat];document.querySelectorAll(".filter-btn[data-cat]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-cat")===cat)});renderProducts();window.scrollTo(0,document.getElementById("productGrid").offsetTop-100)}';

@@ -2353,6 +2353,48 @@ app.get('/api/open-orders-by-style', requireAuth, async function(req, res) {
     }
 });
 
+// Get inventory data by category for dashboard visualizations
+app.get('/api/inventory-by-category', requireAuth, async function(req, res) {
+    try {
+        var result = await pool.query(`
+            SELECT
+                p.category,
+                COUNT(DISTINCT p.base_style) as style_count,
+                COALESCE(SUM(pc.left_to_sell), 0) as total_left_to_sell,
+                COALESCE(SUM(pc.available_now), 0) as total_available_now
+            FROM products p
+            LEFT JOIN product_colors pc ON p.id = pc.product_id
+            WHERE p.category IS NOT NULL AND p.category != ''
+            GROUP BY p.category
+            ORDER BY total_left_to_sell DESC
+        `);
+
+        var categories = result.rows.map(function(row) {
+            return {
+                category: row.category,
+                styleCount: parseInt(row.style_count) || 0,
+                leftToSell: parseInt(row.total_left_to_sell) || 0,
+                availableNow: parseInt(row.total_available_now) || 0
+            };
+        });
+
+        var totalLeftToSell = categories.reduce(function(sum, c) { return sum + c.leftToSell; }, 0);
+        var totalAvailableNow = categories.reduce(function(sum, c) { return sum + c.availableNow; }, 0);
+
+        res.json({
+            success: true,
+            categories: categories,
+            totals: {
+                leftToSell: totalLeftToSell,
+                availableNow: totalAvailableNow
+            }
+        });
+    } catch (err) {
+        console.error('Error fetching inventory by category:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
 // Fix duplicate sales data and recreate unique index
 app.post('/api/sales-data/fix-duplicates', requireAuth, requireAdmin, async function(req, res) {
     try {
@@ -3229,7 +3271,35 @@ function getHTML() {
     html += '.stats .stat-value{font-size:1.25rem !important}';
     html += '.filter-btn{font-size:0.625rem;padding:0.25rem 0.5rem}';
     html += '}';
-    
+
+    // Inventory Dashboard Visualization Styles
+    html += '.inventory-dashboard{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;padding:1.5rem 2.5rem;background:#f5f5f7;border-bottom:1px solid rgba(0,0,0,0.06)}';
+    html += '.inventory-dashboard.collapsed{display:none}';
+    html += '.dashboard-card{background:white;border-radius:16px;padding:1rem;border:1px solid rgba(0,0,0,0.04)}';
+    html += '.dashboard-card h3{font-size:0.9375rem;font-weight:600;color:#1e3a5f;margin:0 0 0.75rem 0}';
+    // Mini stacked bar chart
+    html += '.mini-stacked{display:flex;gap:3px;align-items:flex-end;height:120px}';
+    html += '.mini-stacked-bar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;cursor:pointer;transition:opacity 0.15s}';
+    html += '.mini-stacked-bar:hover{opacity:0.85}';
+    html += '.mini-stacked-segment{transition:height 0.3s}';
+    html += '.mini-stacked-label{font-size:0.6rem;color:#666;text-align:center;margin-top:4px;white-space:nowrap}';
+    html += '.mini-stacked-legend{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid #eee}';
+    html += '.legend-item{display:flex;align-items:center;gap:3px;font-size:0.65rem;color:#666;cursor:pointer;padding:2px 4px;border-radius:3px}';
+    html += '.legend-item:hover{background:#f0f4f8}';
+    html += '.legend-color{width:10px;height:10px;border-radius:2px}';
+    // Treemap styles
+    html += '.dashboard-treemap{display:flex;flex-wrap:wrap;gap:4px}';
+    html += '.treemap-item{padding:8px;color:white;border-radius:6px;cursor:pointer;transition:transform 0.15s,box-shadow 0.15s;min-width:60px;flex-grow:1}';
+    html += '.treemap-item:hover{transform:scale(1.03);box-shadow:0 4px 12px rgba(0,0,0,0.15)}';
+    html += '.treemap-label{font-weight:600;font-size:0.75rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}';
+    html += '.treemap-value{font-size:0.8125rem;opacity:0.9}';
+    html += '.treemap-pct{font-size:0.6875rem;opacity:0.7}';
+    // Dashboard toggle button
+    html += '.dashboard-toggle{background:#0088c2;color:white;border:none;padding:0.5rem 1rem;border-radius:980px;cursor:pointer;font-size:0.8125rem;font-weight:500;margin-left:auto}';
+    html += '.dashboard-toggle:hover{background:#006fa0}';
+    // Mobile responsive for dashboard
+    html += '@media screen and (max-width: 768px) {.inventory-dashboard{grid-template-columns:1fr;padding:1rem}}';
+
     html += '</style></head><body>';
     
     // Filter summary side panel only (badge is now inline in filters)
@@ -3256,7 +3326,14 @@ function getHTML() {
     html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Name</th><th>PIN</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUserName" placeholder="Display Name"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add User</button></div><p style="margin-top:1rem;font-size:0.8rem;color:#666">New users are assigned a random 4-digit PIN. They can change it after logging in.</p></div>';
     html += '<div id="system2Tab" class="tab-content"><div id="systemHealthContent"><p>Loading system health data...</p></div><button class="btn btn-secondary" id="refreshSystemBtn" style="margin-top:1rem">🔄 Refresh</button></div></div>';
     
-    html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div id="availNowStat" class="stat-box"><div class="stat-value" id="totalAvailNow">0</div><div class="stat-label">Avail Now</div></div><div id="leftToSellStat" class="stat-box stat-active"><div class="stat-value" id="totalLeftToSell">0</div><div class="stat-label">Left to Sell</div></div>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div id="availToSellStat" class="stat-box" style="display:none"><div class="stat-value" id="totalAvailToSell" style="color:#1e3a5f">0</div><div class="stat-label">Avail to Sell</div></div><div id="oversoldStat" class="stat-box" style="display:none"><div class="stat-value" id="totalOversold" style="color:#ff3b30">0</div><div class="stat-label">Oversold</div></div>' : '') + '<div class="qty-toggle"><button class="qty-toggle-btn" id="toggleAvailableNow" data-mode="available_now">Available Now</button><button class="qty-toggle-btn active" id="toggleLeftToSell" data-mode="left_to_sell">Left to Sell</button>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div style="display:flex;align-items:center;gap:0.5rem;margin-left:1rem;padding-left:1rem;border-left:1px solid #ddd"><input type="checkbox" id="supplyDemandToggle" style="cursor:pointer"><label for="supplyDemandToggle" style="cursor:pointer;font-size:0.75rem;white-space:nowrap">Supply vs Demand</label></div>' : '') + '</div><div style="margin-left:auto;text-align:right;font-size:0.7rem;color:#999"><span id="dataFreshness">Loading...</span></div></div>';
+    html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div id="availNowStat" class="stat-box"><div class="stat-value" id="totalAvailNow">0</div><div class="stat-label">Avail Now</div></div><div id="leftToSellStat" class="stat-box stat-active"><div class="stat-value" id="totalLeftToSell">0</div><div class="stat-label">Left to Sell</div></div>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div id="availToSellStat" class="stat-box" style="display:none"><div class="stat-value" id="totalAvailToSell" style="color:#1e3a5f">0</div><div class="stat-label">Avail to Sell</div></div><div id="oversoldStat" class="stat-box" style="display:none"><div class="stat-value" id="totalOversold" style="color:#ff3b30">0</div><div class="stat-label">Oversold</div></div>' : '') + '<div class="qty-toggle"><button class="qty-toggle-btn" id="toggleAvailableNow" data-mode="available_now">Available Now</button><button class="qty-toggle-btn active" id="toggleLeftToSell" data-mode="left_to_sell">Left to Sell</button>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div style="display:flex;align-items:center;gap:0.5rem;margin-left:1rem;padding-left:1rem;border-left:1px solid #ddd"><input type="checkbox" id="supplyDemandToggle" style="cursor:pointer"><label for="supplyDemandToggle" style="cursor:pointer;font-size:0.75rem;white-space:nowrap">Supply vs Demand</label></div>' : '') + '</div><button class="dashboard-toggle" id="dashboardToggle">📊 Charts</button><div style="margin-left:1rem;text-align:right;font-size:0.7rem;color:#999"><span id="dataFreshness">Loading...</span></div></div>';
+
+    // Inventory Dashboard Section
+    html += '<div class="inventory-dashboard" id="inventoryDashboard">';
+    html += '<div class="dashboard-card"><h3>📊 Inventory by Category <span style="font-size:0.75rem;color:#86868b">(click to filter)</span></h3><div class="mini-stacked" id="categoryStackedChart"><div style="text-align:center;padding:2rem;color:#86868b">Loading chart...</div></div><div class="mini-stacked-legend" id="categoryLegend"></div></div>';
+    html += '<div class="dashboard-card"><h3>🗺️ Category Treemap <span style="font-size:0.75rem;color:#86868b">(click to filter)</span></h3><div class="dashboard-treemap" id="categoryTreemap"><div style="text-align:center;padding:2rem;color:#86868b">Loading treemap...</div></div></div>';
+    html += '</div>';
+
     html += '<div class="view-controls"><div class="search-box" style="display:flex;align-items:center;gap:0.5rem;margin-right:1.5rem;position:relative"><input type="text" id="searchInput" placeholder="Search products..." style="padding:0.5rem 0.75rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;width:200px"><button id="clearSearchBtn" style="padding:0.4rem 0.6rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.75rem">Clear</button><span id="aiSearchIndicator" class="hidden" style="position:absolute;top:100%;left:0;font-size:0.65rem;color:#0088c2;white-space:nowrap">AI-enhanced search</span></div><label>View:</label><button class="size-btn" data-size="list">List</button><button class="size-btn" data-size="small">Small</button><button class="size-btn active" data-size="medium">Medium</button><button class="size-btn" data-size="large">Large</button><div class="feature-toggle active-indicator" id="groupByStyleWrapper"><input type="checkbox" id="groupByStyleToggle" checked><label for="groupByStyleToggle">Group by Style</label></div><label style="margin-left:1.5rem">Sort:</label><select id="sortSelect" style="padding:0.5rem 0.75rem;border:2px solid #1e3a5f;border-radius:8px;font-size:0.8125rem;background:#1e3a5f;color:white;font-weight:500;cursor:pointer"><option value="name-asc">Name A-Z</option><option value="name-desc">Name Z-A</option><option value="qty-high" selected>Qty High-Low</option><option value="qty-low">Qty Low-High</option><option value="newest">Newest First</option></select><div class="qty-filter-group" style="margin-left:1.5rem"><label>Qty:</label><input type="number" id="minQty" placeholder="Min"><span>-</span><input type="number" id="maxQty" placeholder="Max"><button id="resetQtyBtn" style="padding:0.4rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.75rem">Reset</button></div><span style="margin-left:auto"></span><button class="select-mode-btn" id="selectModeBtn">Select for Sharing</button></div>';
     html += '<div class="filters"><button class="filter-btn special" data-special="new">New Arrivals</button><button class="filter-btn special" data-special="picks">My Picks</button><button class="filter-btn special" data-special="notes">Has Notes</button>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<button class="filter-btn special" data-special="oversold" style="background:#fff0f0;border-color:#ff3b30;color:#ff3b30">Oversold</button>' : '') + '<button id="resetAllFiltersBtn" style="padding:0.5rem 1rem;border:1px solid #86868b;background:#f5f5f7;color:#1e3a5f;border-radius:980px;cursor:pointer;font-weight:600;font-size:0.8125rem;margin-left:1rem">✕ Clear All Filters</button><div class="filter-summary-badge" id="filterSummaryBadge" onclick="openFilterPanel()"><span>📋 View Active</span><span class="filter-count-badge" id="filterCountBadge">0</span></div><span class="filter-divider"></span><div style="display:inline-flex;position:relative;align-items:center;margin-right:0.5rem"><button class="filter-btn" id="colorFilterBtn" style="font-weight:500">Color: All ▼</button><button class="filter-btn hidden" id="clearColorBtn" style="margin-left:0.25rem;padding:0.4rem 0.625rem">✕</button><div id="colorDropdown" class="color-dropdown hidden"></div></div><div style="display:inline-flex;position:relative;align-items:center;margin-right:0.5rem"><button class="filter-btn" id="customerFilterBtn" style="font-weight:500">Customer: All ▼</button><button class="filter-btn hidden" id="clearCustomerBtn" style="margin-left:0.25rem;padding:0.4rem 0.625rem">✕</button><div id="customerDropdown" class="multi-dropdown hidden"><div class="multi-dropdown-header"><input type="text" id="customerSearch" placeholder="Search customers..." style="width:100%;padding:0.5rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;margin-bottom:0.5rem"><div style="display:flex;gap:0.5rem"><button id="applyCustomerFilter" class="btn btn-primary btn-sm">Apply</button><button id="clearCustomerFilter" class="btn btn-secondary btn-sm">Clear</button></div></div><div id="customerList" class="multi-dropdown-list"></div></div></div><div style="display:inline-flex;position:relative;align-items:center;margin-right:0.5rem"><button class="filter-btn" id="supplierFilterBtn" style="font-weight:500">Supplier: All ▼</button><button class="filter-btn hidden" id="clearSupplierBtn" style="margin-left:0.25rem;padding:0.4rem 0.625rem">✕</button><div id="supplierDropdown" class="multi-dropdown hidden"><div class="multi-dropdown-header"><input type="text" id="supplierSearch" placeholder="Search suppliers..." style="width:100%;padding:0.5rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;margin-bottom:0.5rem"><div style="display:flex;gap:0.5rem"><button id="applySupplierFilter" class="btn btn-primary btn-sm">Apply</button><button id="clearSupplierFilter" class="btn btn-secondary btn-sm">Clear</button></div></div><div id="supplierList" class="multi-dropdown-list"></div></div></div><span class="filter-divider"></span><span id="categoryFilters"></span></div>';
     html += '<div class="product-grid size-medium" id="productGrid"></div><div class="empty hidden" id="emptyState">No products found.</div></main></div>';
@@ -3384,6 +3461,28 @@ function getHTML() {
 
     // Supply vs Demand toggle event listener
     html += 'if(document.getElementById("supplyDemandToggle")){document.getElementById("supplyDemandToggle").addEventListener("change",function(){supplyDemandMode=this.checked;renderProducts()})}';
+
+    // Dashboard toggle and visualization
+    html += 'var dashboardVisible=true;var dashboardData=null;';
+    html += 'document.getElementById("dashboardToggle").addEventListener("click",function(){dashboardVisible=!dashboardVisible;var dashboard=document.getElementById("inventoryDashboard");dashboard.classList.toggle("collapsed",!dashboardVisible);this.textContent=dashboardVisible?"📊 Hide Charts":"📊 Charts"});';
+
+    // Load inventory dashboard data
+    html += 'async function loadDashboard(){try{var resp=await fetch("/api/inventory-by-category");var data=await resp.json();if(data.success){dashboardData=data;renderDashboard()}}catch(err){console.error("Error loading dashboard:",err)}}';
+
+    // Render dashboard visualizations
+    html += 'function renderDashboard(){if(!dashboardData||!dashboardData.categories)return;var cats=dashboardData.categories;var total=dashboardData.totals.leftToSell;var colors=["#0088c2","#34c759","#ff9500","#ff3b30","#af52de","#5ac8fa","#ffcc00","#ff2d55","#8e8e93","#c7d1d9"];';
+
+    // Render stacked bar chart (showing top categories)
+    html += 'var chartHtml="";var maxVal=cats.length>0?cats[0].leftToSell:1;cats.slice(0,8).forEach(function(c,idx){var pct=(c.leftToSell/maxVal*100).toFixed(1);chartHtml+="<div class=\\"mini-stacked-bar\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div style=\\"height:"+pct+"%;display:flex;flex-direction:column;justify-content:flex-end\\"><div class=\\"mini-stacked-segment\\" style=\\"height:100%;background:"+colors[idx%colors.length]+"\\" title=\\""+c.category+": "+(c.leftToSell/1000).toFixed(0)+"K units\\"></div></div><div class=\\"mini-stacked-label\\">"+c.category.substring(0,6)+"</div></div>"});document.getElementById("categoryStackedChart").innerHTML=chartHtml;';
+
+    // Render legend
+    html += 'var legendHtml="";cats.slice(0,6).forEach(function(c,idx){legendHtml+="<div class=\\"legend-item\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div class=\\"legend-color\\" style=\\"background:"+colors[idx%colors.length]+"\\"></div>"+c.category+"</div>"});document.getElementById("categoryLegend").innerHTML=legendHtml;';
+
+    // Render treemap
+    html += 'var treemapHtml="";cats.forEach(function(c,idx){var pct=(c.leftToSell/total*100);var size=Math.max(Math.sqrt(pct)*18,8);treemapHtml+="<div class=\\"treemap-item\\" style=\\"flex-basis:"+Math.max(size,12)+"%;background:"+colors[idx%colors.length]+"\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div class=\\"treemap-label\\">"+c.category+"</div><div class=\\"treemap-value\\">"+(c.leftToSell/1000).toFixed(0)+"K</div><div class=\\"treemap-pct\\">"+pct.toFixed(1)+"%</div></div>"});document.getElementById("categoryTreemap").innerHTML=treemapHtml}';
+
+    // Filter by category from chart click
+    html += 'function filterByCategory(cat){selectedCategories=[cat];document.querySelectorAll(".filter-btn[data-cat]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-cat")===cat)});renderProducts();window.scrollTo(0,document.getElementById("productGrid").offsetTop-100)}';
 
     html += 'function loadZohoStatus(){fetch("/api/zoho/status").then(function(r){return r.json()}).then(function(d){var st=document.getElementById("zohoStatusText");if(d.connected){st.textContent="Connected";st.className="status-value connected"}else{st.textContent="Not connected";st.className="status-value disconnected"}document.getElementById("zohoWorkspaceId").textContent=d.workspaceId||"Not set";document.getElementById("zohoViewId").textContent=d.viewId||"Not set"})}';
     
@@ -3587,7 +3686,7 @@ function getHTML() {
     
     // Compact header scroll handler removed
     
-    html += 'checkSession();fetchOpenOrders();';
+    html += 'checkSession();fetchOpenOrders();loadDashboard();';
     html += '</script></body></html>';
     return html;
 }

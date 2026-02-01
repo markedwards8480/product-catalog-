@@ -2356,7 +2356,8 @@ app.get('/api/open-orders-by-style', requireAuth, async function(req, res) {
 // Get inventory data by category for dashboard visualizations
 app.get('/api/inventory-by-category', requireAuth, async function(req, res) {
     try {
-        var result = await pool.query(`
+        // Get inventory by category
+        var invResult = await pool.query(`
             SELECT
                 p.category,
                 COUNT(DISTINCT p.base_style) as style_count,
@@ -2369,24 +2370,68 @@ app.get('/api/inventory-by-category', requireAuth, async function(req, res) {
             ORDER BY total_left_to_sell DESC
         `);
 
-        var categories = result.rows.map(function(row) {
+        // Get sales orders and POs by category
+        var salesResult = await pool.query(`
+            SELECT
+                p.category,
+                sd.document_type,
+                LOWER(sd.status) as status,
+                SUM(sd.quantity) as total_qty,
+                SUM(sd.amount) as total_amount
+            FROM sales_data sd
+            JOIN products p ON sd.base_style = p.base_style
+            WHERE p.category IS NOT NULL AND p.category != ''
+            GROUP BY p.category, sd.document_type, LOWER(sd.status)
+        `);
+
+        // Build category data with sales info
+        var salesByCategory = {};
+        salesResult.rows.forEach(function(row) {
+            if (!row.category) return;
+            if (!salesByCategory[row.category]) {
+                salesByCategory[row.category] = { openOrders: 0, openOrdersDollars: 0, importPOs: 0, importPOsDollars: 0 };
+            }
+            var docType = (row.document_type || '').toLowerCase();
+            var status = row.status || '';
+            var qty = parseInt(row.total_qty) || 0;
+            var amt = parseFloat(row.total_amount) || 0;
+
+            if (docType.indexOf('sales') !== -1 && status === 'open') {
+                salesByCategory[row.category].openOrders += qty;
+                salesByCategory[row.category].openOrdersDollars += amt;
+            } else if (docType.indexOf('purchase') !== -1 && status === 'open') {
+                salesByCategory[row.category].importPOs += qty;
+                salesByCategory[row.category].importPOsDollars += amt;
+            }
+        });
+
+        var categories = invResult.rows.map(function(row) {
+            var sales = salesByCategory[row.category] || { openOrders: 0, openOrdersDollars: 0, importPOs: 0, importPOsDollars: 0 };
             return {
                 category: row.category,
                 styleCount: parseInt(row.style_count) || 0,
                 leftToSell: parseInt(row.total_left_to_sell) || 0,
-                availableNow: parseInt(row.total_available_now) || 0
+                availableNow: parseInt(row.total_available_now) || 0,
+                openOrders: sales.openOrders,
+                openOrdersDollars: sales.openOrdersDollars,
+                importPOs: sales.importPOs,
+                importPOsDollars: sales.importPOsDollars
             };
         });
 
         var totalLeftToSell = categories.reduce(function(sum, c) { return sum + c.leftToSell; }, 0);
         var totalAvailableNow = categories.reduce(function(sum, c) { return sum + c.availableNow; }, 0);
+        var totalOpenOrders = categories.reduce(function(sum, c) { return sum + c.openOrders; }, 0);
+        var totalImportPOs = categories.reduce(function(sum, c) { return sum + c.importPOs; }, 0);
 
         res.json({
             success: true,
             categories: categories,
             totals: {
                 leftToSell: totalLeftToSell,
-                availableNow: totalAvailableNow
+                availableNow: totalAvailableNow,
+                openOrders: totalOpenOrders,
+                importPOs: totalImportPOs
             }
         });
     } catch (err) {
@@ -3279,7 +3324,10 @@ function getHTML() {
     html += '.dashboard-sidebar-header h3{font-size:1rem;font-weight:600;color:#1e3a5f;margin:0}';
     html += '.dashboard-sidebar-close{background:none;border:none;font-size:1.25rem;cursor:pointer;color:#86868b;padding:0.25rem}';
     html += '.dashboard-sidebar-close:hover{color:#1e3a5f}';
-    html += '.dashboard-total{font-size:0.8125rem;color:#34c759;font-weight:600;margin-bottom:1rem;display:block}';
+    html += '.dashboard-total{font-size:0.8125rem;color:#34c759;font-weight:600;margin-bottom:0.75rem;display:block}';
+    html += '.metric-btn{padding:0.35rem 0.6rem;border:1px solid #d0d0d0;background:white;border-radius:6px;font-size:0.7rem;cursor:pointer;color:#666;transition:all 0.15s}';
+    html += '.metric-btn:hover{border-color:#0088c2;color:#0088c2}';
+    html += '.metric-btn.active{background:#0088c2;color:white;border-color:#0088c2}';
     html += '.dashboard-treemap{display:flex;flex-wrap:wrap;gap:4px}';
     // Treemap styles - compact for sidebar
     html += '.treemap-item{padding:8px;color:white;border-radius:6px;cursor:pointer;transition:transform 0.15s,box-shadow 0.15s;flex-grow:1;min-width:60px;display:flex;flex-direction:column;justify-content:center}';
@@ -3313,6 +3361,7 @@ function getHTML() {
     html += '<div class="dashboard-overlay" id="dashboardOverlay"></div>';
     html += '<div class="dashboard-sidebar" id="dashboardSidebar">';
     html += '<div class="dashboard-sidebar-header"><h3>🗺️ By Category</h3><button class="dashboard-sidebar-close" id="dashboardClose">×</button></div>';
+    html += '<div class="dashboard-metric-toggle" id="dashboardMetricToggle" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:0.75rem"><button class="metric-btn active" data-metric="leftToSell">Left to Sell</button><button class="metric-btn" data-metric="availableNow">Avail Now</button><button class="metric-btn" data-metric="openOrders">Open Orders</button><button class="metric-btn" data-metric="importPOs">Import POs</button></div>';
     html += '<span class="dashboard-total" id="dashboardTotal">Loading...</span>';
     html += '<div class="dashboard-treemap" id="dashboardTreemap"></div>';
     html += '</div>';
@@ -3468,7 +3517,7 @@ function getHTML() {
     html += 'if(document.getElementById("supplyDemandToggle")){document.getElementById("supplyDemandToggle").addEventListener("change",function(){supplyDemandMode=this.checked;renderProducts()})}';
 
     // Dashboard sidebar toggle and visualization
-    html += 'var dashboardOpen=false;var dashboardData=null;';
+    html += 'var dashboardOpen=false;var dashboardData=null;var dashboardMetric="leftToSell";';
 
     // Toggle sidebar open/close
     html += 'function toggleDashboard(){dashboardOpen=!dashboardOpen;document.getElementById("dashboardSidebar").classList.toggle("open",dashboardOpen);document.getElementById("mainWrapper").classList.toggle("sidebar-open",dashboardOpen);document.getElementById("dashboardOverlay").classList.toggle("visible",dashboardOpen);document.getElementById("dashboardToggle").classList.toggle("active",dashboardOpen);document.getElementById("dashboardToggle").textContent=dashboardOpen?"✕ Close":"📊 Charts"}';
@@ -3478,17 +3527,20 @@ function getHTML() {
     html += 'document.getElementById("dashboardClose").addEventListener("click",toggleDashboard);';
     html += 'document.getElementById("dashboardOverlay").addEventListener("click",toggleDashboard);';
 
+    // Metric toggle event listeners
+    html += 'document.querySelectorAll(".metric-btn").forEach(function(btn){btn.addEventListener("click",function(){dashboardMetric=this.getAttribute("data-metric");document.querySelectorAll(".metric-btn").forEach(function(b){b.classList.remove("active")});this.classList.add("active");renderDashboard()})});';
+
     // Load inventory dashboard data
     html += 'async function loadDashboard(){try{var resp=await fetch("/api/inventory-by-category");var data=await resp.json();if(data.success){dashboardData=data;renderDashboard()}}catch(err){console.error("Error loading dashboard:",err)}}';
 
-    // Render dashboard visualizations - treemap in sidebar
-    html += 'function renderDashboard(){if(!dashboardData||!dashboardData.categories)return;var cats=dashboardData.categories;var total=dashboardData.totals.leftToSell;var colors=["#0088c2","#34c759","#ff9500","#ff3b30","#af52de","#5ac8fa","#ffcc00","#ff2d55","#8e8e93","#5856d6","#ff6961","#77dd77","#aec6cf","#fdfd96","#c7d1d9"];';
+    // Render dashboard visualizations - treemap in sidebar with metric selection
+    html += 'function renderDashboard(){if(!dashboardData||!dashboardData.categories)return;var cats=dashboardData.categories;var metricLabels={leftToSell:"Left to Sell",availableNow:"Available Now",openOrders:"Open Orders",importPOs:"Import POs"};var total=dashboardData.totals[dashboardMetric]||0;var colors=["#0088c2","#34c759","#ff9500","#ff3b30","#af52de","#5ac8fa","#ffcc00","#ff2d55","#8e8e93","#5856d6","#ff6961","#77dd77","#aec6cf","#fdfd96","#c7d1d9"];';
 
     // Update total display
-    html += 'var totalEl=document.getElementById("dashboardTotal");if(totalEl)totalEl.textContent=(total/1000).toFixed(0)+"K total units";';
+    html += 'var totalEl=document.getElementById("dashboardTotal");if(totalEl)totalEl.textContent=(total/1000).toFixed(0)+"K units ("+metricLabels[dashboardMetric]+")";';
 
-    // Render treemap items into sidebar - dynamic sizing based on value
-    html += 'var treemap=document.getElementById("dashboardTreemap");var treemapHtml="";cats.forEach(function(c,idx){var pct=(c.leftToSell/total*100);var width=Math.max(Math.sqrt(pct)*22,30);var height=Math.max(pct*2.5,40);if(pct>15)height=Math.max(pct*3,60);treemapHtml+="<div class=\\"treemap-item\\" style=\\"flex-basis:calc("+Math.min(width,100)+"% - 4px);min-height:"+height+"px;background:"+colors[idx%colors.length]+"\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div class=\\"treemap-label\\">"+c.category+"</div><div class=\\"treemap-value\\">"+(c.leftToSell/1000).toFixed(0)+"K</div><div class=\\"treemap-pct\\">"+pct.toFixed(1)+"%</div></div>"});treemap.innerHTML=treemapHtml}';
+    // Render treemap items into sidebar - dynamic sizing based on selected metric
+    html += 'var treemap=document.getElementById("dashboardTreemap");var treemapHtml="";cats.sort(function(a,b){return (b[dashboardMetric]||0)-(a[dashboardMetric]||0)}).forEach(function(c,idx){var val=c[dashboardMetric]||0;var pct=total>0?(val/total*100):0;var width=Math.max(Math.sqrt(pct)*22,30);var height=Math.max(pct*2.5,40);if(pct>15)height=Math.max(pct*3,60);if(val===0)return;treemapHtml+="<div class=\\"treemap-item\\" style=\\"flex-basis:calc("+Math.min(width,100)+"% - 4px);min-height:"+height+"px;background:"+colors[idx%colors.length]+"\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div class=\\"treemap-label\\">"+c.category+"</div><div class=\\"treemap-value\\">"+(val/1000).toFixed(0)+"K</div><div class=\\"treemap-pct\\">"+pct.toFixed(1)+"%</div></div>"});if(!treemapHtml)treemapHtml="<div style=\\"padding:1rem;color:#86868b;text-align:center\\">No data for this metric</div>";treemap.innerHTML=treemapHtml}';
 
     // Filter by category from chart click
     html += 'function filterByCategory(cat){dashboardOpen=false;document.getElementById("dashboardSidebar").classList.remove("open");document.getElementById("mainWrapper").classList.remove("sidebar-open");document.getElementById("dashboardOverlay").classList.remove("visible");document.getElementById("dashboardToggle").classList.remove("active");document.getElementById("dashboardToggle").textContent="📊 Charts";selectedCategories=[cat];document.querySelectorAll(".filter-btn[data-cat]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-cat")===cat)});renderProducts();window.scrollTo(0,document.getElementById("productGrid").offsetTop-100)}';

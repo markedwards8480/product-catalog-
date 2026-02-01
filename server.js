@@ -770,15 +770,29 @@ async function processWorkDriveFolder(folderId, fileType) {
             // Skip non-CSV files
             if (!fileName.toLowerCase().endsWith('.csv')) continue;
             
-            // Check if already processed RECENTLY (within last 5 hours)
-            // This allows re-processing files that are overwritten/updated every 6 hours
-            var existing = await pool.query(
-                "SELECT id FROM workdrive_imports WHERE file_id = $1 AND processed_at > NOW() - INTERVAL '5 hours'",
-                [fileId]
-            );
-            if (existing.rows.length > 0) {
-                console.log('Skipping recently processed file:', fileName);
-                continue;
+            // For SALES files: Only process if we've NEVER seen this file_id before
+            // (Sales files should only replace data when a genuinely NEW file appears)
+            // For INVENTORY files: Allow re-processing after 5 hours since content changes every 6 hours
+            if (fileType === 'sales') {
+                var existingSales = await pool.query(
+                    "SELECT id FROM workdrive_imports WHERE file_id = $1",
+                    [fileId]
+                );
+                if (existingSales.rows.length > 0) {
+                    console.log('Skipping already processed sales file:', fileName, '(keeping existing data until new file appears)');
+                    continue;
+                }
+            } else {
+                // Inventory files: skip if processed recently (within last 5 hours)
+                // This allows re-processing files that are overwritten/updated every 6 hours
+                var existing = await pool.query(
+                    "SELECT id FROM workdrive_imports WHERE file_id = $1 AND processed_at > NOW() - INTERVAL '5 hours'",
+                    [fileId]
+                );
+                if (existing.rows.length > 0) {
+                    console.log('Skipping recently processed file:', fileName);
+                    continue;
+                }
             }
             
             console.log('Processing new file:', fileName, 'as', fileType);

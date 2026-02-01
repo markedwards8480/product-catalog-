@@ -631,20 +631,41 @@ async function processInventoryCSV(csvContent, filename) {
 async function processSalesCSV(csvContent, filename) {
     var lines = csvContent.split('\n');
     if (lines.length < 2) return { success: false, error: 'Empty file', imported: 0 };
-    
+
     var headers = lines[0].toLowerCase().replace(/^\ufeff/, '').split(',').map(function(h) { return h.trim().replace(/['"]/g, ''); });
-    var colMap = {};
-    headers.forEach(function(h, i) { colMap[h] = i; });
-    
-    var docTypeIdx = colMap['document type'] !== undefined ? colMap['document type'] : 0;
-    var docNumIdx = colMap['document number'] !== undefined ? colMap['document number'] : 1;
-    var dateIdx = colMap['date'] !== undefined ? colMap['date'] : 2;
-    var custIdx = colMap['customer/vendor'] !== undefined ? colMap['customer/vendor'] : 3;
-    var skuIdx = colMap['line item sku'];
-    var styleIdx = colMap['line item style'];
-    var statusIdx = colMap['status'];
-    var qtyIdx = colMap['quantity'];
-    var amtIdx = colMap['amount'];
+    console.log('Sales CSV headers found:', headers);
+
+    // Flexible column finder - matches any of the possible names
+    function findColumn(possibleNames) {
+        for (var i = 0; i < headers.length; i++) {
+            var h = headers[i];
+            for (var j = 0; j < possibleNames.length; j++) {
+                if (h === possibleNames[j] || h.indexOf(possibleNames[j]) !== -1) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    // Flexible column mapping - try multiple possible column names
+    var docTypeIdx = findColumn(['document type', 'doc type', 'type', 'order type']);
+    var docNumIdx = findColumn(['document number', 'doc number', 'so_number', 'so number', 'sales_order_number', 'order_number', 'po_number', 'po number', 'order']);
+    var dateIdx = findColumn(['date', 'order date', 'doc_date', 'document date', 'delivery_date', 'ship date']);
+    var custIdx = findColumn(['customer/vendor', 'customer', 'vendor', 'customer_name', 'vendor_name', 'buyer', 'account']);
+    var skuIdx = findColumn(['line item sku', 'sku', 'item_sku', 'product_sku']);
+    var styleIdx = findColumn(['line item style', 'style', 'style_number', 'style_name', 'item', 'product']);
+    var statusIdx = findColumn(['status', 'order_status', 'state']);
+    var qtyIdx = findColumn(['quantity', 'qty', 'units', 'order_qty', 'amount']);
+    var amtIdx = findColumn(['amount', 'total', 'total_amount', 'value', 'price', 'unit_price']);
+
+    console.log('Column mapping - docType:', docTypeIdx, 'docNum:', docNumIdx, 'date:', dateIdx, 'cust:', custIdx, 'sku:', skuIdx, 'style:', styleIdx, 'status:', statusIdx, 'qty:', qtyIdx, 'amt:', amtIdx);
+
+    // Use fallback indices if columns not found
+    if (docTypeIdx === -1) docTypeIdx = 0;
+    if (docNumIdx === -1) docNumIdx = 1;
+    if (dateIdx === -1) dateIdx = 2;
+    if (custIdx === -1) custIdx = 3;
     
     // FULL REPLACE: Delete all existing sales data before importing fresh data
     console.log('Full replace: Clearing all existing sales data...');
@@ -675,15 +696,24 @@ async function processSalesCSV(csvContent, filename) {
             var docNum = row[docNumIdx] || '';
             var docDate = row[dateIdx] || null;
             var customer = row[custIdx] || '';
-            var sku = skuIdx !== undefined ? row[skuIdx] || '' : '';
-            var style = styleIdx !== undefined ? row[styleIdx] || '' : '';
-            var status = statusIdx !== undefined ? row[statusIdx] || '' : '';
-            var qty = qtyIdx !== undefined ? parseFloat((row[qtyIdx] || '0').replace(/,/g, '')) || 0 : 0;
-            var amt = amtIdx !== undefined ? parseFloat((row[amtIdx] || '0').replace(/,/g, '')) || 0 : 0;
-            
+            var sku = skuIdx >= 0 ? row[skuIdx] || '' : '';
+            var style = styleIdx >= 0 ? row[styleIdx] || '' : '';
+            var status = statusIdx >= 0 ? row[statusIdx] || '' : '';
+            var qty = qtyIdx >= 0 ? parseFloat((row[qtyIdx] || '0').replace(/,/g, '')) || 0 : 0;
+            var amt = amtIdx >= 0 ? parseFloat((row[amtIdx] || '0').replace(/,/g, '')) || 0 : 0;
+
+            // Try to get base style from style or sku columns
             var baseStyle = style ? style.split('-')[0] : (sku ? sku.split('-')[0] : '');
-            
-            if (docType && docNum && baseStyle) {
+            // If no style/sku columns, try to use doc number as fallback for baseStyle
+            if (!baseStyle && docNum) baseStyle = docNum.split('-')[0];
+
+            // Log first few rows for debugging
+            if (imported < 3) {
+                console.log('Sales row ' + i + ':', { docType, docNum, customer, style, sku, baseStyle, qty, amt });
+            }
+
+            // Only require docNum to import - be lenient with other fields
+            if (docNum) {
                 // Since we deleted all data, just add to batch
                 batch.push([docType, docNum, docDate, customer, sku, baseStyle, status, qty, amt]);
                 

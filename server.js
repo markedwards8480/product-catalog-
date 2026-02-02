@@ -455,6 +455,7 @@ async function processInventoryCSV(csvContent, filename) {
         // Available Now updates existing records - never delete
         shouldDelete = false;
         console.log('Available Now file: Updating existing records (no delete)');
+        console.log('Total lines to process:', lines.length - 1);
     } else {
         // Legacy combined file: always do full replace
         shouldDelete = true;
@@ -596,12 +597,16 @@ async function processInventoryCSV(csvContent, filename) {
                 }
             }
             imported++;
+            if (imported % 5000 === 0) {
+                console.log('Progress: imported', imported, 'rows, skipped', skipped);
+            }
         } catch (rowErr) {
-            console.error('Row error:', rowErr.message);
+            console.error('Row error at line', li, ':', rowErr.message);
             skipped++;
         }
     }
 
+    console.log('Import complete: imported', imported, ', skipped', skipped, ', newArrivals', newArrivals);
     await pool.query('UPDATE sync_history SET records_synced = $1, status = $2 WHERE id = $3', [imported, 'success', currentImportId]);
     lastImportId = currentImportId;
 
@@ -2071,12 +2076,13 @@ app.post('/api/import', requireAuth, requireAdmin, upload.single('file'), async 
         var content = req.file.buffer.toString('utf-8');
         var filename = req.file.originalname || 'uploaded.csv';
 
-        console.log('Manual CSV import - filename:', filename);
+        console.log('Manual CSV import - filename:', filename, 'size:', content.length, 'bytes');
 
         // Use the same processInventoryCSV function as auto-import
         var result = await processInventoryCSV(content, filename);
 
         if (result.success) {
+            console.log('Import successful:', result.imported, 'records, fileType:', result.fileType);
             res.json({
                 success: true,
                 imported: result.imported,
@@ -2085,11 +2091,12 @@ app.post('/api/import', requireAuth, requireAdmin, upload.single('file'), async 
                 fileType: result.fileType
             });
         } else {
-            res.status(400).json({ error: result.error });
+            console.log('Import failed:', result.error);
+            res.status(400).json({ error: result.error || 'Unknown import error' });
         }
     } catch (err) {
-        console.error('Import error:', err);
-        res.status(500).json({ error: err.message });
+        console.error('Import error:', err.message, err.stack);
+        res.status(500).json({ error: err.message || 'Server error during import' });
     }
 });
 
@@ -3505,7 +3512,7 @@ function getHTML() {
     // Record PDF download
     html += 'document.getElementById("pdfLink").addEventListener("click",function(){if(currentShareId){fetch("/api/selections/"+currentShareId+"/record-pdf",{method:"POST"}).then(function(){loadShares()})}});';
     
-    html += 'document.getElementById("csvFile").addEventListener("change",function(e){var f=e.target.files[0];if(!f)return;var fd=new FormData();fd.append("file",f);document.getElementById("importStatus").innerHTML="Importing...";fetch("/api/import",{method:"POST",body:fd}).then(function(r){return r.json()}).then(function(d){document.getElementById("importStatus").innerHTML=d.success?"<span class=success>Imported "+d.imported+" products"+(d.newArrivals?" ("+d.newArrivals+" new)":"")+"</span>":"<span class=error>"+d.error+"</span>";loadProducts();loadHistory();loadDataFreshness()})});';
+    html += 'document.getElementById("csvFile").addEventListener("change",function(e){var f=e.target.files[0];if(!f)return;var fd=new FormData();fd.append("file",f);document.getElementById("importStatus").innerHTML="Importing...";fetch("/api/import",{method:"POST",body:fd}).then(function(r){if(!r.ok){return r.text().then(function(t){throw new Error("Server error: "+r.status+" - "+t)})}return r.json()}).then(function(d){document.getElementById("importStatus").innerHTML=d.success?"<span class=success>Imported "+d.imported+" products (File: "+d.fileType+")"+(d.newArrivals?" - "+d.newArrivals+" new":"")+"</span>":"<span class=error>Error: "+(d.error||"Unknown error")+"</span>";loadProducts();loadHistory();loadDataFreshness()}).catch(function(err){document.getElementById("importStatus").innerHTML="<span class=error>Import failed: "+err.message+"</span>"})});';
     
     // Sales CSV import handler
     html += 'document.getElementById("salesCsvFile").addEventListener("change",function(e){var f=e.target.files[0];if(!f)return;var fd=new FormData();fd.append("file",f);document.getElementById("salesImportStatus").innerHTML="<span style=\\"color:#666\\">Importing sales data... This may take a moment for large files.</span>";fetch("/api/import-sales",{method:"POST",body:fd}).then(function(r){return r.json()}).then(function(d){if(d.success){var msg="✓ Imported "+d.imported.toLocaleString()+" new records";if(d.skipped>0)msg+=" ("+d.skipped.toLocaleString()+" duplicates skipped)";if(d.errors)msg+=" ("+d.errors+" errors)";document.getElementById("salesImportStatus").innerHTML="<span class=\\"success\\">"+msg+"</span>";loadSalesStats()}else{document.getElementById("salesImportStatus").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}}).catch(function(e){document.getElementById("salesImportStatus").innerHTML="<span class=\\"error\\">Error: "+e.message+"</span>"})});';

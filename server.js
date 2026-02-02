@@ -440,26 +440,25 @@ async function processInventoryCSV(csvContent, filename) {
     var syncResult = await pool.query('INSERT INTO sync_history (sync_type, status) VALUES ($1, $2) RETURNING id', ['csv_import', 'in_progress']);
     var currentImportId = syncResult.rows[0].id;
 
-    // Determine if we need to do a full delete
+    // Determine if we need to do a full delete based on FILE TYPE (not partner detection)
+    // Left to Sell = ALWAYS delete first (it's the primary data source)
+    // Available Now = NEVER delete (it updates existing records)
+    // Combined = ALWAYS delete (legacy mode)
     var shouldDelete = false;
     var existingStyleSet = {};
 
-    if (!isTwoFileMode) {
+    if (fileType === 'left_to_sell') {
+        // Left to Sell is the primary file - always start fresh
+        shouldDelete = true;
+        console.log('Left to Sell file: Clearing all existing data for fresh import');
+    } else if (fileType === 'available_now') {
+        // Available Now updates existing records - never delete
+        shouldDelete = false;
+        console.log('Available Now file: Updating existing records (no delete)');
+    } else {
         // Legacy combined file: always do full replace
         shouldDelete = true;
-        console.log('Full replace mode (combined file): Will clear all existing data');
-    } else if (fileType === 'available_now') {
-        // Available Now files should NEVER delete - they always add to existing Left to Sell data
-        shouldDelete = false;
-        console.log('Two-file mode: Available Now file - preserving existing data');
-    } else if (fileType === 'left_to_sell') {
-        // Left to Sell is always processed first, so it does the delete
-        shouldDelete = true;
-        console.log('Two-file mode: Left to Sell file - clearing existing data for fresh import');
-    } else {
-        // Unknown two-file type, be safe and delete
-        shouldDelete = true;
-        console.log('Two-file mode (unknown type): Will clear all existing data');
+        console.log('Combined file: Clearing all existing data for fresh import');
     }
 
     if (shouldDelete) {
@@ -631,41 +630,20 @@ async function processInventoryCSV(csvContent, filename) {
 async function processSalesCSV(csvContent, filename) {
     var lines = csvContent.split('\n');
     if (lines.length < 2) return { success: false, error: 'Empty file', imported: 0 };
-
+    
     var headers = lines[0].toLowerCase().replace(/^\ufeff/, '').split(',').map(function(h) { return h.trim().replace(/['"]/g, ''); });
-    console.log('Sales CSV headers found:', headers);
-
-    // Flexible column finder - matches any of the possible names
-    function findColumn(possibleNames) {
-        for (var i = 0; i < headers.length; i++) {
-            var h = headers[i];
-            for (var j = 0; j < possibleNames.length; j++) {
-                if (h === possibleNames[j] || h.indexOf(possibleNames[j]) !== -1) {
-                    return i;
-                }
-            }
-        }
-        return -1;
-    }
-
-    // Flexible column mapping - try multiple possible column names
-    var docTypeIdx = findColumn(['document type', 'doc type', 'type', 'order type']);
-    var docNumIdx = findColumn(['document number', 'doc number', 'so_number', 'so number', 'sales_order_number', 'order_number', 'po_number', 'po number', 'order']);
-    var dateIdx = findColumn(['date', 'order date', 'doc_date', 'document date', 'delivery_date', 'ship date']);
-    var custIdx = findColumn(['customer/vendor', 'customer', 'vendor', 'customer_name', 'vendor_name', 'buyer', 'account']);
-    var skuIdx = findColumn(['line item sku', 'sku', 'item_sku', 'product_sku']);
-    var styleIdx = findColumn(['line item style', 'style', 'style_number', 'style_name', 'item', 'product']);
-    var statusIdx = findColumn(['status', 'order_status', 'state']);
-    var qtyIdx = findColumn(['quantity', 'qty', 'units', 'order_qty', 'amount']);
-    var amtIdx = findColumn(['amount', 'total', 'total_amount', 'value', 'price', 'unit_price']);
-
-    console.log('Column mapping - docType:', docTypeIdx, 'docNum:', docNumIdx, 'date:', dateIdx, 'cust:', custIdx, 'sku:', skuIdx, 'style:', styleIdx, 'status:', statusIdx, 'qty:', qtyIdx, 'amt:', amtIdx);
-
-    // Use fallback indices if columns not found
-    if (docTypeIdx === -1) docTypeIdx = 0;
-    if (docNumIdx === -1) docNumIdx = 1;
-    if (dateIdx === -1) dateIdx = 2;
-    if (custIdx === -1) custIdx = 3;
+    var colMap = {};
+    headers.forEach(function(h, i) { colMap[h] = i; });
+    
+    var docTypeIdx = colMap['document type'] !== undefined ? colMap['document type'] : 0;
+    var docNumIdx = colMap['document number'] !== undefined ? colMap['document number'] : 1;
+    var dateIdx = colMap['date'] !== undefined ? colMap['date'] : 2;
+    var custIdx = colMap['customer/vendor'] !== undefined ? colMap['customer/vendor'] : 3;
+    var skuIdx = colMap['line item sku'];
+    var styleIdx = colMap['line item style'];
+    var statusIdx = colMap['status'];
+    var qtyIdx = colMap['quantity'];
+    var amtIdx = colMap['amount'];
     
     // FULL REPLACE: Delete all existing sales data before importing fresh data
     console.log('Full replace: Clearing all existing sales data...');
@@ -696,24 +674,15 @@ async function processSalesCSV(csvContent, filename) {
             var docNum = row[docNumIdx] || '';
             var docDate = row[dateIdx] || null;
             var customer = row[custIdx] || '';
-            var sku = skuIdx >= 0 ? row[skuIdx] || '' : '';
-            var style = styleIdx >= 0 ? row[styleIdx] || '' : '';
-            var status = statusIdx >= 0 ? row[statusIdx] || '' : '';
-            var qty = qtyIdx >= 0 ? parseFloat((row[qtyIdx] || '0').replace(/,/g, '')) || 0 : 0;
-            var amt = amtIdx >= 0 ? parseFloat((row[amtIdx] || '0').replace(/,/g, '')) || 0 : 0;
-
-            // Try to get base style from style or sku columns
+            var sku = skuIdx !== undefined ? row[skuIdx] || '' : '';
+            var style = styleIdx !== undefined ? row[styleIdx] || '' : '';
+            var status = statusIdx !== undefined ? row[statusIdx] || '' : '';
+            var qty = qtyIdx !== undefined ? parseFloat((row[qtyIdx] || '0').replace(/,/g, '')) || 0 : 0;
+            var amt = amtIdx !== undefined ? parseFloat((row[amtIdx] || '0').replace(/,/g, '')) || 0 : 0;
+            
             var baseStyle = style ? style.split('-')[0] : (sku ? sku.split('-')[0] : '');
-            // If no style/sku columns, try to use doc number as fallback for baseStyle
-            if (!baseStyle && docNum) baseStyle = docNum.split('-')[0];
-
-            // Log first few rows for debugging
-            if (imported < 3) {
-                console.log('Sales row ' + i + ':', { docType, docNum, customer, style, sku, baseStyle, qty, amt });
-            }
-
-            // Only require docNum to import - be lenient with other fields
-            if (docNum) {
+            
+            if (docType && docNum && baseStyle) {
                 // Since we deleted all data, just add to batch
                 batch.push([docType, docNum, docDate, customer, sku, baseStyle, status, qty, amt]);
                 
@@ -785,30 +754,7 @@ async function processWorkDriveFolder(folderId, fileType) {
     try {
         var files = await listWorkDriveFiles(folderId);
         console.log('Found ' + files.length + ' files in ' + fileType + ' folder');
-
-        // For INVENTORY files: Only process the most recent date batch
-        // This prevents accumulating data from multiple dates
-        if (fileType === 'inventory') {
-            var filesByDate = {};
-            for (var f = 0; f < files.length; f++) {
-                var fl = files[f];
-                var fn = fl.attributes ? fl.attributes.name : (fl.name || 'unknown');
-                if (!fn.toLowerCase().endsWith('.csv')) continue;
-                var dateMatch = fn.match(/(\d{4}-\d{2}-\d{2})/);
-                if (dateMatch) {
-                    var dt = dateMatch[1];
-                    if (!filesByDate[dt]) filesByDate[dt] = [];
-                    filesByDate[dt].push(fl);
-                }
-            }
-            var dates = Object.keys(filesByDate).sort().reverse();
-            if (dates.length > 0) {
-                var latestDate = dates[0];
-                console.log('Inventory: Processing only latest date batch:', latestDate, '- skipping', dates.length - 1, 'older dates');
-                files = filesByDate[latestDate];
-            }
-        }
-
+        
         for (var i = 0; i < files.length; i++) {
             var file = files[i];
             var fileId = file.id;
@@ -817,29 +763,15 @@ async function processWorkDriveFolder(folderId, fileType) {
             // Skip non-CSV files
             if (!fileName.toLowerCase().endsWith('.csv')) continue;
             
-            // For SALES files: Only process if we've NEVER seen this file_id before
-            // (Sales files should only replace data when a genuinely NEW file appears)
-            // For INVENTORY files: Allow re-processing after 5 hours since content changes every 6 hours
-            if (fileType === 'sales') {
-                var existingSales = await pool.query(
-                    "SELECT id FROM workdrive_imports WHERE file_id = $1",
-                    [fileId]
-                );
-                if (existingSales.rows.length > 0) {
-                    console.log('Skipping already processed sales file:', fileName, '(keeping existing data until new file appears)');
-                    continue;
-                }
-            } else {
-                // Inventory files: skip if processed recently (within last 5 hours)
-                // This allows re-processing files that are overwritten/updated every 6 hours
-                var existing = await pool.query(
-                    "SELECT id FROM workdrive_imports WHERE file_id = $1 AND processed_at > NOW() - INTERVAL '5 hours'",
-                    [fileId]
-                );
-                if (existing.rows.length > 0) {
-                    console.log('Skipping recently processed file:', fileName);
-                    continue;
-                }
+            // Check if already processed RECENTLY (within last 5 hours)
+            // This allows re-processing files that are overwritten/updated every 6 hours
+            var existing = await pool.query(
+                "SELECT id FROM workdrive_imports WHERE file_id = $1 AND processed_at > NOW() - INTERVAL '5 hours'",
+                [fileId]
+            );
+            if (existing.rows.length > 0) {
+                console.log('Skipping recently processed file:', fileName);
+                continue;
             }
             
             console.log('Processing new file:', fileName, 'as', fileType);
@@ -2414,93 +2346,6 @@ app.get('/api/open-orders-by-style', requireAuth, async function(req, res) {
     }
 });
 
-// Get inventory data by category for dashboard visualizations
-app.get('/api/inventory-by-category', requireAuth, async function(req, res) {
-    try {
-        // Get inventory by category
-        var invResult = await pool.query(`
-            SELECT
-                p.category,
-                COUNT(DISTINCT p.base_style) as style_count,
-                COALESCE(SUM(pc.left_to_sell), 0) as total_left_to_sell,
-                COALESCE(SUM(pc.available_now), 0) as total_available_now
-            FROM products p
-            LEFT JOIN product_colors pc ON p.id = pc.product_id
-            WHERE p.category IS NOT NULL AND p.category != ''
-            GROUP BY p.category
-            ORDER BY total_left_to_sell DESC
-        `);
-
-        // Get sales orders and POs by category
-        var salesResult = await pool.query(`
-            SELECT
-                p.category,
-                sd.document_type,
-                LOWER(sd.status) as status,
-                SUM(sd.quantity) as total_qty,
-                SUM(sd.amount) as total_amount
-            FROM sales_data sd
-            JOIN products p ON sd.base_style = p.base_style
-            WHERE p.category IS NOT NULL AND p.category != ''
-            GROUP BY p.category, sd.document_type, LOWER(sd.status)
-        `);
-
-        // Build category data with sales info
-        var salesByCategory = {};
-        salesResult.rows.forEach(function(row) {
-            if (!row.category) return;
-            if (!salesByCategory[row.category]) {
-                salesByCategory[row.category] = { openOrders: 0, openOrdersDollars: 0, importPOs: 0, importPOsDollars: 0 };
-            }
-            var docType = (row.document_type || '').toLowerCase();
-            var status = row.status || '';
-            var qty = parseInt(row.total_qty) || 0;
-            var amt = parseFloat(row.total_amount) || 0;
-
-            if (docType.indexOf('sales') !== -1 && status === 'open') {
-                salesByCategory[row.category].openOrders += qty;
-                salesByCategory[row.category].openOrdersDollars += amt;
-            } else if (docType.indexOf('purchase') !== -1 && status === 'open') {
-                salesByCategory[row.category].importPOs += qty;
-                salesByCategory[row.category].importPOsDollars += amt;
-            }
-        });
-
-        var categories = invResult.rows.map(function(row) {
-            var sales = salesByCategory[row.category] || { openOrders: 0, openOrdersDollars: 0, importPOs: 0, importPOsDollars: 0 };
-            return {
-                category: row.category,
-                styleCount: parseInt(row.style_count) || 0,
-                leftToSell: parseInt(row.total_left_to_sell) || 0,
-                availableNow: parseInt(row.total_available_now) || 0,
-                openOrders: sales.openOrders,
-                openOrdersDollars: sales.openOrdersDollars,
-                importPOs: sales.importPOs,
-                importPOsDollars: sales.importPOsDollars
-            };
-        });
-
-        var totalLeftToSell = categories.reduce(function(sum, c) { return sum + c.leftToSell; }, 0);
-        var totalAvailableNow = categories.reduce(function(sum, c) { return sum + c.availableNow; }, 0);
-        var totalOpenOrders = categories.reduce(function(sum, c) { return sum + c.openOrders; }, 0);
-        var totalImportPOs = categories.reduce(function(sum, c) { return sum + c.importPOs; }, 0);
-
-        res.json({
-            success: true,
-            categories: categories,
-            totals: {
-                leftToSell: totalLeftToSell,
-                availableNow: totalAvailableNow,
-                openOrders: totalOpenOrders,
-                importPOs: totalImportPOs
-            }
-        });
-    } catch (err) {
-        console.error('Error fetching inventory by category:', err);
-        res.json({ success: false, error: err.message });
-    }
-});
-
 // Fix duplicate sales data and recreate unique index
 app.post('/api/sales-data/fix-duplicates', requireAuth, requireAdmin, async function(req, res) {
     try {
@@ -3377,38 +3222,7 @@ function getHTML() {
     html += '.stats .stat-value{font-size:1.25rem !important}';
     html += '.filter-btn{font-size:0.625rem;padding:0.25rem 0.5rem}';
     html += '}';
-
-    // Slide-out Sidebar Dashboard Styles
-    html += '.dashboard-sidebar{position:fixed;top:48px;left:0;width:280px;height:calc(100vh - 48px);background:white;box-shadow:2px 0 12px rgba(0,0,0,0.1);transform:translateX(-100%);transition:transform 0.3s ease;z-index:99;overflow-y:auto;padding:1rem}';
-    html += '.dashboard-sidebar.open{transform:translateX(0)}';
-    html += '.dashboard-sidebar-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid #e0e0e0}';
-    html += '.dashboard-sidebar-header h3{font-size:1rem;font-weight:600;color:#1e3a5f;margin:0}';
-    html += '.dashboard-sidebar-close{background:none;border:none;font-size:1.25rem;cursor:pointer;color:#86868b;padding:0.25rem}';
-    html += '.dashboard-sidebar-close:hover{color:#1e3a5f}';
-    html += '.dashboard-total{font-size:0.8125rem;color:#34c759;font-weight:600;margin-bottom:0.75rem;display:block}';
-    html += '.metric-btn{padding:0.35rem 0.6rem;border:1px solid #d0d0d0;background:white;border-radius:6px;font-size:0.7rem;cursor:pointer;color:#666;transition:all 0.15s}';
-    html += '.metric-btn:hover{border-color:#0088c2;color:#0088c2}';
-    html += '.metric-btn.active{background:#0088c2;color:white;border-color:#0088c2}';
-    html += '.dashboard-treemap{display:flex;flex-wrap:wrap;gap:4px}';
-    // Treemap styles - compact for sidebar
-    html += '.treemap-item{padding:8px;color:white;border-radius:6px;cursor:pointer;transition:transform 0.15s,box-shadow 0.15s;flex-grow:1;min-width:60px;display:flex;flex-direction:column;justify-content:center}';
-    html += '.treemap-item:hover{transform:scale(1.02);box-shadow:0 4px 12px rgba(0,0,0,0.15)}';
-    html += '.treemap-label{font-weight:600;font-size:0.7rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}';
-    html += '.treemap-value{font-size:0.75rem;opacity:0.95;margin-top:1px}';
-    html += '.treemap-pct{font-size:0.625rem;opacity:0.8}';
-    // Dashboard toggle button in stats bar
-    html += '.dashboard-toggle{background:#0088c2;color:white;border:none;padding:0.5rem 1rem;border-radius:980px;cursor:pointer;font-size:0.8125rem;font-weight:500}';
-    html += '.dashboard-toggle:hover{background:#006fa0}';
-    html += '.dashboard-toggle.active{background:#1e3a5f}';
-    // Main content shift when sidebar open
-    html += '.main-wrapper{transition:margin-left 0.3s ease,width 0.3s ease}';
-    html += '.main-wrapper.sidebar-open{margin-left:280px}';
-    // Overlay for mobile
-    html += '.dashboard-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.3);z-index:98;display:none}';
-    html += '.dashboard-overlay.visible{display:block}';
-    // Mobile responsive
-    html += '@media screen and (max-width: 768px) {.dashboard-sidebar{width:85vw;max-width:320px}.main-wrapper.sidebar-open{margin-left:0}}';
-
+    
     html += '</style></head><body>';
     
     // Filter summary side panel only (badge is now inline in filters)
@@ -3417,18 +3231,6 @@ function getHTML() {
     html += '<div id="loginPage" class="login-page" style="display:none"><div class="login-box"><h1>Mark Edwards Apparel<br><span style="font-size:0.8em;font-weight:normal">Product Catalog</span></h1><form id="loginForm"><div class="form-group"><label>Select User</label><select id="loginUserSelect" required style="width:100%;padding:0.875rem 1rem;border:none;border-radius:12px;font-size:1rem;background:#f5f5f7;appearance:none;cursor:pointer"><option value="">-- Select your name --</option></select></div><input type="hidden" id="loginPin" value="0000"><button type="submit" class="btn btn-primary" style="width:100%">Sign In</button><div id="loginError" class="error hidden"></div></form></div></div>';
     
     html += '<div id="mainApp"><header class="header"><h1 style="color:#1e3a5f;font-weight:700;font-size:1.5rem">Mark Edwards Apparel</h1><div class="header-right"><div class="user-menu-wrapper" style="position:relative"><button class="btn btn-secondary" id="userMenuBtn" style="display:flex;align-items:center;gap:0.5rem"><span id="userInfo">Welcome</span> ▾</button><div id="userMenu" class="user-menu hidden"><button class="user-menu-item" id="changePinBtn">Change PIN</button><button class="user-menu-item" id="logoutBtn">Sign Out</button></div></div><button class="btn btn-secondary" id="helpBtn">User Guide</button><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn">Admin</button></div></header>';
-
-    // Slide-out sidebar for category treemap
-    html += '<div class="dashboard-overlay" id="dashboardOverlay"></div>';
-    html += '<div class="dashboard-sidebar" id="dashboardSidebar">';
-    html += '<div class="dashboard-sidebar-header"><h3>🗺️ By Category</h3><button class="dashboard-sidebar-close" id="dashboardClose">×</button></div>';
-    html += '<div class="dashboard-metric-toggle" id="dashboardMetricToggle" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:0.75rem"><button class="metric-btn active" data-metric="leftToSell">Left to Sell</button><button class="metric-btn" data-metric="availableNow">Avail Now</button><button class="metric-btn" data-metric="openOrders">Open Orders</button><button class="metric-btn" data-metric="importPOs">Import POs</button></div>';
-    html += '<span class="dashboard-total" id="dashboardTotal">Loading...</span>';
-    html += '<div class="dashboard-treemap" id="dashboardTreemap"></div>';
-    html += '</div>';
-
-    // Main content wrapper
-    html += '<div class="main-wrapper" id="mainWrapper">';
     
     // History panel (visible to all users)
     html += '<main class="main"><div id="historyPanel" class="admin-panel hidden"><h2>History & Status</h2><div class="tabs"><button class="tab active" data-tab="shares">Sharing History</button><button class="tab" data-tab="freshness">Data Freshness</button><button class="tab" data-tab="history">Sync History</button></div>';
@@ -3447,11 +3249,10 @@ function getHTML() {
     html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Name</th><th>PIN</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUserName" placeholder="Display Name"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add User</button></div><p style="margin-top:1rem;font-size:0.8rem;color:#666">New users are assigned a random 4-digit PIN. They can change it after logging in.</p></div>';
     html += '<div id="system2Tab" class="tab-content"><div id="systemHealthContent"><p>Loading system health data...</p></div><button class="btn btn-secondary" id="refreshSystemBtn" style="margin-top:1rem">🔄 Refresh</button></div></div>';
     
-    html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div id="availNowStat" class="stat-box"><div class="stat-value" id="totalAvailNow">0</div><div class="stat-label">Avail Now</div></div><div id="leftToSellStat" class="stat-box stat-active"><div class="stat-value" id="totalLeftToSell">0</div><div class="stat-label">Left to Sell</div></div>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div id="availToSellStat" class="stat-box" style="display:none"><div class="stat-value" id="totalAvailToSell" style="color:#1e3a5f">0</div><div class="stat-label">Avail to Sell</div></div><div id="oversoldStat" class="stat-box" style="display:none"><div class="stat-value" id="totalOversold" style="color:#ff3b30">0</div><div class="stat-label">Oversold</div></div>' : '') + '<div class="qty-toggle"><button class="qty-toggle-btn" id="toggleAvailableNow" data-mode="available_now">Available Now</button><button class="qty-toggle-btn active" id="toggleLeftToSell" data-mode="left_to_sell">Left to Sell</button>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div style="display:flex;align-items:center;gap:0.5rem;margin-left:1rem;padding-left:1rem;border-left:1px solid #ddd"><input type="checkbox" id="supplyDemandToggle" style="cursor:pointer"><label for="supplyDemandToggle" style="cursor:pointer;font-size:0.75rem;white-space:nowrap">Supply vs Demand</label></div>' : '') + '</div><button class="dashboard-toggle" id="dashboardToggle">📊 Charts</button><div style="margin-left:1rem;text-align:right;font-size:0.7rem;color:#999"><span id="dataFreshness">Loading...</span></div></div>';
-
+    html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div id="availNowStat" class="stat-box"><div class="stat-value" id="totalAvailNow">0</div><div class="stat-label">Avail Now</div></div><div id="leftToSellStat" class="stat-box stat-active"><div class="stat-value" id="totalLeftToSell">0</div><div class="stat-label">Left to Sell</div></div>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div id="availToSellStat" class="stat-box" style="display:none"><div class="stat-value" id="totalAvailToSell" style="color:#1e3a5f">0</div><div class="stat-label">Avail to Sell</div></div><div id="oversoldStat" class="stat-box" style="display:none"><div class="stat-value" id="totalOversold" style="color:#ff3b30">0</div><div class="stat-label">Oversold</div></div>' : '') + '<div class="qty-toggle"><button class="qty-toggle-btn" id="toggleAvailableNow" data-mode="available_now">Available Now</button><button class="qty-toggle-btn active" id="toggleLeftToSell" data-mode="left_to_sell">Left to Sell</button>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div style="display:flex;align-items:center;gap:0.5rem;margin-left:1rem;padding-left:1rem;border-left:1px solid #ddd"><input type="checkbox" id="supplyDemandToggle" style="cursor:pointer"><label for="supplyDemandToggle" style="cursor:pointer;font-size:0.75rem;white-space:nowrap">Supply vs Demand</label></div>' : '') + '</div><div style="margin-left:auto;text-align:right;font-size:0.7rem;color:#999"><span id="dataFreshness">Loading...</span></div></div>';
     html += '<div class="view-controls"><div class="search-box" style="display:flex;align-items:center;gap:0.5rem;margin-right:1.5rem;position:relative"><input type="text" id="searchInput" placeholder="Search products..." style="padding:0.5rem 0.75rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;width:200px"><button id="clearSearchBtn" style="padding:0.4rem 0.6rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.75rem">Clear</button><span id="aiSearchIndicator" class="hidden" style="position:absolute;top:100%;left:0;font-size:0.65rem;color:#0088c2;white-space:nowrap">AI-enhanced search</span></div><label>View:</label><button class="size-btn" data-size="list">List</button><button class="size-btn" data-size="small">Small</button><button class="size-btn active" data-size="medium">Medium</button><button class="size-btn" data-size="large">Large</button><div class="feature-toggle active-indicator" id="groupByStyleWrapper"><input type="checkbox" id="groupByStyleToggle" checked><label for="groupByStyleToggle">Group by Style</label></div><label style="margin-left:1.5rem">Sort:</label><select id="sortSelect" style="padding:0.5rem 0.75rem;border:2px solid #1e3a5f;border-radius:8px;font-size:0.8125rem;background:#1e3a5f;color:white;font-weight:500;cursor:pointer"><option value="name-asc">Name A-Z</option><option value="name-desc">Name Z-A</option><option value="qty-high" selected>Qty High-Low</option><option value="qty-low">Qty Low-High</option><option value="newest">Newest First</option></select><div class="qty-filter-group" style="margin-left:1.5rem"><label>Qty:</label><input type="number" id="minQty" placeholder="Min"><span>-</span><input type="number" id="maxQty" placeholder="Max"><button id="resetQtyBtn" style="padding:0.4rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.75rem">Reset</button></div><span style="margin-left:auto"></span><button class="select-mode-btn" id="selectModeBtn">Select for Sharing</button></div>';
     html += '<div class="filters"><button class="filter-btn special" data-special="new">New Arrivals</button><button class="filter-btn special" data-special="picks">My Picks</button><button class="filter-btn special" data-special="notes">Has Notes</button>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<button class="filter-btn special" data-special="oversold" style="background:#fff0f0;border-color:#ff3b30;color:#ff3b30">Oversold</button>' : '') + '<button id="resetAllFiltersBtn" style="padding:0.5rem 1rem;border:1px solid #86868b;background:#f5f5f7;color:#1e3a5f;border-radius:980px;cursor:pointer;font-weight:600;font-size:0.8125rem;margin-left:1rem">✕ Clear All Filters</button><div class="filter-summary-badge" id="filterSummaryBadge" onclick="openFilterPanel()"><span>📋 View Active</span><span class="filter-count-badge" id="filterCountBadge">0</span></div><span class="filter-divider"></span><div style="display:inline-flex;position:relative;align-items:center;margin-right:0.5rem"><button class="filter-btn" id="colorFilterBtn" style="font-weight:500">Color: All ▼</button><button class="filter-btn hidden" id="clearColorBtn" style="margin-left:0.25rem;padding:0.4rem 0.625rem">✕</button><div id="colorDropdown" class="color-dropdown hidden"></div></div><div style="display:inline-flex;position:relative;align-items:center;margin-right:0.5rem"><button class="filter-btn" id="customerFilterBtn" style="font-weight:500">Customer: All ▼</button><button class="filter-btn hidden" id="clearCustomerBtn" style="margin-left:0.25rem;padding:0.4rem 0.625rem">✕</button><div id="customerDropdown" class="multi-dropdown hidden"><div class="multi-dropdown-header"><input type="text" id="customerSearch" placeholder="Search customers..." style="width:100%;padding:0.5rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;margin-bottom:0.5rem"><div style="display:flex;gap:0.5rem"><button id="applyCustomerFilter" class="btn btn-primary btn-sm">Apply</button><button id="clearCustomerFilter" class="btn btn-secondary btn-sm">Clear</button></div></div><div id="customerList" class="multi-dropdown-list"></div></div></div><div style="display:inline-flex;position:relative;align-items:center;margin-right:0.5rem"><button class="filter-btn" id="supplierFilterBtn" style="font-weight:500">Supplier: All ▼</button><button class="filter-btn hidden" id="clearSupplierBtn" style="margin-left:0.25rem;padding:0.4rem 0.625rem">✕</button><div id="supplierDropdown" class="multi-dropdown hidden"><div class="multi-dropdown-header"><input type="text" id="supplierSearch" placeholder="Search suppliers..." style="width:100%;padding:0.5rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;margin-bottom:0.5rem"><div style="display:flex;gap:0.5rem"><button id="applySupplierFilter" class="btn btn-primary btn-sm">Apply</button><button id="clearSupplierFilter" class="btn btn-secondary btn-sm">Clear</button></div></div><div id="supplierList" class="multi-dropdown-list"></div></div></div><span class="filter-divider"></span><span id="categoryFilters"></span></div>';
-    html += '<div class="product-grid size-medium" id="productGrid"></div><div class="empty hidden" id="emptyState">No products found.</div></main></div></div>';
+    html += '<div class="product-grid size-medium" id="productGrid"></div><div class="empty hidden" id="emptyState">No products found.</div></main></div>';
     
     // Selection bar
     html += '<div class="selection-bar" id="selectionBar"><span class="selection-count"><span id="selectedCount">0</span> items selected</span><div class="selection-actions"><button class="btn btn-secondary" id="togglePreviewBtn">Preview</button><button class="btn btn-secondary" id="clearSelectionBtn">Clear</button><button class="btn btn-secondary" id="exitSelectionBtn">Exit Selection Mode</button><button class="btn btn-primary" id="shareSelectionBtn">Share / Download</button></div></div>';
@@ -3576,35 +3377,6 @@ function getHTML() {
 
     // Supply vs Demand toggle event listener
     html += 'if(document.getElementById("supplyDemandToggle")){document.getElementById("supplyDemandToggle").addEventListener("change",function(){supplyDemandMode=this.checked;renderProducts()})}';
-
-    // Dashboard sidebar toggle and visualization
-    html += 'var dashboardOpen=false;var dashboardData=null;var dashboardMetric="leftToSell";';
-
-    // Toggle sidebar open/close
-    html += 'function toggleDashboard(){dashboardOpen=!dashboardOpen;document.getElementById("dashboardSidebar").classList.toggle("open",dashboardOpen);document.getElementById("mainWrapper").classList.toggle("sidebar-open",dashboardOpen);document.getElementById("dashboardOverlay").classList.toggle("visible",dashboardOpen);document.getElementById("dashboardToggle").classList.toggle("active",dashboardOpen);document.getElementById("dashboardToggle").textContent=dashboardOpen?"✕ Close":"📊 Charts"}';
-
-    // Event listeners for dashboard
-    html += 'document.getElementById("dashboardToggle").addEventListener("click",toggleDashboard);';
-    html += 'document.getElementById("dashboardClose").addEventListener("click",toggleDashboard);';
-    html += 'document.getElementById("dashboardOverlay").addEventListener("click",toggleDashboard);';
-
-    // Metric toggle event listeners
-    html += 'document.querySelectorAll(".metric-btn").forEach(function(btn){btn.addEventListener("click",function(){dashboardMetric=this.getAttribute("data-metric");document.querySelectorAll(".metric-btn").forEach(function(b){b.classList.remove("active")});this.classList.add("active");renderDashboard()})});';
-
-    // Load inventory dashboard data
-    html += 'async function loadDashboard(){try{var resp=await fetch("/api/inventory-by-category");var data=await resp.json();if(data.success){dashboardData=data;renderDashboard()}}catch(err){console.error("Error loading dashboard:",err)}}';
-
-    // Render dashboard visualizations - treemap in sidebar with metric selection
-    html += 'function renderDashboard(){if(!dashboardData||!dashboardData.categories)return;var cats=dashboardData.categories;var metricLabels={leftToSell:"Left to Sell",availableNow:"Available Now",openOrders:"Open Orders",importPOs:"Import POs"};var total=dashboardData.totals[dashboardMetric]||0;var colors=["#0088c2","#34c759","#ff9500","#ff3b30","#af52de","#5ac8fa","#ffcc00","#ff2d55","#8e8e93","#5856d6","#ff6961","#77dd77","#aec6cf","#fdfd96","#c7d1d9"];';
-
-    // Update total display
-    html += 'var totalEl=document.getElementById("dashboardTotal");if(totalEl)totalEl.textContent=(total/1000).toFixed(0)+"K units ("+metricLabels[dashboardMetric]+")";';
-
-    // Render treemap items into sidebar - dynamic sizing based on selected metric
-    html += 'var treemap=document.getElementById("dashboardTreemap");var treemapHtml="";cats.sort(function(a,b){return (b[dashboardMetric]||0)-(a[dashboardMetric]||0)}).forEach(function(c,idx){var val=c[dashboardMetric]||0;var pct=total>0?(val/total*100):0;var width=Math.max(Math.sqrt(pct)*22,30);var height=Math.max(pct*2.5,40);if(pct>15)height=Math.max(pct*3,60);if(val===0)return;treemapHtml+="<div class=\\"treemap-item\\" style=\\"flex-basis:calc("+Math.min(width,100)+"% - 4px);min-height:"+height+"px;background:"+colors[idx%colors.length]+"\\" onclick=\\"filterByCategory(\'"+c.category.replace(/\'/g,"\\\\\'")+"\')\\"><div class=\\"treemap-label\\">"+c.category+"</div><div class=\\"treemap-value\\">"+(val/1000).toFixed(0)+"K</div><div class=\\"treemap-pct\\">"+pct.toFixed(1)+"%</div></div>"});if(!treemapHtml)treemapHtml="<div style=\\"padding:1rem;color:#86868b;text-align:center\\">No data for this metric</div>";treemap.innerHTML=treemapHtml}';
-
-    // Filter by category from chart click
-    html += 'function filterByCategory(cat){dashboardOpen=false;document.getElementById("dashboardSidebar").classList.remove("open");document.getElementById("mainWrapper").classList.remove("sidebar-open");document.getElementById("dashboardOverlay").classList.remove("visible");document.getElementById("dashboardToggle").classList.remove("active");document.getElementById("dashboardToggle").textContent="📊 Charts";selectedCategories=[cat];document.querySelectorAll(".filter-btn[data-cat]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-cat")===cat)});renderProducts();window.scrollTo(0,document.getElementById("productGrid").offsetTop-100)}';
 
     html += 'function loadZohoStatus(){fetch("/api/zoho/status").then(function(r){return r.json()}).then(function(d){var st=document.getElementById("zohoStatusText");if(d.connected){st.textContent="Connected";st.className="status-value connected"}else{st.textContent="Not connected";st.className="status-value disconnected"}document.getElementById("zohoWorkspaceId").textContent=d.workspaceId||"Not set";document.getElementById("zohoViewId").textContent=d.viewId||"Not set"})}';
     
@@ -3808,7 +3580,7 @@ function getHTML() {
     
     // Compact header scroll handler removed
     
-    html += 'checkSession();fetchOpenOrders();loadDashboard();';
+    html += 'checkSession();fetchOpenOrders();';
     html += '</script></body></html>';
     return html;
 }

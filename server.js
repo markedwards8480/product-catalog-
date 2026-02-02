@@ -543,9 +543,21 @@ async function processInventoryCSV(csvContent, filename) {
             var validImageUrl = (imageUrl && imageUrl !== '-No Value-' && imageUrl.indexOf('http') === 0) ? imageUrl : lastImageUrl;
 
             var productId;
-            if (isTwoFileMode) {
-                // Two-file mode: upsert products
-                var isNewStyle = !existingStyleSet[styleId];
+            if (shouldDelete) {
+                // We deleted all data - just INSERT directly (FAST)
+                // But we need to handle duplicate styles within the same file
+                if (existingStyleSet[styleId]) {
+                    // Style already inserted in this import - get its ID
+                    var productResult = await pool.query('SELECT id FROM products WHERE style_id = $1', [styleId]);
+                    productId = productResult.rows[0].id;
+                } else {
+                    var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url, first_seen_import) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl, currentImportId]);
+                    productId = ins.rows[0].id;
+                    newArrivals++;
+                    existingStyleSet[styleId] = true;
+                }
+            } else {
+                // Available Now: UPDATE existing products or INSERT new ones
                 var productResult = await pool.query('SELECT id, image_url FROM products WHERE style_id = $1', [styleId]);
                 if (productResult.rows.length > 0) {
                     productId = productResult.rows[0].id;
@@ -554,60 +566,30 @@ async function processInventoryCSV(csvContent, filename) {
                 } else {
                     var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url, first_seen_import) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl, currentImportId]);
                     productId = ins.rows[0].id;
-                    if (isNewStyle) newArrivals++;
                     existingStyleSet[styleId] = true;
                 }
-            } else {
-                // Combined file mode: just insert (we deleted all data)
-                var ins = await pool.query('INSERT INTO products (style_id, base_style, name, category, image_url, first_seen_import) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [styleId, baseStyle, name, validCategory, validImageUrl, currentImportId]);
-                productId = ins.rows[0].id;
             }
 
             if (color && color !== '-No Value-') {
                 // Normalize color name for consistent matching
                 var normalizedColor = color.trim();
 
-                if (isTwoFileMode) {
-                    // Two-file mode: partial update based on file type
-                    // Use case-insensitive matching for colors
-                    var colorResult = await pool.query('SELECT id, available_now, left_to_sell, on_hand, open_order, to_come, color_name FROM product_colors WHERE product_id=$1 AND LOWER(TRIM(color_name))=LOWER($2)', [productId, normalizedColor]);
-                    if (colorResult.rows.length > 0) {
-                        var existing = colorResult.rows[0];
-                        if (fileType === 'available_now') {
-                            // SUM duplicates: add new value to existing value
-                            var newAvailableNow = (existing.available_now || 0) + availableNow;
-                            await pool.query('UPDATE product_colors SET available_now=$1, available_qty=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3',
-                                [newAvailableNow, newAvailableNow, existing.id]);
-                            if (imported < 5) console.log('Updated available_now for', styleId, normalizedColor, ':', existing.available_now, '+', availableNow, '=', newAvailableNow);
-                        } else if (fileType === 'left_to_sell') {
-                            // SUM duplicates: add new values to existing values
-                            var newLeftToSell = (existing.left_to_sell || 0) + leftToSell;
-                            var newOnHand = (existing.on_hand || 0) + onHand;
-                            var newOpenOrder = (existing.open_order || 0) + openOrder;
-                            var newToCome = (existing.to_come || 0) + toCome;
-                            await pool.query('UPDATE product_colors SET left_to_sell=$1, on_hand=$2, open_order=$3, to_come=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5',
-                                [newLeftToSell, newOnHand, newOpenOrder, newToCome, existing.id]);
-                            if (imported < 5) console.log('Updated left_to_sell for', styleId, normalizedColor, ':', existing.left_to_sell, '+', leftToSell, '=', newLeftToSell);
-                        }
-                    } else {
-                        // New color - insert with whatever values we have
-                        await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-                            [productId, normalizedColor, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]);
-                        if (imported < 5) console.log('Inserted NEW color for', styleId, normalizedColor, '- avail:', availableNow, 'lts:', leftToSell);
-                    }
+                if (shouldDelete) {
+                    // We deleted all data, so just INSERT directly - no need to check if exists
+                    // This is MUCH faster than doing SELECT + INSERT/UPDATE for each row
+                    await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+                        [productId, normalizedColor, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]);
                 } else {
-                    // Combined file mode: upsert with SUM for duplicates
-                    var colorResult = await pool.query('SELECT id, available_now, left_to_sell, on_hand, open_order, to_come FROM product_colors WHERE product_id=$1 AND LOWER(TRIM(color_name))=LOWER($2)', [productId, normalizedColor]);
+                    // Available Now file: need to UPDATE existing records from Left to Sell
+                    var colorResult = await pool.query('SELECT id, available_now FROM product_colors WHERE product_id=$1 AND LOWER(TRIM(color_name))=LOWER($2)', [productId, normalizedColor]);
                     if (colorResult.rows.length > 0) {
                         var existing = colorResult.rows[0];
+                        // SUM duplicates: add new value to existing value
                         var newAvailableNow = (existing.available_now || 0) + availableNow;
-                        var newLeftToSell = (existing.left_to_sell || 0) + leftToSell;
-                        var newOnHand = (existing.on_hand || 0) + onHand;
-                        var newOpenOrder = (existing.open_order || 0) + openOrder;
-                        var newToCome = (existing.to_come || 0) + toCome;
-                        await pool.query('UPDATE product_colors SET available_now=$1, left_to_sell=$2, on_hand=$3, open_order=$4, to_come=$5, available_qty=$6, updated_at=CURRENT_TIMESTAMP WHERE id=$7',
-                            [newAvailableNow, newLeftToSell, newOnHand, newOpenOrder, newToCome, newAvailableNow, existing.id]);
+                        await pool.query('UPDATE product_colors SET available_now=$1, available_qty=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3',
+                            [newAvailableNow, newAvailableNow, existing.id]);
                     } else {
+                        // Color doesn't exist (not in Left to Sell) - insert new
                         await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
                             [productId, normalizedColor, availableNow, leftToSell, onHand, openOrder, toCome, availableNow]);
                     }

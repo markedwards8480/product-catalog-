@@ -741,15 +741,31 @@ async function processWorkDriveFolder(folderId, fileType) {
     try {
         var files = await listWorkDriveFiles(folderId);
         console.log('Found ' + files.length + ' files in ' + fileType + ' folder');
-        
+
+        // For inventory files, sort so Left to Sell comes BEFORE Available Now
+        // This is critical because Left to Sell clears all data, Available Now updates it
+        if (fileType === 'inventory') {
+            files.sort(function(a, b) {
+                var nameA = (a.attributes ? a.attributes.name : (a.name || '')).toLowerCase();
+                var nameB = (b.attributes ? b.attributes.name : (b.name || '')).toLowerCase();
+                var aIsLeftToSell = nameA.indexOf('left to sell') !== -1 || nameA.indexOf('left_to_sell') !== -1;
+                var bIsLeftToSell = nameB.indexOf('left to sell') !== -1 || nameB.indexOf('left_to_sell') !== -1;
+                // Left to Sell files come first
+                if (aIsLeftToSell && !bIsLeftToSell) return -1;
+                if (!aIsLeftToSell && bIsLeftToSell) return 1;
+                return 0;
+            });
+            console.log('Inventory files sorted: Left to Sell will be processed first');
+        }
+
         for (var i = 0; i < files.length; i++) {
             var file = files[i];
             var fileId = file.id;
             var fileName = file.attributes ? file.attributes.name : (file.name || 'unknown');
-            
+
             // Skip non-CSV files
             if (!fileName.toLowerCase().endsWith('.csv')) continue;
-            
+
             // Check if already processed RECENTLY (within last 5 hours)
             // This allows re-processing files that are overwritten/updated every 6 hours
             var existing = await pool.query(
@@ -760,20 +776,22 @@ async function processWorkDriveFolder(folderId, fileType) {
                 console.log('Skipping recently processed file:', fileName);
                 continue;
             }
-            
+
             console.log('Processing new file:', fileName, 'as', fileType);
-            
+
             // Download file
             var fileBuffer = await downloadWorkDriveFile(fileId);
             if (!fileBuffer) {
-                await pool.query('INSERT INTO workdrive_imports (file_id, file_name, file_type, status, error_message) VALUES ($1, $2, $3, $4, $5)', 
+                await pool.query('INSERT INTO workdrive_imports (file_id, file_name, file_type, status, error_message) VALUES ($1, $2, $3, $4, $5)',
                     [fileId, fileName, fileType, 'error', 'Failed to download']);
+                console.error('Failed to download file:', fileName);
                 continue;
             }
-            
+
             var csvContent = fileBuffer.toString('utf-8');
+            console.log('Downloaded file:', fileName, '- size:', csvContent.length, 'bytes');
             var result;
-            
+
             if (fileType === 'inventory') {
                 result = await processInventoryCSV(csvContent, fileName);
             } else if (fileType === 'sales') {
@@ -781,18 +799,19 @@ async function processWorkDriveFolder(folderId, fileType) {
             } else {
                 continue;
             }
-            
+
             if (result.success) {
-                await pool.query('INSERT INTO workdrive_imports (file_id, file_name, file_type, status, records_imported) VALUES ($1, $2, $3, $4, $5)', 
+                await pool.query('INSERT INTO workdrive_imports (file_id, file_name, file_type, status, records_imported) VALUES ($1, $2, $3, $4, $5)',
                     [fileId, fileName, fileType, 'success', result.imported]);
                 processed++;
                 console.log('Successfully imported ' + result.imported + ' records from ' + fileName);
             } else {
-                await pool.query('INSERT INTO workdrive_imports (file_id, file_name, file_type, status, error_message) VALUES ($1, $2, $3, $4, $5)', 
+                await pool.query('INSERT INTO workdrive_imports (file_id, file_name, file_type, status, error_message) VALUES ($1, $2, $3, $4, $5)',
                     [fileId, fileName, fileType, 'error', result.error]);
+                console.error('Import failed for', fileName, ':', result.error);
             }
         }
-        
+
         return { success: true, processed: processed };
     } catch (err) {
         console.error('Error processing folder:', err);
@@ -800,17 +819,31 @@ async function processWorkDriveFolder(folderId, fileType) {
     }
 }
 
-// Start WorkDrive folder polling job
+// Start WorkDrive folder polling job - runs at specific times (2 AM and 6 AM EST)
 function startWorkDriveImportJob() {
-    console.log('Starting WorkDrive auto-import job (every ' + (WORKDRIVE_CHECK_INTERVAL / 3600000) + ' hours)');
-    // Initial check after 1 minute (let server start up first)
+    console.log('Starting WorkDrive auto-import job (runs at 2 AM and 6 AM EST)');
+
+    // Check every 15 minutes if it's time to run
+    setInterval(function() {
+        var now = new Date();
+        var estHour = (now.getUTCHours() - 5 + 24) % 24; // Convert UTC to EST
+        var minutes = now.getMinutes();
+
+        // Run at 2:00 AM EST or 6:00 AM EST (within first 15 minutes of the hour)
+        if ((estHour === 2 || estHour === 6) && minutes < 15) {
+            var todayKey = now.toISOString().split('T')[0] + '-' + estHour;
+            if (!global.lastAutoImportRun || global.lastAutoImportRun !== todayKey) {
+                global.lastAutoImportRun = todayKey;
+                console.log('Scheduled auto-import starting at ' + estHour + ':00 EST');
+                checkWorkDriveFolderForImports();
+            }
+        }
+    }, 15 * 60 * 1000); // Check every 15 minutes
+
+    // Also do initial check after 1 minute (for testing/deployment)
     setTimeout(function() {
         checkWorkDriveFolderForImports();
     }, 60000);
-    // Then check periodically
-    setInterval(function() {
-        checkWorkDriveFolderForImports();
-    }, WORKDRIVE_CHECK_INTERVAL);
 }
 
 // Nightly image cache refresh - checks for stale images and refreshes them

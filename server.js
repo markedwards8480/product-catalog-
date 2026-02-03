@@ -1,4 +1,4 @@
-\const express = require('express');
+const express = require('express');
 const { Pool } = require('pg');
 const multer = require('multer');
 const session = require('express-session');
@@ -1532,6 +1532,75 @@ app.get('/api/styles-by-customers', async function(req, res) {
     }
 });
 
+// Get customer scorecard for merchandising tab
+app.get('/api/merchandising/customer-scorecard/:customer', async function(req, res) {
+    try {
+        var customerName = decodeURIComponent(req.params.customer);
+
+        // Get total categories available
+        var totalCatsResult = await pool.query(`
+            SELECT COUNT(DISTINCT category) as total FROM products WHERE category IS NOT NULL
+        `);
+        var totalCategories = parseInt(totalCatsResult.rows[0].total) || 0;
+
+        // Get customer's order data with category breakdown
+        var orderData = await pool.query(`
+            SELECT
+                p.category,
+                COUNT(DISTINCT p.base_style) as styles,
+                COUNT(DISTINCT sd.line_item_sku) as colors,
+                COALESCE(SUM(sd.quantity), 0) as total_units,
+                COALESCE(SUM(sd.amount), 0) as total_dollars
+            FROM sales_data sd
+            JOIN products p ON p.base_style = sd.base_style
+            WHERE sd.customer_vendor = $1
+              AND sd.document_type IN ('Sales Order', 'SO', 'Invoice')
+            GROUP BY p.category
+            ORDER BY total_dollars DESC
+        `, [customerName]);
+
+        var categoriesRepresented = orderData.rows.length;
+        var totalStyles = 0;
+        var totalColors = 0;
+        var totalUnits = 0;
+        var totalDollars = 0;
+        var topCategories = [];
+
+        orderData.rows.forEach(function(row) {
+            totalStyles += parseInt(row.styles) || 0;
+            totalColors += parseInt(row.colors) || 0;
+            totalUnits += parseInt(row.total_units) || 0;
+            totalDollars += parseFloat(row.total_dollars) || 0;
+            topCategories.push({
+                category: row.category,
+                styles: parseInt(row.styles) || 0,
+                units: parseInt(row.total_units) || 0,
+                dollars: parseFloat(row.total_dollars) || 0
+            });
+        });
+
+        var breadthScore = totalCategories > 0 ? Math.round((categoriesRepresented / totalCategories) * 100) : 0;
+        var healthIndicator = breadthScore >= 60 ? 'strong' : (breadthScore >= 30 ? 'moderate' : 'opportunity');
+
+        res.json({
+            success: true,
+            customer: customerName,
+            categoriesRepresented: categoriesRepresented,
+            totalCategories: totalCategories,
+            totalStyles: totalStyles,
+            totalColors: totalColors,
+            totalUnits: totalUnits,
+            totalDollars: totalDollars,
+            breadthScore: breadthScore,
+            healthIndicator: healthIndicator,
+            topCategories: topCategories.slice(0, 5)
+        });
+    } catch (err) {
+        console.error('Customer scorecard error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // Get styles for selected suppliers
 app.get('/api/styles-by-suppliers', async function(req, res) {
     try {
@@ -2397,6 +2466,83 @@ app.get('/api/open-orders-by-style', requireAuth, async function(req, res) {
         res.json({ success: true, openOrders: openOrdersByStyle, importPOs: importPOsByStyle });
     } catch (err) {
         console.error('Error fetching open orders:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Get category mix data for merchandising tab
+app.get('/api/merchandising/category-mix', async function(req, res) {
+    try {
+        // Get category data with inventory and sales metrics
+        var result = await pool.query(`
+            SELECT
+                p.category,
+                COUNT(DISTINCT p.base_style) as style_count,
+                COALESCE(SUM(c.left_to_sell), 0) as total_left_to_sell,
+                COALESCE(SUM(c.available_now), 0) as total_available_now
+            FROM products p
+            LEFT JOIN product_colors c ON c.product_id = p.id
+            WHERE p.category IS NOT NULL
+            GROUP BY p.category
+            ORDER BY total_left_to_sell DESC
+        `);
+
+        // Get sales data per category
+        var salesResult = await pool.query(`
+            SELECT
+                p.category,
+                COALESCE(SUM(CASE WHEN sd.document_type IN ('Sales Order', 'SO') THEN sd.quantity ELSE 0 END), 0) as open_orders,
+                COALESCE(SUM(CASE WHEN sd.document_type IN ('Sales Order', 'SO') THEN sd.amount ELSE 0 END), 0) as open_orders_dollars,
+                COALESCE(SUM(CASE WHEN sd.document_type IN ('Purchase Order', 'PO', 'Bill') THEN sd.quantity ELSE 0 END), 0) as import_pos,
+                COALESCE(SUM(CASE WHEN sd.document_type IN ('Purchase Order', 'PO', 'Bill') THEN sd.amount ELSE 0 END), 0) as import_pos_dollars
+            FROM sales_data sd
+            JOIN products p ON p.base_style = sd.base_style
+            WHERE p.category IS NOT NULL
+            GROUP BY p.category
+        `);
+
+        var salesByCategory = {};
+        salesResult.rows.forEach(function(row) {
+            salesByCategory[row.category] = {
+                openOrders: parseInt(row.open_orders) || 0,
+                openOrdersDollars: parseFloat(row.open_orders_dollars) || 0,
+                importPOs: parseInt(row.import_pos) || 0,
+                importPOsDollars: parseFloat(row.import_pos_dollars) || 0
+            };
+        });
+
+        // Calculate totals for percentages
+        var totalLeftToSell = 0;
+        result.rows.forEach(function(row) {
+            totalLeftToSell += parseInt(row.total_left_to_sell) || 0;
+        });
+
+        var categories = result.rows.map(function(row) {
+            var leftToSell = parseInt(row.total_left_to_sell) || 0;
+            var sales = salesByCategory[row.category] || { openOrders: 0, openOrdersDollars: 0, importPOs: 0, importPOsDollars: 0 };
+            var mixPercentage = totalLeftToSell > 0 ? (leftToSell / totalLeftToSell * 100) : 0;
+
+            return {
+                category: row.category,
+                styleCount: parseInt(row.style_count) || 0,
+                leftToSell: leftToSell,
+                availableNow: parseInt(row.total_available_now) || 0,
+                openOrders: sales.openOrders,
+                openOrdersDollars: sales.openOrdersDollars,
+                importPOs: sales.importPOs,
+                importPOsDollars: sales.importPOsDollars,
+                mixPercentage: Math.round(mixPercentage * 10) / 10,
+                overIndexed: mixPercentage > 15
+            };
+        });
+
+        res.json({
+            success: true,
+            categories: categories,
+            totalLeftToSell: totalLeftToSell
+        });
+    } catch (err) {
+        console.error('Error fetching category mix:', err);
         res.json({ success: false, error: err.message });
     }
 });
@@ -3277,7 +3423,47 @@ function getHTML() {
     html += '.stats .stat-value{font-size:1.25rem !important}';
     html += '.filter-btn{font-size:0.625rem;padding:0.25rem 0.5rem}';
     html += '}';
-    
+
+    // Merchandising tab styles
+    html += '.merch-section{background:#fff;border-radius:12px;padding:1.5rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,0.1)}';
+    html += '.merch-section h3{margin:0 0 1rem;font-size:1.1rem;color:#1e3a5f}';
+    html += '.merch-chart-row{display:flex;gap:2rem;flex-wrap:wrap}';
+    html += '.merch-chart-container{flex:1;min-width:300px;position:relative}';
+    html += '.merch-donut-wrapper{position:relative;width:280px;height:280px;margin:0 auto}';
+    html += '.merch-donut-center{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center}';
+    html += '.merch-donut-center .total{font-size:1.5rem;font-weight:700;color:#1e3a5f}';
+    html += '.merch-donut-center .label{font-size:0.75rem;color:#86868b}';
+    html += '.merch-legend{flex:1;min-width:250px;max-height:320px;overflow-y:auto}';
+    html += '.merch-legend-item{display:flex;align-items:center;gap:0.75rem;padding:0.5rem;border-radius:6px;cursor:pointer;transition:background 0.15s}';
+    html += '.merch-legend-item:hover{background:#f5f5f7}';
+    html += '.merch-legend-color{width:14px;height:14px;border-radius:3px;flex-shrink:0}';
+    html += '.merch-legend-info{flex:1;min-width:0}';
+    html += '.merch-legend-name{font-size:0.875rem;font-weight:500;color:#1e3a5f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}';
+    html += '.merch-legend-stats{font-size:0.75rem;color:#86868b}';
+    html += '.merch-legend-warning{background:#fff3cd;color:#856404;font-size:0.65rem;padding:2px 6px;border-radius:4px;font-weight:600;margin-left:auto;flex-shrink:0}';
+    html += '.merch-bubble-container{width:100%;height:350px;position:relative;background:#fafafa;border-radius:8px;overflow:hidden}';
+    html += '.merch-bubble-controls{display:flex;gap:1rem;margin-bottom:1rem;flex-wrap:wrap}';
+    html += '.merch-radio-group{display:flex;gap:0.5rem;align-items:center}';
+    html += '.merch-radio-group label{display:flex;align-items:center;gap:0.35rem;font-size:0.8rem;color:#4a5568;cursor:pointer}';
+    html += '.merch-radio-group input{accent-color:#0088c2}';
+    html += '.scorecard-section{margin-top:1.5rem;padding-top:1.5rem;border-top:1px solid #e0e0e0}';
+    html += '.scorecard-customer-select{display:flex;gap:1rem;align-items:center;margin-bottom:1.25rem}';
+    html += '.scorecard-customer-select label{font-weight:500;color:#1e3a5f}';
+    html += '.scorecard-customer-select select{padding:0.5rem 1rem;border:1px solid #ddd;border-radius:8px;font-size:0.875rem;min-width:250px}';
+    html += '.scorecard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem}';
+    html += '.scorecard-metric{background:#f5f5f7;border-radius:10px;padding:1rem;text-align:center}';
+    html += '.scorecard-metric .value{font-size:1.75rem;font-weight:700;color:#1e3a5f}';
+    html += '.scorecard-metric .label{font-size:0.75rem;color:#86868b;margin-top:0.25rem}';
+    html += '.scorecard-health{padding:0.75rem 1.5rem;border-radius:8px;font-weight:600;display:inline-block;margin-top:0.5rem}';
+    html += '.scorecard-health.strong{background:#d4edda;color:#155724}';
+    html += '.scorecard-health.moderate{background:#fff3cd;color:#856404}';
+    html += '.scorecard-health.opportunity{background:#f8d7da;color:#721c24}';
+    html += '.scorecard-top-cats{margin-top:1.25rem}';
+    html += '.scorecard-top-cats h4{font-size:0.875rem;color:#1e3a5f;margin:0 0 0.75rem}';
+    html += '.scorecard-cat-item{display:flex;justify-content:space-between;padding:0.5rem 0;border-bottom:1px solid #eee;font-size:0.875rem}';
+    html += '.scorecard-cat-item:last-child{border-bottom:none}';
+    html += '.scorecard-empty{text-align:center;padding:2rem;color:#86868b}';
+
     html += '</style></head><body>';
     
     // Filter summary side panel only (badge is now inline in filters)
@@ -3294,7 +3480,7 @@ function getHTML() {
     html += '<div id="historyTab" class="tab-content"><table><thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Records</th><th>Error</th></tr></thead><tbody id="historyTable"></tbody></table></div></div>';
     
     // Admin panel (admin only)
-    html += '<div id="adminPanel" class="admin-panel hidden"><h2>Admin Settings</h2><div class="tabs"><button class="tab active" data-tab="zoho2">Zoho Sync</button><button class="tab" data-tab="import2">Import CSV</button><button class="tab" data-tab="sales2">Import Sales</button><button class="tab" data-tab="autoimport2">Auto Import</button><button class="tab" data-tab="ai2">AI Analysis</button><button class="tab" data-tab="cache2">Image Cache</button><button class="tab" data-tab="users2">Users</button><button class="tab" data-tab="system2">System Health</button></div>';
+    html += '<div id="adminPanel" class="admin-panel hidden"><h2>Admin Settings</h2><div class="tabs"><button class="tab active" data-tab="zoho2">Zoho Sync</button><button class="tab" data-tab="import2">Import CSV</button><button class="tab" data-tab="sales2">Import Sales</button><button class="tab" data-tab="autoimport2">Auto Import</button><button class="tab" data-tab="ai2">AI Analysis</button><button class="tab" data-tab="cache2">Image Cache</button><button class="tab" data-tab="users2">Users</button><button class="tab" data-tab="system2">System Health</button><button class="tab" data-tab="merch2">Merchandising</button></div>';
     html += '<div id="zoho2Tab" class="tab-content active"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="zohoStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Workspace ID: </span><span class="status-value" id="zohoWorkspaceId">-</span></div><div class="status-item"><span class="status-label">View ID: </span><span class="status-value" id="zohoViewId">-</span></div></div><div style="display:flex;gap:1rem"><button class="btn btn-secondary" id="testZohoBtn">Test Connection</button><button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div><div id="zohoMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="import2Tab" class="tab-content"><div class="upload-area"><input type="file" id="csvFile" accept=".csv"><label for="csvFile">Click to upload CSV file</label></div><div id="importStatus"></div><button class="btn btn-danger" id="clearBtn" style="margin-top:1rem">Clear All Products</button></div>';
     html += '<div id="sales2Tab" class="tab-content"><p style="margin-bottom:1rem;color:#666">Import sales data (Sales Orders and Purchase Orders) from the PO-SO Query CSV export.</p><div class="upload-area"><input type="file" id="salesCsvFile" accept=".csv"><label for="salesCsvFile">Click to upload Sales CSV file</label></div><div id="salesImportStatus"></div><div id="salesDataStats" style="margin-top:1rem"></div><button class="btn btn-danger" id="clearSalesBtn" style="margin-top:1rem">Clear All Sales Data</button><p style="margin-top:0.5rem;font-size:0.75rem;color:#999">Use this to start fresh before uploading historical files.</p></div>';
@@ -3302,7 +3488,22 @@ function getHTML() {
     html += '<div id="ai2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">API Status: </span><span class="status-value" id="aiStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Products Analyzed: </span><span class="status-value" id="aiAnalyzedCount">-</span></div><div class="status-item"><span class="status-label">Remaining: </span><span class="status-value" id="aiRemainingCount">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">AI analysis uses Claude Vision to generate searchable tags from product images. This enables searching by garment type (cardigan, hoodie), style (casual, formal), pattern (striped, floral), and more.</p><button class="btn btn-primary" id="runAiBtn">Analyze Next 100 Products</button><button class="btn btn-success" id="runAllAiBtn" style="margin-left:0.5rem">Analyze All (Background)</button><button class="btn btn-secondary" id="stopAiBtn" style="margin-left:0.5rem;display:none">Stop</button><div id="aiMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="cache2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">Cache Status: </span><span class="status-value" id="cacheStatus">Checking...</span></div><div class="status-item"><span class="status-label">Cached Images: </span><span class="status-value" id="cachedCount">-</span></div><div class="status-item"><span class="status-label">Total Products with Images: </span><span class="status-value" id="totalImagesCount">-</span></div><div class="status-item"><span class="status-label">Cache Size: </span><span class="status-value" id="cacheSize">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">Image caching stores product images locally to reduce Zoho API calls and speed up image loading. Images are cached on first view and refreshed when you upload a new inventory CSV.</p><button class="btn btn-primary" id="refreshCacheBtn">Refresh All Images</button><button class="btn btn-danger" id="clearCacheBtn" style="margin-left:0.5rem">Clear Cache</button><div id="cacheMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Name</th><th>PIN</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUserName" placeholder="Display Name"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add User</button></div><p style="margin-top:1rem;font-size:0.8rem;color:#666">New users are assigned a random 4-digit PIN. They can change it after logging in.</p></div>';
-    html += '<div id="system2Tab" class="tab-content"><div id="systemHealthContent"><p>Loading system health data...</p></div><button class="btn btn-secondary" id="refreshSystemBtn" style="margin-top:1rem">🔄 Refresh</button></div></div>';
+    html += '<div id="system2Tab" class="tab-content"><div id="systemHealthContent"><p>Loading system health data...</p></div><button class="btn btn-secondary" id="refreshSystemBtn" style="margin-top:1rem">🔄 Refresh</button></div>';
+
+    // Merchandising tab content
+    html += '<div id="merch2Tab" class="tab-content">';
+    html += '<div class="merch-section"><h3>📊 Category Mix Balance</h3>';
+    html += '<div class="merch-chart-row">';
+    html += '<div class="merch-chart-container"><div class="merch-donut-wrapper"><canvas id="merchDonutChart" width="280" height="280"></canvas><div class="merch-donut-center"><div class="total" id="merchDonutTotal">-</div><div class="label">Total Units</div></div></div></div>';
+    html += '<div class="merch-legend" id="merchLegend"><p style="color:#86868b;text-align:center;padding:1rem">Loading...</p></div>';
+    html += '</div></div>';
+    html += '<div class="merch-section"><h3>📈 Category Performance (Volume vs Value)</h3>';
+    html += '<div class="merch-bubble-controls"><div class="merch-radio-group"><span style="font-weight:500;margin-right:0.5rem">Y-Axis:</span><label><input type="radio" name="bubbleMetric" value="openOrders" checked> Open Orders</label><label><input type="radio" name="bubbleMetric" value="importPOs"> Import POs</label></div></div>';
+    html += '<div class="merch-bubble-container"><canvas id="merchBubbleChart"></canvas></div></div>';
+    html += '<div class="merch-section scorecard-section"><h3>🎯 Customer Assortment Scorecard</h3>';
+    html += '<div class="scorecard-customer-select"><label>Select Customer:</label><select id="scorecardCustomer"><option value="">-- Choose a customer --</option></select></div>';
+    html += '<div id="scorecardContent"><div class="scorecard-empty">Select a customer to view their assortment metrics</div></div></div>';
+    html += '</div></div>';
     
     html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div id="availNowStat" class="stat-box"><div class="stat-value" id="totalAvailNow">0</div><div class="stat-label">Avail Now</div></div><div id="leftToSellStat" class="stat-box stat-active"><div class="stat-value" id="totalLeftToSell">0</div><div class="stat-label">Left to Sell</div></div>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div id="availToSellStat" class="stat-box" style="display:none"><div class="stat-value" id="totalAvailToSell" style="color:#1e3a5f">0</div><div class="stat-label">Avail to Sell</div></div><div id="oversoldStat" class="stat-box" style="display:none"><div class="stat-value" id="totalOversold" style="color:#ff3b30">0</div><div class="stat-label">Oversold</div></div>' : '') + '<div class="qty-toggle"><button class="qty-toggle-btn" id="toggleAvailableNow" data-mode="available_now">Available Now</button><button class="qty-toggle-btn active" id="toggleLeftToSell" data-mode="left_to_sell">Left to Sell</button>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div style="display:flex;align-items:center;gap:0.5rem;margin-left:1rem;padding-left:1rem;border-left:1px solid #ddd"><input type="checkbox" id="supplyDemandToggle" style="cursor:pointer"><label for="supplyDemandToggle" style="cursor:pointer;font-size:0.75rem;white-space:nowrap">Supply vs Demand</label></div>' : '') + '</div><div style="margin-left:auto;text-align:right;font-size:0.7rem;color:#999"><span id="dataFreshness">Loading...</span></div></div>';
     html += '<div class="view-controls"><div class="search-box" style="display:flex;align-items:center;gap:0.5rem;margin-right:1.5rem;position:relative"><input type="text" id="searchInput" placeholder="Search products..." style="padding:0.5rem 0.75rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;width:200px"><button id="clearSearchBtn" style="padding:0.4rem 0.6rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.75rem">Clear</button><span id="aiSearchIndicator" class="hidden" style="position:absolute;top:100%;left:0;font-size:0.65rem;color:#0088c2;white-space:nowrap">AI-enhanced search</span></div><label>View:</label><button class="size-btn" data-size="list">List</button><button class="size-btn" data-size="small">Small</button><button class="size-btn active" data-size="medium">Medium</button><button class="size-btn" data-size="large">Large</button><div class="feature-toggle active-indicator" id="groupByStyleWrapper"><input type="checkbox" id="groupByStyleToggle" checked><label for="groupByStyleToggle">Group by Style</label></div><label style="margin-left:1.5rem">Sort:</label><select id="sortSelect" style="padding:0.5rem 0.75rem;border:2px solid #1e3a5f;border-radius:8px;font-size:0.8125rem;background:#1e3a5f;color:white;font-weight:500;cursor:pointer"><option value="name-asc">Name A-Z</option><option value="name-desc">Name Z-A</option><option value="qty-high" selected>Qty High-Low</option><option value="qty-low">Qty Low-High</option><option value="newest">Newest First</option></select><div class="qty-filter-group" style="margin-left:1.5rem"><label>Qty:</label><input type="number" id="minQty" placeholder="Min"><span>-</span><input type="number" id="maxQty" placeholder="Max"><button id="resetQtyBtn" style="padding:0.4rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.75rem">Reset</button></div><span style="margin-left:auto"></span><button class="select-mode-btn" id="selectModeBtn">Select for Sharing</button></div>';
@@ -3415,8 +3616,27 @@ function getHTML() {
     html += 'async function fetchOpenOrders(){try{var resp=await fetch("/api/open-orders-by-style");var data=await resp.json();if(data.success){openOrdersByStyle=data.openOrders;importPOsByStyle=data.importPOs||{};console.log("Loaded open orders for",Object.keys(openOrdersByStyle).length,"styles");console.log("Loaded import POs for",Object.keys(importPOsByStyle).length,"styles")}else{console.error("Error loading open orders:",data.error)}}catch(err){console.error("Error fetching open orders:",err)}}';
 
     html += 'async function sendChatMessage(){var input=document.getElementById("chatInput");var msg=input.value.trim();if(!msg)return;addChatMessage(msg,"user");input.value="";input.style.height="auto";document.getElementById("chatSend").disabled=true;showTyping();try{var resp=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:msg})});var data=await resp.json();hideTyping();if(data.success){addChatMessage(data.message,"assistant");if(data.actions&&data.actions.length>0){executeChatActions(data.actions)}}else{addChatMessage("Sorry, I encountered an error. Please try again.","assistant")}}catch(err){hideTyping();addChatMessage("Sorry, something went wrong. Please try again.","assistant")}document.getElementById("chatSend").disabled=false}';
-    
-    html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var panel=e.target.closest(".admin-panel");panel.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});panel.querySelectorAll(".tab-content").forEach(function(c){c.classList.remove("active")});e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active");if(e.target.getAttribute("data-tab")==="cache2")loadCacheStatus();if(e.target.getAttribute("data-tab")==="autoimport2")loadAutoImportStatus()})}';
+
+    // Merchandising tab functions
+    html += 'var merchData=null;var merchBubbleMetric="openOrders";';
+    html += 'var merchColors=["#0088c2","#34c759","#ff9500","#ff3b30","#af52de","#5ac8fa","#ffcc00","#ff2d55","#8e8e93","#5856d6","#ff6961","#77dd77","#aec6cf","#fdfd96","#c7d1d9"];';
+
+    html += 'async function loadMerchandisingTab(){try{var resp=await fetch("/api/merchandising/category-mix");var data=await resp.json();if(data.success){merchData=data;renderMerchDonutChart();renderMerchLegend();renderMerchBubbleChart()}populateScorecardCustomers()}catch(err){console.error("Error loading merchandising data:",err)}}';
+
+    html += 'function renderMerchDonutChart(){var canvas=document.getElementById("merchDonutChart");if(!canvas||!merchData)return;var ctx=canvas.getContext("2d");var cats=merchData.categories;var total=merchData.totalLeftToSell||0;ctx.clearRect(0,0,canvas.width,canvas.height);var cx=140,cy=140,outerR=120,innerR=70;var startAngle=-Math.PI/2;cats.forEach(function(c,idx){var pct=(c.leftToSell||0)/total;if(pct===0)return;var endAngle=startAngle+pct*2*Math.PI;ctx.beginPath();ctx.moveTo(cx+innerR*Math.cos(startAngle),cy+innerR*Math.sin(startAngle));ctx.arc(cx,cy,outerR,startAngle,endAngle);ctx.arc(cx,cy,innerR,endAngle,startAngle,true);ctx.closePath();ctx.fillStyle=merchColors[idx%merchColors.length];ctx.fill();startAngle=endAngle});document.getElementById("merchDonutTotal").textContent=(total/1000).toFixed(0)+"K"}';
+
+    html += 'function renderMerchLegend(){var el=document.getElementById("merchLegend");if(!el||!merchData)return;var html="";merchData.categories.forEach(function(c,idx){var warning=c.overIndexed?"<span class=\\"merch-legend-warning\\">OVER-INDEXED</span>":"";html+="<div class=\\"merch-legend-item\\"><div class=\\"merch-legend-color\\" style=\\"background:"+merchColors[idx%merchColors.length]+"\\"></div><div class=\\"merch-legend-info\\"><div class=\\"merch-legend-name\\">"+c.category+"</div><div class=\\"merch-legend-stats\\">"+(c.leftToSell/1000).toFixed(0)+"K units ("+c.mixPercentage+"%) · "+c.styleCount+" styles</div></div>"+warning+"</div>"});el.innerHTML=html||"<p style=\\"color:#86868b;text-align:center;padding:1rem\\">No data</p>"}';
+
+    html += 'function renderMerchBubbleChart(){var container=document.getElementById("merchBubbleChart");if(!container||!merchData)return;var ctx=container.getContext("2d");var cats=merchData.categories;var w=container.parentElement.clientWidth;var h=350;container.width=w;container.height=h;ctx.clearRect(0,0,w,h);var padding={top:40,right:40,bottom:50,left:70};var chartW=w-padding.left-padding.right;var chartH=h-padding.top-padding.bottom;ctx.strokeStyle="#e0e0e0";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(padding.left,padding.top);ctx.lineTo(padding.left,h-padding.bottom);ctx.lineTo(w-padding.right,h-padding.bottom);ctx.stroke();var maxX=Math.max.apply(null,cats.map(function(c){return c.leftToSell||0}))||1;var maxY=Math.max.apply(null,cats.map(function(c){return c[merchBubbleMetric]||0}))||1;var maxSize=Math.max.apply(null,cats.map(function(c){return c.styleCount||0}))||1;ctx.fillStyle="#86868b";ctx.font="11px -apple-system,BlinkMacSystemFont,sans-serif";ctx.textAlign="center";ctx.fillText("Inventory (Left to Sell)",w/2,h-10);ctx.save();ctx.translate(15,h/2);ctx.rotate(-Math.PI/2);ctx.fillText(merchBubbleMetric==="openOrders"?"Open Orders (units)":"Import POs (units)",0,0);ctx.restore();cats.forEach(function(c,idx){var x=padding.left+(c.leftToSell||0)/maxX*chartW;var y=h-padding.bottom-(c[merchBubbleMetric]||0)/maxY*chartH;var r=Math.max(8,Math.sqrt(c.styleCount/maxSize)*40);ctx.beginPath();ctx.arc(x,y,r,0,2*Math.PI);ctx.fillStyle=merchColors[idx%merchColors.length]+"99";ctx.fill();ctx.strokeStyle=merchColors[idx%merchColors.length];ctx.lineWidth=2;ctx.stroke();if(r>15){ctx.fillStyle="#1e3a5f";ctx.font="bold 9px -apple-system,BlinkMacSystemFont,sans-serif";ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText(c.category.substring(0,8),x,y)}})}';
+
+    html += 'async function populateScorecardCustomers(){try{var resp=await fetch("/api/customers");var data=await resp.json();if(data.success){var sel=document.getElementById("scorecardCustomer");if(!sel)return;var opts="<option value=\\"\\">&mdash; Choose a customer &mdash;</option>";data.customers.forEach(function(c){opts+="<option value=\\""+c.name.replace(/"/g,"&quot;")+"\\">"+c.name+"</option>"});sel.innerHTML=opts}}catch(err){console.error("Error loading customers:",err)}}';
+
+    html += 'async function loadCustomerScorecard(customerName){var content=document.getElementById("scorecardContent");if(!content)return;if(!customerName){content.innerHTML="<div class=\\"scorecard-empty\\">Select a customer to view their assortment metrics</div>";return}content.innerHTML="<div class=\\"scorecard-empty\\">Loading...</div>";try{var resp=await fetch("/api/merchandising/customer-scorecard/"+encodeURIComponent(customerName));var data=await resp.json();if(data.success){var healthClass=data.healthIndicator;var healthLabel=data.healthIndicator==="strong"?"Strong Breadth":data.healthIndicator==="moderate"?"Moderate Breadth":"Growth Opportunity";var html="<div class=\\"scorecard-grid\\"><div class=\\"scorecard-metric\\"><div class=\\"value\\">"+data.categoriesRepresented+"/"+data.totalCategories+"</div><div class=\\"label\\">Categories</div></div><div class=\\"scorecard-metric\\"><div class=\\"value\\">"+data.totalStyles+"</div><div class=\\"label\\">Styles</div></div><div class=\\"scorecard-metric\\"><div class=\\"value\\">"+(data.totalUnits/1000).toFixed(1)+"K</div><div class=\\"label\\">Units</div></div><div class=\\"scorecard-metric\\"><div class=\\"value\\">$"+(data.totalDollars/1000).toFixed(0)+"K</div><div class=\\"label\\">Dollars</div></div></div><div style=\\"text-align:center;margin-top:1rem\\"><div class=\\"scorecard-health "+healthClass+"\\">"+data.breadthScore+"% Breadth - "+healthLabel+"</div></div>";if(data.topCategories&&data.topCategories.length>0){html+="<div class=\\"scorecard-top-cats\\"><h4>Top Categories</h4>";data.topCategories.forEach(function(tc){html+="<div class=\\"scorecard-cat-item\\"><span>"+tc.category+"</span><span>"+(tc.units/1000).toFixed(1)+"K units · $"+(tc.dollars/1000).toFixed(0)+"K</span></div>"});html+="</div>"}content.innerHTML=html}else{content.innerHTML="<div class=\\"scorecard-empty\\">Error loading data</div>"}}catch(err){console.error("Error loading scorecard:",err);content.innerHTML="<div class=\\"scorecard-empty\\">Error loading data</div>"}}';
+
+    html += 'document.querySelectorAll("input[name=\\"bubbleMetric\\"]").forEach(function(radio){radio.addEventListener("change",function(){merchBubbleMetric=this.value;renderMerchBubbleChart()})});';
+    html += 'document.getElementById("scorecardCustomer").addEventListener("change",function(){loadCustomerScorecard(this.value)});';
+
+    html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var panel=e.target.closest(".admin-panel");panel.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});panel.querySelectorAll(".tab-content").forEach(function(c){c.classList.remove("active")});e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active");if(e.target.getAttribute("data-tab")==="cache2")loadCacheStatus();if(e.target.getAttribute("data-tab")==="autoimport2")loadAutoImportStatus();if(e.target.getAttribute("data-tab")==="merch2")loadMerchandisingTab()})}';
     
     html += 'var sizeBtns=document.querySelectorAll(".size-btn");sizeBtns.forEach(function(btn){btn.addEventListener("click",function(e){sizeBtns.forEach(function(b){b.classList.remove("active")});e.target.classList.add("active");currentSize=e.target.getAttribute("data-size");document.getElementById("productGrid").className="product-grid size-"+currentSize;renderProducts()})});';
     

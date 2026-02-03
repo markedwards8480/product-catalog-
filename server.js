@@ -1,4 +1,4 @@
-const express = require('express');
+\const express = require('express');
 const { Pool } = require('pg');
 const multer = require('multer');
 const session = require('express-session');
@@ -742,9 +742,35 @@ async function processWorkDriveFolder(folderId, fileType) {
         var files = await listWorkDriveFiles(folderId);
         console.log('Found ' + files.length + ' files in ' + fileType + ' folder');
 
-        // For inventory files, sort so Left to Sell comes BEFORE Available Now
-        // This is critical because Left to Sell clears all data, Available Now updates it
+        // For inventory files, we ONLY process the NEWEST date's files
+        // This ensures we always have a complete fresh dataset
         if (fileType === 'inventory') {
+            // Extract dates from filenames and find the newest date
+            var newestDate = null;
+            files.forEach(function(f) {
+                var name = f.attributes ? f.attributes.name : (f.name || '');
+                var dateMatch = name.match(/(\d{4}-\d{2}-\d{2})/);
+                if (dateMatch) {
+                    var fileDate = dateMatch[1];
+                    if (!newestDate || fileDate > newestDate) {
+                        newestDate = fileDate;
+                    }
+                }
+            });
+
+            console.log('Newest inventory date found:', newestDate);
+
+            // Filter to only files from the newest date
+            if (newestDate) {
+                files = files.filter(function(f) {
+                    var name = f.attributes ? f.attributes.name : (f.name || '');
+                    return name.indexOf(newestDate) !== -1;
+                });
+                console.log('Filtered to', files.length, 'files from newest date:', newestDate);
+            }
+
+            // Sort so Left to Sell comes BEFORE Available Now
+            // This is critical because Left to Sell clears all data, Available Now updates it
             files.sort(function(a, b) {
                 var nameA = (a.attributes ? a.attributes.name : (a.name || '')).toLowerCase();
                 var nameB = (b.attributes ? b.attributes.name : (b.name || '')).toLowerCase();
@@ -801,12 +827,19 @@ async function processWorkDriveFolder(folderId, fileType) {
             }
 
             if (result.success) {
-                await pool.query('INSERT INTO workdrive_imports (file_id, file_name, file_type, status, records_imported) VALUES ($1, $2, $3, $4, $5)',
+                // Use upsert to handle re-processing files (avoids duplicate key error)
+                await pool.query(`INSERT INTO workdrive_imports (file_id, file_name, file_type, status, records_imported, processed_at)
+                    VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                    ON CONFLICT (file_id) DO UPDATE SET
+                    file_name = $2, status = $4, records_imported = $5, processed_at = CURRENT_TIMESTAMP`,
                     [fileId, fileName, fileType, 'success', result.imported]);
                 processed++;
                 console.log('Successfully imported ' + result.imported + ' records from ' + fileName);
             } else {
-                await pool.query('INSERT INTO workdrive_imports (file_id, file_name, file_type, status, error_message) VALUES ($1, $2, $3, $4, $5)',
+                await pool.query(`INSERT INTO workdrive_imports (file_id, file_name, file_type, status, error_message, processed_at)
+                    VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                    ON CONFLICT (file_id) DO UPDATE SET
+                    file_name = $2, status = $4, error_message = $5, processed_at = CURRENT_TIMESTAMP`,
                     [fileId, fileName, fileType, 'error', result.error]);
                 console.error('Import failed for', fileName, ':', result.error);
             }

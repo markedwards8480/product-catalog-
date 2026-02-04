@@ -78,7 +78,9 @@ async function initDB() {
         // Create index for faster lookups by base_style
         await pool.query('CREATE INDEX IF NOT EXISTS idx_user_notes_base_style ON user_notes(base_style)');
         await pool.query('CREATE TABLE IF NOT EXISTS sales_history_cache (id SERIAL PRIMARY KEY, base_style VARCHAR(100) UNIQUE NOT NULL, summary JSONB, history JSONB, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
-        await pool.query('CREATE TABLE IF NOT EXISTS sales_data (id SERIAL PRIMARY KEY, document_type VARCHAR(50), document_number VARCHAR(100), doc_date DATE, customer_vendor VARCHAR(255), line_item_sku VARCHAR(255), base_style VARCHAR(100), status VARCHAR(50), quantity DECIMAL(12,2), amount DECIMAL(12,2), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
+        await pool.query('CREATE TABLE IF NOT EXISTS sales_data (id SERIAL PRIMARY KEY, document_type VARCHAR(50), document_number VARCHAR(100), doc_date DATE, in_warehouse_date DATE, customer_vendor VARCHAR(255), line_item_sku VARCHAR(255), base_style VARCHAR(100), status VARCHAR(50), quantity DECIMAL(12,2), amount DECIMAL(12,2), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
+        // Add in_warehouse_date column if it doesn't exist (for existing databases)
+        await pool.query('ALTER TABLE sales_data ADD COLUMN IF NOT EXISTS in_warehouse_date DATE');
         await pool.query('CREATE INDEX IF NOT EXISTS idx_sales_data_base_style ON sales_data(base_style)');
         await pool.query('CREATE INDEX IF NOT EXISTS idx_sales_data_document_type ON sales_data(document_type)');
         // Clean up duplicates before creating unique index
@@ -625,6 +627,7 @@ async function processSalesCSV(csvContent, filename) {
     var docTypeIdx = colMap['document type'] !== undefined ? colMap['document type'] : 0;
     var docNumIdx = colMap['document number'] !== undefined ? colMap['document number'] : 1;
     var dateIdx = colMap['date'] !== undefined ? colMap['date'] : 2;
+    var inWarehouseIdx = colMap['in_warehouse_date'];
     var custIdx = colMap['customer/vendor'] !== undefined ? colMap['customer/vendor'] : 3;
     var skuIdx = colMap['line item sku'];
     var styleIdx = colMap['line item style'];
@@ -660,6 +663,17 @@ async function processSalesCSV(csvContent, filename) {
             var docType = row[docTypeIdx] || '';
             var docNum = row[docNumIdx] || '';
             var docDate = row[dateIdx] || null;
+            var inWarehouseRaw = inWarehouseIdx !== undefined ? row[inWarehouseIdx] || '' : '';
+            // Parse in_warehouse_date - format is "11 May, 2025 00:00:00"
+            var inWarehouseDate = null;
+            if (inWarehouseRaw) {
+                try {
+                    var parsed = new Date(inWarehouseRaw.replace(/,/g, ''));
+                    if (!isNaN(parsed.getTime())) {
+                        inWarehouseDate = parsed.toISOString().split('T')[0];
+                    }
+                } catch (e) { }
+            }
             var customer = row[custIdx] || '';
             var sku = skuIdx !== undefined ? row[skuIdx] || '' : '';
             var style = styleIdx !== undefined ? row[styleIdx] || '' : '';
@@ -671,7 +685,7 @@ async function processSalesCSV(csvContent, filename) {
             
             if (docType && docNum && baseStyle) {
                 // Since we deleted all data, just add to batch
-                batch.push([docType, docNum, docDate, customer, sku, baseStyle, status, qty, amt]);
+                batch.push([docType, docNum, docDate, inWarehouseDate, customer, sku, baseStyle, status, qty, amt]);
                 
                 if (batch.length >= batchSize) {
                     var values = [];
@@ -679,10 +693,10 @@ async function processSalesCSV(csvContent, filename) {
                     var paramIdx = 1;
                     for (var b = 0; b < batch.length; b++) {
                         var item = batch[b];
-                        placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
+                        placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
                         values = values.concat(item);
                     }
-                    await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+                    await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
                     imported += batch.length;
                     batch = [];
                 }
@@ -699,10 +713,10 @@ async function processSalesCSV(csvContent, filename) {
         var paramIdx = 1;
         for (var b = 0; b < batch.length; b++) {
             var item = batch[b];
-            placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
+            placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
             values = values.concat(item);
         }
-        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
         imported += batch.length;
     }
     
@@ -1234,7 +1248,7 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
         
         // Query sales_data table for this style
         var salesResult = await pool.query(
-            'SELECT document_type, document_number, doc_date, customer_vendor, status, SUM(quantity) as total_qty, SUM(amount) as total_amount FROM sales_data WHERE base_style = $1 GROUP BY document_type, document_number, doc_date, customer_vendor, status ORDER BY doc_date DESC',
+            'SELECT document_type, document_number, doc_date, in_warehouse_date, customer_vendor, status, SUM(quantity) as total_qty, SUM(amount) as total_amount FROM sales_data WHERE base_style = $1 GROUP BY document_type, document_number, doc_date, in_warehouse_date, customer_vendor, status ORDER BY doc_date DESC',
             [baseStyle]
         );
         
@@ -1268,6 +1282,7 @@ app.get('/api/sales-history/:styleId', requireAuth, async function(req, res) {
                 type: historyType,
                 documentNumber: row.document_number,
                 date: row.doc_date,
+                inWarehouseDate: row.in_warehouse_date,
                 customerName: row.customer_vendor,
                 status: row.status,
                 quantity: qty,
@@ -2272,6 +2287,7 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
         var docTypeIdx = colMap['document_type'];
         var docNumIdx = colMap['document_number'];
         var dateIdx = colMap['date'];
+        var inWarehouseIdx = colMap['in_warehouse_date'];
         var custIdx = colMap['customer_vendor'];
         var skuIdx = colMap['line_item_sku'];
         var styleIdx = colMap['line_item_style'];
@@ -2319,6 +2335,17 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
                 var docType = row[docTypeIdx] || '';
                 var docNum = row[docNumIdx] || '';
                 var docDate = row[dateIdx] || null;
+                var inWarehouseRaw = inWarehouseIdx !== undefined ? row[inWarehouseIdx] || '' : '';
+                // Parse in_warehouse_date - format is "11 May, 2025 00:00:00"
+                var inWarehouseDate = null;
+                if (inWarehouseRaw) {
+                    try {
+                        var parsed = new Date(inWarehouseRaw.replace(/,/g, ''));
+                        if (!isNaN(parsed.getTime())) {
+                            inWarehouseDate = parsed.toISOString().split('T')[0];
+                        }
+                    } catch (e) { }
+                }
                 var customer = row[custIdx] || '';
                 var sku = skuIdx !== undefined ? row[skuIdx] || '' : '';
                 var style = styleIdx !== undefined ? row[styleIdx] || '' : '';
@@ -2335,7 +2362,7 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
                     if (existingKeys.has(key)) {
                         skipped++;
                     } else {
-                        batch.push([docType, docNum, docDate, customer, sku, baseStyle, status, qty, amt]);
+                        batch.push([docType, docNum, docDate, inWarehouseDate, customer, sku, baseStyle, status, qty, amt]);
                         existingKeys.add(key); // Add to set so we don't duplicate within same file
                     
                         if (batch.length >= batchSize) {
@@ -2345,10 +2372,10 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
                             var paramIdx = 1;
                             for (var b = 0; b < batch.length; b++) {
                                 var item = batch[b];
-                                placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
+                                placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
                                 values = values.concat(item);
                             }
-                            await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+                            await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
                             imported += batch.length;
                             batch = [];
                         }
@@ -2367,10 +2394,10 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
             var paramIdx = 1;
             for (var b = 0; b < batch.length; b++) {
                 var item = batch[b];
-                placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
+                placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
                 values = values.concat(item);
             }
-            await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+            await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
             imported += batch.length;
         }
         
@@ -3714,7 +3741,7 @@ function getHTML() {
     
     html += 'var currentSalesFilter="all";var currentSalesHistory=[];function loadSalesHistory(styleId){currentSalesFilter="all";document.getElementById("salesHistoryLoading").textContent="(loading...)";document.getElementById("salesHistorySummary").innerHTML="";document.getElementById("salesHistoryFilter").innerHTML="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#666;padding:0.5rem\\">Loading...</div>";fetch("/api/sales-history/"+encodeURIComponent(styleId)).then(function(r){return r.json()}).then(function(d){document.getElementById("salesHistoryLoading").textContent="";if(!d.success){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">Unable to load</div>";return}currentSalesHistory=d.history;var sum=d.summary;var invDollars=sum.totalInvoicedDollars?"$"+sum.totalInvoicedDollars.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"";var openDollars=sum.totalOpenOrdersDollars?"$"+sum.totalOpenOrdersDollars.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"";var poDollars=sum.totalPODollars?"$"+sum.totalPODollars.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"";document.getElementById("salesHistorySummary").innerHTML="<div onclick=\\"filterSalesHistory(\'invoiced\')\\" style=\\"flex:1;padding:0.5rem 0.75rem;background:#e8f5e9;border-radius:6px;cursor:pointer;border:2px solid transparent;text-align:center\\" class=\\"sales-tile\\" data-filter=\\"invoiced\\"><div style=\\"font-size:1.1rem;font-weight:bold;color:#2e7d32\\">"+sum.totalInvoiced.toLocaleString()+"</div><div style=\\"font-size:0.7rem;color:#666\\">Invoiced ("+sum.invoiceCount+")</div>"+(invDollars?"<div style=\\"font-size:0.75rem;font-weight:600;color:#2e7d32\\">"+invDollars+"</div>":"")+"</div><div onclick=\\"filterSalesHistory(\'open\')\\" style=\\"flex:1;padding:0.5rem 0.75rem;background:#fff3e0;border-radius:6px;cursor:pointer;border:2px solid transparent;text-align:center\\" class=\\"sales-tile\\" data-filter=\\"open\\"><div style=\\"font-size:1.1rem;font-weight:bold;color:#ef6c00\\">"+sum.totalOpenOrders.toLocaleString()+"</div><div style=\\"font-size:0.7rem;color:#666\\">Open SO ("+sum.openOrderCount+")</div>"+(openDollars?"<div style=\\"font-size:0.75rem;font-weight:600;color:#ef6c00\\">"+openDollars+"</div>":"")+"</div><div onclick=\\"filterSalesHistory(\'po\')\\" style=\\"flex:1;padding:0.5rem 0.75rem;background:#e3f2fd;border-radius:6px;cursor:pointer;border:2px solid transparent;text-align:center\\" class=\\"sales-tile\\" data-filter=\\"po\\"><div style=\\"font-size:1.1rem;font-weight:bold;color:#1565c0\\">"+(sum.totalPO||0).toLocaleString()+"</div><div style=\\"font-size:0.7rem;color:#666\\">Open PO ("+(sum.poCount||0)+")</div>"+(poDollars?"<div style=\\"font-size:0.75rem;font-weight:600;color:#1565c0\\">"+poDollars+"</div>":"")+"</div>";renderSalesHistoryList(d.history)}).catch(function(err){document.getElementById("salesHistoryLoading").textContent="";document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999\\">Error: "+err.message+"</div>"})}';
     html += 'function filterSalesHistory(filter){if(currentSalesFilter===filter){currentSalesFilter="all";document.querySelectorAll(".sales-tile").forEach(function(t){t.style.border="2px solid transparent";t.style.opacity="1"});document.getElementById("salesHistoryFilter").innerHTML=""}else{currentSalesFilter=filter;document.querySelectorAll(".sales-tile").forEach(function(t){if(t.dataset.filter===filter){t.style.border="2px solid #1e3a5f"}else{t.style.border="2px solid transparent";t.style.opacity="0.5"}});var label=filter==="invoiced"?"Invoiced":filter==="open"?"Open SO":"Import PO";document.getElementById("salesHistoryFilter").innerHTML="<span style=\\"background:#f0f4f8;padding:0.25rem 0.75rem;border-radius:12px;font-size:0.8rem\\">Showing: <strong>"+label+"</strong> <span onclick=\\"filterSalesHistory(\'all\')\\" style=\\"cursor:pointer;margin-left:0.5rem\\">✕</span></span>"}var filtered=currentSalesHistory;if(filter==="invoiced"){filtered=currentSalesHistory.filter(function(r){var st=(r.status||"").toLowerCase();return r.type!=="purchaseorder"&&(st==="invoiced"||st==="closed"||st==="fulfilled")})}else if(filter==="open"){filtered=currentSalesHistory.filter(function(r){var st=(r.status||"").toLowerCase();return r.type!=="purchaseorder"&&st!=="invoiced"&&st!=="closed"&&st!=="fulfilled"})}else if(filter==="po"){filtered=currentSalesHistory.filter(function(r){return r.type==="purchaseorder"})}else{document.querySelectorAll(".sales-tile").forEach(function(t){t.style.border="2px solid transparent";t.style.opacity="1"});document.getElementById("salesHistoryFilter").innerHTML=""}renderSalesHistoryList(filtered)}';
-    html += 'function renderSalesHistoryList(history){if(history.length===0){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">No records</div>";return}var h="<table style=\\"width:100%;border-collapse:collapse;font-size:0.8rem\\"><thead><tr style=\\"background:#f5f5f5\\"><th style=\\"text-align:left;padding:0.4rem\\">Date</th><th style=\\"text-align:left;padding:0.4rem\\">Customer</th><th style=\\"text-align:left;padding:0.4rem\\">Type</th><th style=\\"text-align:right;padding:0.4rem\\">Qty</th><th style=\\"text-align:right;padding:0.4rem\\">Amount</th></tr></thead><tbody>";history.forEach(function(rec){var typeLabel;var st=(rec.status||"").toLowerCase();if(rec.type==="purchaseorder"){typeLabel="<span style=\\"color:#1565c0\\">PO "+rec.documentNumber+(rec.status?" ("+rec.status+")":"")+"</span>"}else if(st==="invoiced"||st==="closed"||st==="fulfilled"){typeLabel="<span style=\\"color:#2e7d32\\">INV "+rec.documentNumber+"</span>"}else{typeLabel="<span style=\\"color:#ef6c00\\">SO "+rec.documentNumber+" (Open)</span>"}var dt=new Date(rec.date).toLocaleDateString();var amt=rec.amount?"$"+rec.amount.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"-";h+="<tr style=\\"border-bottom:1px solid #eee\\"><td style=\\"padding:0.4rem\\">"+dt+"</td><td style=\\"padding:0.4rem\\">"+rec.customerName+"</td><td style=\\"padding:0.4rem\\">"+typeLabel+"</td><td style=\\"padding:0.4rem;text-align:right\\">"+rec.quantity.toLocaleString()+"</td><td style=\\"padding:0.4rem;text-align:right\\">"+amt+"</td></tr>"});h+="</tbody></table>";document.getElementById("salesHistoryList").innerHTML=h}';
+    html += 'function renderSalesHistoryList(history){if(history.length===0){document.getElementById("salesHistoryList").innerHTML="<div style=\\"color:#999;padding:0.5rem\\">No records</div>";return}var h="<table style=\\"width:100%;border-collapse:collapse;font-size:0.8rem\\"><thead><tr style=\\"background:#f5f5f5\\"><th style=\\"text-align:left;padding:0.4rem\\">Date</th><th style=\\"text-align:left;padding:0.4rem\\">Customer</th><th style=\\"text-align:left;padding:0.4rem\\">Type</th><th style=\\"text-align:right;padding:0.4rem\\">Qty</th><th style=\\"text-align:right;padding:0.4rem\\">Amount</th></tr></thead><tbody>";history.forEach(function(rec){var typeLabel;var st=(rec.status||"").toLowerCase();if(rec.type==="purchaseorder"){var whDate=rec.inWarehouseDate?new Date(rec.inWarehouseDate).toLocaleDateString():"";typeLabel="<span style=\\"color:#1565c0\\">PO "+rec.documentNumber+(rec.status?" ("+rec.status+")":"")+(whDate?"<br><span style=\\"font-size:0.7rem;color:#666\\">IN: "+whDate+"</span>":"")+"</span>"}else if(st==="invoiced"||st==="closed"||st==="fulfilled"){typeLabel="<span style=\\"color:#2e7d32\\">INV "+rec.documentNumber+"</span>"}else{typeLabel="<span style=\\"color:#ef6c00\\">SO "+rec.documentNumber+" (Open)</span>"}var dt=new Date(rec.date).toLocaleDateString();var amt=rec.amount?"$"+rec.amount.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):"-";h+="<tr style=\\"border-bottom:1px solid #eee\\"><td style=\\"padding:0.4rem\\">"+dt+"</td><td style=\\"padding:0.4rem\\">"+rec.customerName+"</td><td style=\\"padding:0.4rem\\">"+typeLabel+"</td><td style=\\"padding:0.4rem;text-align:right\\">"+rec.quantity.toLocaleString()+"</td><td style=\\"padding:0.4rem;text-align:right\\">"+amt+"</td></tr>"});h+="</tbody></table>";document.getElementById("salesHistoryList").innerHTML=h}';
     
     // Helper to group products by base style
     html += 'function groupProductsByStyle(prods){var groups={};prods.forEach(function(p){var base=p.style_id.split("-")[0];if(!groups[base]){groups[base]={baseStyle:base,name:p.name.replace(p.style_id,base),category:p.category,variants:[],firstSeenImport:p.first_seen_import}}groups[base].variants.push(p)});return Object.values(groups)}';

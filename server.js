@@ -687,17 +687,18 @@ async function processSalesCSV(csvContent, filename) {
     var lines = csvContent.split('\n');
     if (lines.length < 2) return { success: false, error: 'Empty file', imported: 0 };
     
-    var headers = lines[0].toLowerCase().replace(/^\ufeff/, '').split(',').map(function(h) { return h.trim().replace(/['"]/g, ''); });
+    var headers = lines[0].toLowerCase().replace(/^\ufeff/, '').split(',').map(function(h) { return h.trim().replace(/['"]/g, '').replace(/\s+/g, '_').replace(/\//g, '_'); });
     var colMap = {};
     headers.forEach(function(h, i) { colMap[h] = i; });
-    
-    var docTypeIdx = colMap['document type'] !== undefined ? colMap['document type'] : 0;
-    var docNumIdx = colMap['document number'] !== undefined ? colMap['document number'] : 1;
+    console.log('processSalesCSV headers:', headers);
+
+    var docTypeIdx = colMap['document_type'] !== undefined ? colMap['document_type'] : 0;
+    var docNumIdx = colMap['document_number'] !== undefined ? colMap['document_number'] : 1;
     var dateIdx = colMap['date'] !== undefined ? colMap['date'] : 2;
     var inWarehouseIdx = colMap['in_warehouse_date'];
-    var custIdx = colMap['customer/vendor'] !== undefined ? colMap['customer/vendor'] : 3;
-    var skuIdx = colMap['line item sku'];
-    var styleIdx = colMap['line item style'];
+    var custIdx = colMap['customer_vendor'] !== undefined ? colMap['customer_vendor'] : 3;
+    var skuIdx = colMap['line_item_sku'];
+    var styleIdx = colMap['line_item_style'];
     var statusIdx = colMap['status'];
     var qtyIdx = colMap['quantity'];
     var amtIdx = colMap['amount'];

@@ -7,6 +7,46 @@ const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
 
+// =============================================
+// ADMIN PANEL INTEGRATION
+// =============================================
+const ADMIN_PANEL_URL = process.env.ADMIN_PANEL_URL;
+const ADMIN_PANEL_API_KEY = process.env.ADMIN_PANEL_API_KEY;
+const APP_SLUG = process.env.APP_SLUG || 'grand-emotion';
+
+// Helper: Verify user with admin panel
+async function verifyWithAdminPanel(email, password) {
+      try {
+              const response = await fetch(`${ADMIN_PANEL_URL}/api/auth/verify`, {
+                        method: 'POST',
+                        headers: {
+                                    'Content-Type': 'application/json',
+                                    'X-API-Key': ADMIN_PANEL_API_KEY
+                        },
+                        body: JSON.stringify({ email, password, app_slug: APP_SLUG })
+              });
+              return await response.json();
+      } catch (error) {
+              console.error('Admin panel auth error:', error);
+              return { success: false, error: 'Admin panel unavailable' };
+      }
+}
+
+// Helper: Check user access
+async function checkUserAccess(userId) {
+      try {
+              const response = await fetch(
+                        `${ADMIN_PANEL_URL}/api/auth/check-access?user_id=${userId}&app_slug=${APP_SLUG}`,
+                  { headers: { 'X-API-Key': ADMIN_PANEL_API_KEY } }
+                      );
+              return await response.json();
+      } catch (error) {
+              console.error('Admin panel access check error:', error);
+              return { hasAccess: false };
+      }
+}
+// =============================================
+
 // ============================================
 // AUTHENTICATION TOGGLE
 // Set to true to require PIN login
@@ -134,6 +174,33 @@ function requireAuth(req, res, next) { next(); }
 function requireAdmin(req, res, next) { next(); }
 
 app.post('/api/login', async function(req, res) {
+        const { email, password } = req.body;
+
+        // NEW: Admin panel authentication (email/password)
+        if (email && password) {
+                  const authResult = await verifyWithAdminPanel(email, password);
+
+                  if (!authResult.success) {
+                              return res.status(401).json({
+                                            error: authResult.error || 'Invalid credentials or no access to this app'
+                              });
+                  }
+
+                  req.session.userId = authResult.user.id;
+                  req.session.username = authResult.user.email;
+                  req.session.displayName = authResult.user.name;
+                  req.session.role = authResult.user.is_admin ? 'admin' : 'sales';
+                  req.session.adminPanelUser = true;
+
+                  return res.json({
+                              success: true,
+                              username: authResult.user.email,
+                              displayName: authResult.user.name,
+                              role: authResult.user.is_admin ? 'admin' : 'sales'
+                  });
+        }
+
+        // LEGACY: PIN-based login (existing code below)
     try {
         var userId = req.body.userId;
         var pin = req.body.pin;

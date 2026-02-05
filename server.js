@@ -123,14 +123,22 @@ async function initDB() {
         await pool.query('ALTER TABLE sales_data ADD COLUMN IF NOT EXISTS in_warehouse_date DATE');
         await pool.query('CREATE INDEX IF NOT EXISTS idx_sales_data_base_style ON sales_data(base_style)');
         await pool.query('CREATE INDEX IF NOT EXISTS idx_sales_data_document_type ON sales_data(document_type)');
-        // Clean up duplicates before creating unique index
+        // Clean up duplicates before creating unique index (handle NULLs properly)
         try {
+            // First drop the index if it exists (in case it's corrupted or partial)
+            await pool.query('DROP INDEX IF EXISTS idx_sales_data_unique');
             // Delete duplicate rows, keeping only the one with the highest id
-            await pool.query('DELETE FROM sales_data a USING sales_data b WHERE a.id < b.id AND a.document_number = b.document_number AND a.line_item_sku = b.line_item_sku');
+            // Use COALESCE to handle NULL values in the comparison
+            await pool.query(`DELETE FROM sales_data a USING sales_data b
+                WHERE a.id < b.id
+                AND a.document_number = b.document_number
+                AND COALESCE(a.line_item_sku, '') = COALESCE(b.line_item_sku, '')`);
             console.log('Cleaned up duplicate sales_data rows');
-        } catch (e) { console.log('No duplicates to clean or table empty'); }
-        // Unique constraint for upsert functionality
-        try { await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_data_unique ON sales_data(document_number, line_item_sku)'); } catch (e) { console.log('Unique index may already exist or duplicates remain:', e.message); }
+        } catch (e) { console.log('No duplicates to clean or table empty:', e.message); }
+        // Unique constraint for upsert functionality (use COALESCE for NULL-safe uniqueness)
+        try {
+            await pool.query('CREATE UNIQUE INDEX idx_sales_data_unique ON sales_data(document_number, COALESCE(line_item_sku, \'\'))');
+        } catch (e) { console.log('Unique index may already exist or duplicates remain:', e.message); }
         
         // Add columns if they don't exist (for existing databases)
         try { await pool.query('ALTER TABLE selections ADD COLUMN IF NOT EXISTS share_type VARCHAR(50) DEFAULT \'link\''); } catch (e) {}

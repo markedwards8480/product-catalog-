@@ -691,10 +691,15 @@ async function processInventoryCSV(csvContent, filename) {
 }
 
 // Process sales CSV (same logic as manual upload)
-async function processSalesCSV(csvContent, filename) {
+// shouldClear: if true, delete all existing data first (for first file of a batch)
+// if false, just append (for subsequent files like V2, V3, etc.)
+async function processSalesCSV(csvContent, filename, shouldClear) {
+    // Default to true for backwards compatibility with manual uploads
+    if (shouldClear === undefined) shouldClear = true;
+
     var lines = csvContent.split('\n');
     if (lines.length < 2) return { success: false, error: 'Empty file', imported: 0 };
-    
+
     var headers = lines[0].toLowerCase().replace(/^\ufeff/, '').split(',').map(function(h) { return h.trim().replace(/['"]/g, '').replace(/\s+/g, '_').replace(/\//g, '_'); });
     var colMap = {};
     headers.forEach(function(h, i) { colMap[h] = i; });
@@ -710,11 +715,16 @@ async function processSalesCSV(csvContent, filename) {
     var statusIdx = colMap['status'];
     var qtyIdx = colMap['quantity'];
     var amtIdx = colMap['amount'];
-    
-    // FULL REPLACE: Delete all existing sales data before importing fresh data
-    console.log('Full replace: Clearing all existing sales data...');
-    await pool.query('DELETE FROM sales_data');
-    console.log('Existing sales data cleared. Importing fresh sales data...');
+
+    // Only clear data if this is the first file of a batch (shouldClear=true)
+    // For split files (V1, V2), only V1 clears, V2 appends
+    if (shouldClear) {
+        console.log('Full replace: Clearing all existing sales data (first file of batch)...');
+        await pool.query('DELETE FROM sales_data');
+        console.log('Existing sales data cleared. Importing fresh sales data...');
+    } else {
+        console.log('Appending to existing sales data (additional file in batch: ' + filename + ')...');
+    }
     
     var imported = 0, skipped = 0, errors = 0;
     var batch = [];
@@ -874,6 +884,48 @@ async function processWorkDriveFolder(folderId, fileType) {
             console.log('Inventory files sorted: Left to Sell will be processed first');
         }
 
+        // For sales files (PO-SO Query), also filter to newest date and sort by V1, V2, etc.
+        // This handles Felix's split files: PO-SO_Query_V1_2026-02-05, PO-SO_Query_V2_2026-02-05
+        var salesFilesCleared = false; // Track if we've cleared data for this batch
+        if (fileType === 'sales') {
+            // Extract dates from filenames and find the newest date
+            var newestSalesDate = null;
+            files.forEach(function(f) {
+                var name = f.attributes ? f.attributes.name : (f.name || '');
+                var dateMatch = name.match(/(\d{4}-\d{2}-\d{2})/);
+                if (dateMatch) {
+                    var fileDate = dateMatch[1];
+                    if (!newestSalesDate || fileDate > newestSalesDate) {
+                        newestSalesDate = fileDate;
+                    }
+                }
+            });
+
+            console.log('Newest sales date found:', newestSalesDate);
+
+            // Filter to only files from the newest date
+            if (newestSalesDate) {
+                files = files.filter(function(f) {
+                    var name = f.attributes ? f.attributes.name : (f.name || '');
+                    return name.indexOf(newestSalesDate) !== -1;
+                });
+                console.log('Filtered to', files.length, 'sales files from newest date:', newestSalesDate);
+            }
+
+            // Sort by V1, V2, etc. so they process in order
+            files.sort(function(a, b) {
+                var nameA = (a.attributes ? a.attributes.name : (a.name || '')).toLowerCase();
+                var nameB = (b.attributes ? b.attributes.name : (b.name || '')).toLowerCase();
+                // Extract version numbers (V1, V2, etc.)
+                var vMatchA = nameA.match(/_v(\d+)/i);
+                var vMatchB = nameB.match(/_v(\d+)/i);
+                var vA = vMatchA ? parseInt(vMatchA[1]) : 0;
+                var vB = vMatchB ? parseInt(vMatchB[1]) : 0;
+                return vA - vB; // V1 before V2
+            });
+            console.log('Sales files sorted by version (V1, V2, etc.)');
+        }
+
         for (var i = 0; i < files.length; i++) {
             var file = files[i];
             var fileId = file.id;
@@ -911,7 +963,17 @@ async function processWorkDriveFolder(folderId, fileType) {
             if (fileType === 'inventory') {
                 result = await processInventoryCSV(csvContent, fileName);
             } else if (fileType === 'sales') {
-                result = await processSalesCSV(csvContent, fileName);
+                // Only clear data on V1 (first file of a split batch)
+                // V2, V3, etc. should append without clearing
+                // This handles Felix's split files: PO-SO_Query_V1_date, PO-SO_Query_V2_date
+                var versionMatch = fileName.match(/_v(\d+)/i);
+                var fileVersion = versionMatch ? parseInt(versionMatch[1]) : 1;
+                var shouldClear = (fileVersion === 1) && !salesFilesCleared;
+                console.log('Processing sales file:', fileName, '- version:', fileVersion, '- shouldClear:', shouldClear);
+                result = await processSalesCSV(csvContent, fileName, shouldClear);
+                if (result.success && shouldClear) {
+                    salesFilesCleared = true; // Track that we've cleared for this batch
+                }
             } else {
                 continue;
             }
@@ -2844,6 +2906,19 @@ app.post('/api/workdrive-import/check-now', requireAuth, requireAdmin, async fun
     }
 });
 
+// Check ONLY the sales folder (for testing split files)
+app.post('/api/workdrive-import/check-sales-only', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        console.log('Checking ONLY Sales-PO folder...');
+        var salesResult = await processWorkDriveFolder(WORKDRIVE_SALES_FOLDER_ID, 'sales');
+        console.log('Sales-only check complete. Processed ' + salesResult.processed + ' files.');
+        res.json({ success: true, processed: salesResult.processed, sales: salesResult.processed });
+    } catch (err) {
+        console.error('Error checking sales folder:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
 app.post('/api/workdrive-import/clear-history', requireAuth, requireAdmin, async function(req, res) {
     try {
         await pool.query('DELETE FROM workdrive_imports');
@@ -3587,7 +3662,7 @@ function getHTML() {
     html += '<div id="zoho2Tab" class="tab-content active"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="zohoStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Workspace ID: </span><span class="status-value" id="zohoWorkspaceId">-</span></div><div class="status-item"><span class="status-label">View ID: </span><span class="status-value" id="zohoViewId">-</span></div></div><div style="display:flex;gap:1rem"><button class="btn btn-secondary" id="testZohoBtn">Test Connection</button><button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div><div id="zohoMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="import2Tab" class="tab-content"><div class="upload-area"><input type="file" id="csvFile" accept=".csv"><label for="csvFile">Click to upload CSV file</label></div><div id="importStatus"></div><button class="btn btn-danger" id="clearBtn" style="margin-top:1rem">Clear All Products</button></div>';
     html += '<div id="sales2Tab" class="tab-content"><p style="margin-bottom:1rem;color:#666">Import sales data (Sales Orders and Purchase Orders) from the PO-SO Query CSV export.</p><div class="upload-area"><input type="file" id="salesCsvFile" accept=".csv"><label for="salesCsvFile">Click to upload Sales CSV file</label></div><div id="salesImportStatus"></div><div id="salesDataStats" style="margin-top:1rem"></div><button class="btn btn-danger" id="clearSalesBtn" style="margin-top:1rem">Clear All Sales Data</button><p style="margin-top:0.5rem;font-size:0.75rem;color:#999">Use this to start fresh before uploading historical files.</p></div>';
-    html += '<div id="autoimport2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="autoImportStatus">Checking...</span></div><div class="status-item"><span class="status-label">Check Interval: </span><span class="status-value" id="autoImportInterval">-</span></div><div class="status-item"><span class="status-label">Inventory Files: </span><span class="status-value" id="autoImportInventory">-</span></div><div class="status-item"><span class="status-label">Sales-PO Files: </span><span class="status-value" id="autoImportSales">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">Automatically imports CSV files from two WorkDrive folders:<br>• <strong>Inventory folder</strong> - for Inventory Availability reports<br>• <strong>Sales-PO folder</strong> - for PO-SO Query exports</p><button class="btn btn-primary" id="checkWorkDriveBtn">Check Now</button><button class="btn btn-danger" id="clearAutoImportBtn" style="margin-left:0.5rem">Clear History</button><div id="autoImportMessage" style="margin-top:1rem"></div><h4 style="margin-top:1.5rem;margin-bottom:0.5rem">Recent Imports</h4><div id="recentImportsList" style="max-height:200px;overflow-y:auto;font-size:0.8rem"></div></div>';
+    html += '<div id="autoimport2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="autoImportStatus">Checking...</span></div><div class="status-item"><span class="status-label">Check Interval: </span><span class="status-value" id="autoImportInterval">-</span></div><div class="status-item"><span class="status-label">Inventory Files: </span><span class="status-value" id="autoImportInventory">-</span></div><div class="status-item"><span class="status-label">Sales-PO Files: </span><span class="status-value" id="autoImportSales">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">Automatically imports CSV files from two WorkDrive folders:<br>• <strong>Inventory folder</strong> - for Inventory Availability reports<br>• <strong>Sales-PO folder</strong> - for PO-SO Query exports</p><button class="btn btn-primary" id="checkWorkDriveBtn">Check All</button><button class="btn btn-secondary" id="checkSalesOnlyBtn" style="margin-left:0.5rem">Check Sales Only</button><button class="btn btn-danger" id="clearAutoImportBtn" style="margin-left:0.5rem">Clear History</button><div id="autoImportMessage" style="margin-top:1rem"></div><h4 style="margin-top:1.5rem;margin-bottom:0.5rem">Recent Imports</h4><div id="recentImportsList" style="max-height:200px;overflow-y:auto;font-size:0.8rem"></div></div>';
     html += '<div id="ai2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">API Status: </span><span class="status-value" id="aiStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Products Analyzed: </span><span class="status-value" id="aiAnalyzedCount">-</span></div><div class="status-item"><span class="status-label">Remaining: </span><span class="status-value" id="aiRemainingCount">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">AI analysis uses Claude Vision to generate searchable tags from product images. This enables searching by garment type (cardigan, hoodie), style (casual, formal), pattern (striped, floral), and more.</p><button class="btn btn-primary" id="runAiBtn">Analyze Next 100 Products</button><button class="btn btn-success" id="runAllAiBtn" style="margin-left:0.5rem">Analyze All (Background)</button><button class="btn btn-secondary" id="stopAiBtn" style="margin-left:0.5rem;display:none">Stop</button><div id="aiMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="cache2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">Cache Status: </span><span class="status-value" id="cacheStatus">Checking...</span></div><div class="status-item"><span class="status-label">Cached Images: </span><span class="status-value" id="cachedCount">-</span></div><div class="status-item"><span class="status-label">Total Products with Images: </span><span class="status-value" id="totalImagesCount">-</span></div><div class="status-item"><span class="status-label">Cache Size: </span><span class="status-value" id="cacheSize">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">Image caching stores product images locally to reduce Zoho API calls and speed up image loading. Images are cached on first view and refreshed when you upload a new inventory CSV.</p><button class="btn btn-primary" id="refreshCacheBtn">Refresh All Images</button><button class="btn btn-danger" id="clearCacheBtn" style="margin-left:0.5rem">Clear Cache</button><div id="cacheMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Name</th><th>PIN</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUserName" placeholder="Display Name"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add User</button></div><p style="margin-top:1rem;font-size:0.8rem;color:#666">New users are assigned a random 4-digit PIN. They can change it after logging in.</p></div>';
@@ -3925,7 +4000,8 @@ function getHTML() {
     
     // Auto Import functions
     html += 'function loadAutoImportStatus(){fetch("/api/workdrive-import/status").then(function(r){return r.json()}).then(function(d){if(d.error){document.getElementById("autoImportStatus").textContent="Error";return}document.getElementById("autoImportStatus").textContent="Active";document.getElementById("autoImportStatus").className="status-value connected";document.getElementById("autoImportInterval").textContent="Every "+d.checkIntervalHours+" hours";document.getElementById("autoImportInventory").textContent=d.inventoryFiles+" files ("+d.inventoryRecords.toLocaleString()+" records)";document.getElementById("autoImportSales").textContent=d.salesFiles+" files ("+d.salesRecords.toLocaleString()+" records)";var listHtml="";if(d.recentImports&&d.recentImports.length>0){listHtml="<table style=\\"width:100%;border-collapse:collapse\\"><thead><tr style=\\"border-bottom:1px solid #ddd\\"><th style=\\"text-align:left;padding:4px\\">File</th><th style=\\"text-align:left;padding:4px\\">Type</th><th style=\\"text-align:right;padding:4px\\">Records</th><th style=\\"text-align:left;padding:4px\\">Status</th><th style=\\"text-align:left;padding:4px\\">Time</th></tr></thead><tbody>";d.recentImports.forEach(function(imp){var statusColor=imp.status==="success"?"#22c55e":"#ef4444";listHtml+="<tr><td style=\\"padding:4px\\">"+imp.file_name+"</td><td style=\\"padding:4px\\">"+imp.file_type+"</td><td style=\\"text-align:right;padding:4px\\">"+(imp.records_imported||0)+"</td><td style=\\"padding:4px;color:"+statusColor+"\\">"+imp.status+"</td><td style=\\"padding:4px\\">"+new Date(imp.processed_at).toLocaleString()+"</td></tr>"});listHtml+="</tbody></table>"}else{listHtml="<p style=\\"color:#666\\">No imports yet</p>"}document.getElementById("recentImportsList").innerHTML=listHtml})}';
-    html += 'document.getElementById("checkWorkDriveBtn").addEventListener("click",function(){var btn=this;btn.disabled=true;btn.textContent="Checking...";document.getElementById("autoImportMessage").innerHTML="<span style=\\"color:#666\\">Checking WorkDrive folder for new files...</span>";fetch("/api/workdrive-import/check-now",{method:"POST"}).then(function(r){return r.json()}).then(function(d){btn.disabled=false;btn.textContent="Check Now";if(d.success){document.getElementById("autoImportMessage").innerHTML="<span class=\\"success\\">Processed "+d.processed+" new files</span>"}else{document.getElementById("autoImportMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadAutoImportStatus();loadProducts()})});';
+    html += 'document.getElementById("checkWorkDriveBtn").addEventListener("click",function(){var btn=this;btn.disabled=true;btn.textContent="Checking...";document.getElementById("autoImportMessage").innerHTML="<span style=\\"color:#666\\">Checking WorkDrive folders for new files...</span>";fetch("/api/workdrive-import/check-now",{method:"POST"}).then(function(r){return r.json()}).then(function(d){btn.disabled=false;btn.textContent="Check All";if(d.success){document.getElementById("autoImportMessage").innerHTML="<span class=\\"success\\">Processed "+d.processed+" new files</span>"}else{document.getElementById("autoImportMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadAutoImportStatus();loadProducts()})});';
+    html += 'document.getElementById("checkSalesOnlyBtn").addEventListener("click",function(){var btn=this;btn.disabled=true;btn.textContent="Checking Sales...";document.getElementById("autoImportMessage").innerHTML="<span style=\\"color:#666\\">Checking Sales-PO folder only...</span>";fetch("/api/workdrive-import/check-sales-only",{method:"POST"}).then(function(r){return r.json()}).then(function(d){btn.disabled=false;btn.textContent="Check Sales Only";if(d.success){document.getElementById("autoImportMessage").innerHTML="<span class=\\"success\\">Processed "+d.processed+" sales file(s)</span>"}else{document.getElementById("autoImportMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadAutoImportStatus();loadProducts()})});';
     html += 'document.getElementById("clearAutoImportBtn").addEventListener("click",function(){if(!confirm("Clear import history? Files will be re-processed on next check."))return;fetch("/api/workdrive-import/clear-history",{method:"POST"}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("autoImportMessage").innerHTML="<span class=\\"success\\">History cleared</span>"}loadAutoImportStatus()})});';
     html += 'document.getElementById("refreshCacheBtn").addEventListener("click",function(){var btn=this;btn.disabled=true;btn.textContent="Refreshing...";document.getElementById("cacheMessage").innerHTML="<span style=\\"color:#666\\">Downloading images from Zoho WorkDrive... This may take a few minutes.</span>";fetch("/api/image-cache/refresh",{method:"POST"}).then(function(r){return r.json()}).then(function(d){btn.disabled=false;btn.textContent="Refresh All Images";if(d.success){document.getElementById("cacheMessage").innerHTML="<span class=\\"success\\">✓ Refreshed "+d.refreshed+" of "+d.total+" images"+(d.errors?" ("+d.errors+" errors)":"")+"</span>"}else{document.getElementById("cacheMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadCacheStatus()})});';
     html += 'document.getElementById("clearCacheBtn").addEventListener("click",function(){if(!confirm("Clear all cached images? They will be re-downloaded on next view."))return;fetch("/api/image-cache/clear",{method:"POST"}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("cacheMessage").innerHTML="<span class=\\"success\\">✓ Cleared "+d.deleted+" cached files</span>"}else{document.getElementById("cacheMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadCacheStatus()})});';

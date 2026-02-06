@@ -3642,6 +3642,30 @@ function getHTML() {
     html += '.scorecard-cat-item:last-child{border-bottom:none}';
     html += '.scorecard-empty{text-align:center;padding:2rem;color:#86868b}';
 
+    // Sliding Treemap Shelf
+    html += '.treemap-shelf{position:fixed;top:0;left:0;width:320px;height:100vh;background:#fff;box-shadow:4px 0 20px rgba(0,0,0,0.15);transform:translateX(-100%);transition:transform 0.3s ease;z-index:1000;display:flex;flex-direction:column}';
+    html += '.treemap-shelf.open{transform:translateX(0)}';
+    html += '.treemap-shelf-header{padding:1rem 1.25rem;border-bottom:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center;background:#f8f9fa}';
+    html += '.treemap-shelf-title{font-size:1rem;font-weight:600;color:#1e3a5f;display:flex;align-items:center;gap:0.5rem}';
+    html += '.treemap-shelf-close{background:none;border:none;font-size:1.5rem;cursor:pointer;color:#86868b;padding:0;line-height:1}';
+    html += '.treemap-shelf-close:hover{color:#1e3a5f}';
+    html += '.treemap-shelf-controls{padding:0.75rem 1.25rem;border-bottom:1px solid #e0e0e0;display:flex;gap:0.5rem}';
+    html += '.treemap-mode-btn{flex:1;padding:0.5rem;border:1px solid #ddd;background:#fff;border-radius:6px;font-size:0.75rem;font-weight:500;cursor:pointer;transition:all 0.15s}';
+    html += '.treemap-mode-btn.active{background:#1e3a5f;color:#fff;border-color:#1e3a5f}';
+    html += '.treemap-shelf-total{padding:0.75rem 1.25rem;background:#f0f4f8;font-size:0.875rem;color:#1e3a5f;font-weight:600;border-bottom:1px solid #e0e0e0}';
+    html += '.treemap-shelf-content{flex:1;overflow-y:auto;padding:0.75rem}';
+    html += '.treemap-grid{display:flex;flex-wrap:wrap;gap:4px}';
+    html += '.treemap-tile{border-radius:6px;padding:0.5rem;cursor:pointer;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,0.3);display:flex;flex-direction:column;justify-content:center;transition:transform 0.1s,box-shadow 0.1s;min-height:50px;box-sizing:border-box}';
+    html += '.treemap-tile:hover{transform:scale(1.02);box-shadow:0 4px 12px rgba(0,0,0,0.2);z-index:1}';
+    html += '.treemap-tile.active{outline:3px solid #1e3a5f;outline-offset:-3px}';
+    html += '.treemap-tile-name{font-weight:600;font-size:0.75rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}';
+    html += '.treemap-tile-qty{font-size:0.875rem;font-weight:700}';
+    html += '.treemap-tile-pct{font-size:0.65rem;opacity:0.9}';
+    html += '.treemap-toggle-btn{position:fixed;left:0;top:50%;transform:translateY(-50%);background:#1e3a5f;color:#fff;border:none;padding:0.75rem 0.5rem;border-radius:0 8px 8px 0;cursor:pointer;font-size:0.75rem;font-weight:600;writing-mode:vertical-rl;text-orientation:mixed;box-shadow:2px 0 8px rgba(0,0,0,0.15);z-index:999;transition:left 0.3s ease}';
+    html += '.treemap-toggle-btn:hover{background:#2d4a6f}';
+    html += '.treemap-toggle-btn.shelf-open{left:320px}';
+    html += '@media(max-width:768px){.treemap-shelf{width:280px}.treemap-toggle-btn.shelf-open{left:280px}}';
+
     html += '</style></head><body>';
     
     // Filter summary side panel only (badge is now inline in filters)
@@ -3649,7 +3673,18 @@ function getHTML() {
     
     html += '<div id="loginPage" class="login-page" style="display:none"><div class="login-box"><h1>Mark Edwards Apparel<br><span style="font-size:0.8em;font-weight:normal">Product Catalog</span></h1><form id="loginForm"><div class="form-group"><label>Select User</label><select id="loginUserSelect" required style="width:100%;padding:0.875rem 1rem;border:none;border-radius:12px;font-size:1rem;background:#f5f5f7;appearance:none;cursor:pointer"><option value="">-- Select your name --</option></select></div><input type="hidden" id="loginPin" value="0000"><button type="submit" class="btn btn-primary" style="width:100%">Sign In</button><div id="loginError" class="error hidden"></div></form></div></div>';
     
-    html += '<div id="mainApp"><header class="header"><h1 style="color:#1e3a5f;font-weight:700;font-size:1.5rem">Mark Edwards Apparel</h1><div class="header-right"><div class="user-menu-wrapper" style="position:relative"><button class="btn btn-secondary" id="userMenuBtn" style="display:flex;align-items:center;gap:0.5rem"><span id="userInfo">Welcome</span> ▾</button><div id="userMenu" class="user-menu hidden"><button class="user-menu-item" id="changePinBtn">Change PIN</button><button class="user-menu-item" id="logoutBtn">Sign Out</button></div></div><button class="btn btn-secondary" id="helpBtn">User Guide</button><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn">Admin</button></div></header>';
+    html += '<div id="mainApp">';
+
+    // Treemap Shelf (sliding drawer)
+    html += '<div class="treemap-shelf" id="treemapShelf">';
+    html += '<div class="treemap-shelf-header"><span class="treemap-shelf-title">📊 <span id="treemapTitle">By Commodity</span></span><button class="treemap-shelf-close" id="closeTreemapShelf">×</button></div>';
+    html += '<div class="treemap-shelf-controls"><button class="treemap-mode-btn active" id="treemapModeCommodity" data-mode="commodity">Commodity</button><button class="treemap-mode-btn" id="treemapModeColor" data-mode="color">Color</button></div>';
+    html += '<div class="treemap-shelf-total"><span id="treemapTotal">0</span> units total</div>';
+    html += '<div class="treemap-shelf-content"><div class="treemap-grid" id="treemapGrid"></div></div>';
+    html += '</div>';
+    html += '<button class="treemap-toggle-btn" id="openTreemapShelf">📊 View</button>';
+
+    html += '<header class="header"><h1 style="color:#1e3a5f;font-weight:700;font-size:1.5rem">Mark Edwards Apparel</h1><div class="header-right"><div class="user-menu-wrapper" style="position:relative"><button class="btn btn-secondary" id="userMenuBtn" style="display:flex;align-items:center;gap:0.5rem"><span id="userInfo">Welcome</span> ▾</button><div id="userMenu" class="user-menu hidden"><button class="user-menu-item" id="changePinBtn">Change PIN</button><button class="user-menu-item" id="logoutBtn">Sign Out</button></div></div><button class="btn btn-secondary" id="helpBtn">User Guide</button><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn">Admin</button></div></header>';
     
     // History panel (visible to all users)
     html += '<main class="main"><div id="historyPanel" class="admin-panel hidden"><h2>History & Status</h2><div class="tabs"><button class="tab active" data-tab="shares">Sharing History</button><button class="tab" data-tab="freshness">Data Freshness</button><button class="tab" data-tab="history">Sync History</button></div>';
@@ -3814,6 +3849,35 @@ function getHTML() {
     html += 'document.querySelectorAll("input[name=\\"bubbleMetric\\"]").forEach(function(radio){radio.addEventListener("change",function(){merchBubbleMetric=this.value;renderMerchBubbleChart()})});';
     html += 'document.getElementById("scorecardCustomer").addEventListener("change",function(){loadCustomerScorecard(this.value)});';
 
+    // Treemap Shelf Functions
+    html += 'var treemapMode="commodity";var treemapFilterActive=null;';
+
+    html += 'function openTreemapShelf(){document.getElementById("treemapShelf").classList.add("open");document.getElementById("openTreemapShelf").classList.add("shelf-open");renderTreemap()}';
+    html += 'function closeTreemapShelf(){document.getElementById("treemapShelf").classList.remove("open");document.getElementById("openTreemapShelf").classList.remove("shelf-open")}';
+
+    html += 'document.getElementById("openTreemapShelf").addEventListener("click",openTreemapShelf);';
+    html += 'document.getElementById("closeTreemapShelf").addEventListener("click",closeTreemapShelf);';
+
+    // Mode switching
+    html += 'document.getElementById("treemapModeCommodity").addEventListener("click",function(){treemapMode="commodity";document.getElementById("treemapModeCommodity").classList.add("active");document.getElementById("treemapModeColor").classList.remove("active");document.getElementById("treemapTitle").textContent="By Commodity";treemapFilterActive=null;clearTreemapFilter();renderTreemap()});';
+    html += 'document.getElementById("treemapModeColor").addEventListener("click",function(){treemapMode="color";document.getElementById("treemapModeColor").classList.add("active");document.getElementById("treemapModeCommodity").classList.remove("active");document.getElementById("treemapTitle").textContent="By Color";treemapFilterActive=null;clearTreemapFilter();renderTreemap()});';
+
+    // Render treemap based on current mode and qtyMode
+    html += 'function renderTreemap(){var data={};var total=0;allProducts.forEach(function(p){(p.colors||[]).forEach(function(c){var qty=qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0);if(qty<=0)return;total+=qty;var key=treemapMode==="commodity"?(p.category||"Uncategorized"):(c.color_name||"Unknown");if(!data[key])data[key]=0;data[key]+=qty})});var sorted=Object.entries(data).sort(function(a,b){return b[1]-a[1]});document.getElementById("treemapTotal").textContent=total.toLocaleString();renderTreemapTiles(sorted,total)}';
+
+    // Render the actual tiles
+    html += 'function renderTreemapTiles(sorted,total){var grid=document.getElementById("treemapGrid");var html="";var containerWidth=280;sorted.forEach(function(item,i){var name=item[0];var qty=item[1];var pct=total>0?(qty/total*100):0;if(pct<0.5)return;var color=getTreemapColor(name,i);var width,height;if(pct>=15){width=containerWidth-8;height=60}else if(pct>=8){width=(containerWidth/2)-6;height=55}else if(pct>=4){width=(containerWidth/2)-6;height=45}else if(pct>=2){width=(containerWidth/3)-6;height=40}else{width=(containerWidth/4)-5;height=35}var isActive=treemapFilterActive===name?"active":"";html+="<div class=\\"treemap-tile "+isActive+"\\" style=\\"width:"+width+"px;height:"+height+"px;background:"+color+"\\" onclick=\\"filterByTreemap(\'"+name.replace(/\'/g,"\\\\\'")+"\')\\" title=\\""+name+": "+qty.toLocaleString()+" units ("+pct.toFixed(1)+"%)\\">";html+="<div class=\\"treemap-tile-name\\">"+name+"</div>";html+="<div class=\\"treemap-tile-qty\\">"+(qty>=1000?(qty/1000).toFixed(1)+"K":qty)+"</div>";html+="<div class=\\"treemap-tile-pct\\">"+pct.toFixed(1)+"%</div>";html+="</div>"});grid.innerHTML=html||"<p style=\\"padding:1rem;color:#86868b\\">No data</p>"}';
+
+    // Get color for treemap tile
+    html += 'function getTreemapColor(name,index){var colorMap={"Navy":"#1a365d","Black":"#1a1a1a","White":"#9ca3af","Grey":"#6b7280","Gray":"#6b7280","Red":"#dc2626","Blue":"#2563eb","Green":"#16a34a","Yellow":"#ca8a04","Orange":"#ea580c","Pink":"#ec4899","Purple":"#9333ea","Brown":"#78350f","Tan":"#a8896c","Cream":"#d4c5a9","Charcoal":"#374151","Burgundy":"#7f1d1d","Olive":"#4d7c0f","Teal":"#0d9488","Coral":"#f97316","Wine":"#7f1d1d","Ivory":"#f5f5dc","Khaki":"#c3b091","Oatmeal":"#c9b99a","Heather":"#9ca3af"};if(treemapMode==="color"){var lower=name.toLowerCase();for(var key in colorMap){if(lower.indexOf(key.toLowerCase())!==-1)return colorMap[key]}};return merchColors[index%merchColors.length]}';
+
+    // Filter by treemap tile click
+    html += 'function filterByTreemap(name){if(treemapFilterActive===name){treemapFilterActive=null;clearTreemapFilter()}else{treemapFilterActive=name;applyTreemapFilter(name)}renderTreemap()}';
+
+    html += 'function applyTreemapFilter(name){if(treemapMode==="commodity"){selectedCategories=[name];document.querySelectorAll("[data-cat]").forEach(function(btn){btn.classList.toggle("active",btn.getAttribute("data-cat")===name)});document.querySelector("[data-cat=\\"all\\"]").classList.remove("active")}else{colorFilter=name;document.getElementById("colorFilterBtn").textContent="Color: "+name+" ▼";document.getElementById("clearColorBtn").classList.remove("hidden")}renderProducts()}';
+
+    html += 'function clearTreemapFilter(){if(treemapMode==="commodity"){selectedCategories=[];document.querySelectorAll("[data-cat]").forEach(function(btn){btn.classList.remove("active")});var allBtn=document.querySelector("[data-cat=\\"all\\"]");if(allBtn)allBtn.classList.add("active")}else{colorFilter=null;document.getElementById("colorFilterBtn").textContent="Color: All ▼";document.getElementById("clearColorBtn").classList.add("hidden")}renderProducts()}';
+
     html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var panel=e.target.closest(".admin-panel");panel.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});panel.querySelectorAll(".tab-content").forEach(function(c){c.classList.remove("active")});e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active");if(e.target.getAttribute("data-tab")==="cache2")loadCacheStatus();if(e.target.getAttribute("data-tab")==="autoimport2")loadAutoImportStatus();if(e.target.getAttribute("data-tab")==="merch2")loadMerchandisingTab()})}';
     
     html += 'var sizeBtns=document.querySelectorAll(".size-btn");sizeBtns.forEach(function(btn){btn.addEventListener("click",function(e){sizeBtns.forEach(function(b){b.classList.remove("active")});e.target.classList.add("active");currentSize=e.target.getAttribute("data-size");document.getElementById("productGrid").className="product-grid size-"+currentSize;renderProducts()})});';
@@ -3825,8 +3889,8 @@ function getHTML() {
     html += 'document.getElementById("sortSelect").addEventListener("change",function(e){currentSort=e.target.value;renderProducts()});';
     
     // Quantity mode toggle handlers
-    html += 'document.getElementById("toggleAvailableNow").addEventListener("click",function(){qtyMode="available_now";document.getElementById("toggleAvailableNow").classList.add("active");document.getElementById("toggleLeftToSell").classList.remove("active");document.getElementById("availNowStat").classList.add("stat-active");document.getElementById("leftToSellStat").classList.remove("stat-active");renderProducts()});';
-    html += 'document.getElementById("toggleLeftToSell").addEventListener("click",function(){qtyMode="left_to_sell";document.getElementById("toggleLeftToSell").classList.add("active");document.getElementById("toggleAvailableNow").classList.remove("active");document.getElementById("leftToSellStat").classList.add("stat-active");document.getElementById("availNowStat").classList.remove("stat-active");renderProducts()});';
+    html += 'document.getElementById("toggleAvailableNow").addEventListener("click",function(){qtyMode="available_now";document.getElementById("toggleAvailableNow").classList.add("active");document.getElementById("toggleLeftToSell").classList.remove("active");document.getElementById("availNowStat").classList.add("stat-active");document.getElementById("leftToSellStat").classList.remove("stat-active");renderProducts();if(document.getElementById("treemapShelf").classList.contains("open"))renderTreemap()});';
+    html += 'document.getElementById("toggleLeftToSell").addEventListener("click",function(){qtyMode="left_to_sell";document.getElementById("toggleLeftToSell").classList.add("active");document.getElementById("toggleAvailableNow").classList.remove("active");document.getElementById("leftToSellStat").classList.add("stat-active");document.getElementById("availNowStat").classList.remove("stat-active");renderProducts();if(document.getElementById("treemapShelf").classList.contains("open"))renderTreemap()});';
 
     // Supply vs Demand toggle event listener
     html += 'if(document.getElementById("supplyDemandToggle")){document.getElementById("supplyDemandToggle").addEventListener("change",function(){supplyDemandMode=this.checked;renderProducts()})}';

@@ -756,7 +756,9 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
     
     var imported = 0, skipped = 0, errors = 0;
     var batch = [];
-    var batchSize = 100;
+    var batchSize = 500; // Increased from 100 for faster processing
+    var totalLines = lines.length - 1;
+    console.log('Processing', totalLines, 'lines from sales CSV...');
     
     for (var i = 1; i < lines.length; i++) {
         try {
@@ -813,6 +815,9 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
                     await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
                     imported += batch.length;
                     batch = [];
+                    if (imported % 5000 === 0) {
+                        console.log('Sales import progress:', imported, 'of ~' + totalLines, 'rows (' + Math.round(imported/totalLines*100) + '%)');
+                    }
                 }
             }
         } catch (err) {
@@ -833,7 +838,8 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
         await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
         imported += batch.length;
     }
-    
+
+    console.log('Sales CSV import complete:', imported, 'rows imported,', skipped, 'skipped,', errors, 'errors');
     await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1, $2, $3)', ['sales_import', 'success', imported]);
 
     // Report freshness to admin panel

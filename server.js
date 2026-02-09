@@ -762,8 +762,12 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
     console.log('Starting CSV parse loop...');
 
     for (var i = 1; i < lines.length; i++) {
-        // Yield to event loop every 5000 rows to allow log flushing
-        if (i % 5000 === 0) {
+        // Log first row to confirm loop started
+        if (i === 1) {
+            console.log('CSV parse loop started, processing first row...');
+        }
+        // Yield to event loop every 1000 rows to allow log flushing
+        if (i % 1000 === 0) {
             console.log('Parsed', i, 'of', totalLines, 'rows (' + Math.round(i/totalLines*100) + '%)');
             await new Promise(function(resolve) { setImmediate(resolve); });
         }

@@ -759,22 +759,34 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
     var batchSize = 2000; // Large batch for faster bulk import
     var totalLines = lines.length - 1;
     console.log('Processing', totalLines, 'lines from sales CSV...');
-    
+
     for (var i = 1; i < lines.length; i++) {
         try {
             var line = lines[i];
             if (!line.trim()) continue;
-            
-            var row = [];
-            var cell = '';
-            var inQuotes = false;
-            for (var j = 0; j < line.length; j++) {
-                var ch = line[j];
-                if (ch === '"') { inQuotes = !inQuotes; }
-                else if (ch === ',' && !inQuotes) { row.push(cell.trim()); cell = ''; }
-                else { cell += ch; }
+
+            // Fast path: if line has no quotes, just split by comma
+            var row;
+            if (line.indexOf('"') === -1) {
+                row = line.split(',').map(function(c) { return c.trim(); });
+            } else {
+                // Slow path: handle quoted fields
+                row = [];
+                var cell = '';
+                var inQuotes = false;
+                for (var j = 0; j < line.length; j++) {
+                    var ch = line[j];
+                    if (ch === '"') { inQuotes = !inQuotes; }
+                    else if (ch === ',' && !inQuotes) { row.push(cell.trim()); cell = ''; }
+                    else { cell += ch; }
+                }
+                row.push(cell.trim());
             }
-            row.push(cell.trim());
+
+            // Log parsing progress every 10000 rows
+            if (i % 10000 === 0) {
+                console.log('Parsed', i, 'of', totalLines, 'rows...');
+            }
             
             var docType = row[docTypeIdx] || '';
             var docNum = row[docNumIdx] || '';

@@ -45,6 +45,31 @@ async function checkUserAccess(userId) {
               return { hasAccess: false };
       }
 }
+
+// Helper: Report data freshness to admin panel
+async function reportDataFreshness(dataSource, recordCount, notes) {
+    if (!ADMIN_PANEL_URL || !ADMIN_PANEL_API_KEY) {
+        console.log('Admin panel not configured, skipping freshness report');
+        return;
+    }
+    try {
+        await fetch(`${ADMIN_PANEL_URL}/api/health/freshness`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': ADMIN_PANEL_API_KEY
+            },
+            body: JSON.stringify({
+                data_source: dataSource,
+                record_count: recordCount,
+                notes: notes || null
+            })
+        });
+        console.log('Reported freshness to admin panel:', dataSource, recordCount, 'records');
+    } catch (err) {
+        console.error('Failed to report data freshness:', err.message);
+    }
+}
 // =============================================
 
 // ============================================
@@ -687,6 +712,9 @@ async function processInventoryCSV(csvContent, filename) {
     await pool.query('UPDATE sync_history SET records_synced = $1, status = $2 WHERE id = $3', [imported, 'success', currentImportId]);
     lastImportId = currentImportId;
 
+    // Report freshness to admin panel
+    await reportDataFreshness('Product Catalog', imported, fileType + ' import');
+
     return { success: true, imported: imported, skipped: skipped, newArrivals: newArrivals, fileType: fileType };
 }
 
@@ -807,7 +835,10 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
     }
     
     await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1, $2, $3)', ['sales_import', 'success', imported]);
-    
+
+    // Report freshness to admin panel
+    await reportDataFreshness('Sales Data', imported, 'Sales CSV import');
+
     return { success: true, imported: imported, skipped: skipped, errors: errors };
 }
 
@@ -1357,6 +1388,7 @@ app.post('/api/zoho/sync', requireAuth, requireAdmin, async function(req, res) {
         var productMap = {}; var recordCount = 0;
         for (var ri = 0; ri < rows.length; ri++) { var row = rows[ri]; var styleIdx = colMap['style_name'] !== undefined ? colMap['style_name'] : 0; var colorIdx = colMap['color'] !== undefined ? colMap['color'] : 1; var categoryIdx = colMap['commodity'] !== undefined ? colMap['commodity'] : 2; var qtyIdx = colMap['left_to_sell'] !== undefined ? colMap['left_to_sell'] : 3; var styleName = row[styleIdx] || 'Unknown'; var color = row[colorIdx] || 'Default'; var category = row[categoryIdx] || 'Uncategorized'; var qty = parseInt(row[qtyIdx]) || 0; var baseStyle = styleName.replace(/\s*-\s*\d+$/, '').trim(); if (!productMap[baseStyle]) { var insertResult = await pool.query('INSERT INTO products (style_id, base_style, name, category) VALUES ($1, $2, $3, $4) RETURNING id', [styleName, baseStyle, baseStyle, category]); productMap[baseStyle] = insertResult.rows[0].id; } await pool.query('INSERT INTO product_colors (product_id, color_name, available_qty) VALUES ($1, $2, $3)', [productMap[baseStyle], color, qty]); recordCount++; }
         await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1, $2, $3)', ['zoho', 'success', recordCount]);
+        await reportDataFreshness('Product Catalog', recordCount, 'Zoho sync');
         res.json({ success: true, message: 'Synced ' + recordCount + ' records' });
     } catch (err) { console.error('Sync error:', err); res.json({ success: false, error: err.message }); }
 });
@@ -2541,7 +2573,10 @@ app.post('/api/import-sales', requireAuth, requireAdmin, upload.single('file'), 
         
         // Log to sync history
         await pool.query('INSERT INTO sync_history (sync_type, status, records_synced) VALUES ($1, $2, $3)', ['sales_import', 'success', imported]);
-        
+
+        // Report freshness to admin panel
+        await reportDataFreshness('Sales Data', imported, 'Sales CSV import');
+
         console.log('Sales data import complete:', imported, 'new records imported,', skipped, 'duplicates skipped,', errors, 'errors');
         res.json({ success: true, imported: imported, skipped: skipped, errors: errors });
     } catch (err) {

@@ -1546,30 +1546,41 @@ app.post('/api/zoho-export-callback', async function(req, res) {
         var fileId = payload.fileId || null;
         var jobId = payload.jobId || null;
         var message = payload.message || null;
+        var finalStatus = (status === 'success' || status === 'completed') ? 'completed' : 'failed';
 
-        // If we have a jobId, update that specific job
+        var updated = false;
+
+        // First, try to update the exact jobId if provided
         if (jobId) {
-            await pool.query(
+            var result = await pool.query(
                 'UPDATE export_jobs SET status = $1, file_name = $2, file_id = $3, error_message = $4, completed_at = NOW() WHERE job_id = $5',
-                [status === 'success' ? 'completed' : 'failed', fileName, fileId, message, jobId]
+                [finalStatus, fileName, fileId, message, jobId]
             );
-        } else {
-            // If no jobId, create a new record (for backwards compatibility)
+            updated = result.rowCount > 0;
+            console.log('Tried exact jobId match:', jobId, 'Updated:', updated);
+        }
+
+        // If no match, try to find the most recent "processing" job and update it
+        if (!updated) {
+            var result = await pool.query(
+                "UPDATE export_jobs SET status = $1, file_name = $2, file_id = $3, error_message = $4, completed_at = NOW() WHERE id = (SELECT id FROM export_jobs WHERE status = 'processing' ORDER BY triggered_at DESC LIMIT 1)",
+                [finalStatus, fileName, fileId, message || 'Updated via callback (jobId mismatch)']
+            );
+            updated = result.rowCount > 0;
+            console.log('Tried most recent processing job. Updated:', updated);
+        }
+
+        // If still no match, log a record for tracking
+        if (!updated) {
             var newJobId = 'callback_' + Date.now();
             await pool.query(
                 'INSERT INTO export_jobs (job_id, export_type, status, file_name, file_id, error_message, completed_at) VALUES ($1, $2, $3, $4, $5, $6, NOW())',
-                [newJobId, 'unknown', status === 'success' ? 'completed' : 'failed', fileName, fileId, message]
+                [newJobId, 'unknown', finalStatus, fileName, fileId, message || 'Orphan callback - no matching job']
             );
+            console.log('Created new callback record:', newJobId);
         }
 
-        console.log('Export callback processed - Status:', status, 'File:', fileName, 'FileId:', fileId);
-
-        // If export was successful and we have a fileId, optionally trigger auto-import
-        if (status === 'success' && fileId) {
-            console.log('Export completed successfully. File is ready for import:', fileName);
-            // The file is now in WorkDrive - the next auto-import cycle will pick it up
-            // Or the user can manually trigger import
-        }
+        console.log('Export callback processed - Status:', finalStatus, 'File:', fileName);
 
         res.json({ success: true, message: 'Callback received' });
     } catch (err) {

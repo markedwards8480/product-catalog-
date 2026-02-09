@@ -831,7 +831,7 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
                     }
                     console.log('Inserting batch of', batch.length, 'rows...');
                     try {
-                        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(',') + ' ON CONFLICT (document_number, line_item_sku) DO NOTHING', values);
+                        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(',') + ' ON CONFLICT ON CONSTRAINT idx_sales_data_unique DO NOTHING', values);
                         console.log('Batch insert successful');
                     } catch (insertErr) {
                         console.error('Batch insert FAILED:', insertErr.message);
@@ -860,7 +860,7 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
             placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
             values = values.concat(item);
         }
-        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(',') + ' ON CONFLICT (document_number, line_item_sku) DO NOTHING', values);
+        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(',') + ' ON CONFLICT ON CONSTRAINT idx_sales_data_unique DO NOTHING', values);
         imported += batch.length;
     }
 

@@ -756,7 +756,7 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
     
     var imported = 0, skipped = 0, errors = 0;
     var batch = [];
-    var batchSize = 500; // Increased from 100 for faster processing
+    var batchSize = 2000; // Large batch for faster bulk import
     var totalLines = lines.length - 1;
     console.log('Processing', totalLines, 'lines from sales CSV...');
     
@@ -815,9 +815,8 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
                     await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
                     imported += batch.length;
                     batch = [];
-                    if (imported % 5000 === 0) {
-                        console.log('Sales import progress:', imported, 'of ~' + totalLines, 'rows (' + Math.round(imported/totalLines*100) + '%)');
-                    }
+                    // Log every batch to show progress
+                    console.log('Sales import progress:', imported, 'of ~' + totalLines, 'rows (' + Math.round(imported/totalLines*100) + '%)');
                 }
             }
         } catch (err) {

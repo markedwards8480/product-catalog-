@@ -756,7 +756,7 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
     
     var imported = 0, skipped = 0, errors = 0;
     var batch = [];
-    var batchSize = 2000; // Large batch for faster bulk import
+    var batchSize = 500; // Moderate batch size to avoid overwhelming PostgreSQL
     var totalLines = lines.length - 1;
     console.log('Processing', totalLines, 'lines from sales CSV...');
     console.log('Starting CSV parse loop...');
@@ -829,11 +829,20 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
                         placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
                         values = values.concat(item);
                     }
-                    await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+                    console.log('Inserting batch of', batch.length, 'rows...');
+                    try {
+                        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+                        console.log('Batch insert successful');
+                    } catch (insertErr) {
+                        console.error('Batch insert FAILED:', insertErr.message);
+                        throw insertErr;
+                    }
                     imported += batch.length;
                     batch = [];
                     // Log every batch to show progress
                     console.log('Sales import progress:', imported, 'of ~' + totalLines, 'rows (' + Math.round(imported/totalLines*100) + '%)');
+                    // Yield after each batch insert
+                    await new Promise(function(resolve) { setImmediate(resolve); });
                 }
             }
         } catch (err) {

@@ -759,8 +759,14 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
     var batchSize = 2000; // Large batch for faster bulk import
     var totalLines = lines.length - 1;
     console.log('Processing', totalLines, 'lines from sales CSV...');
+    console.log('Starting CSV parse loop...');
 
     for (var i = 1; i < lines.length; i++) {
+        // Yield to event loop every 5000 rows to allow log flushing
+        if (i % 5000 === 0) {
+            console.log('Parsed', i, 'of', totalLines, 'rows (' + Math.round(i/totalLines*100) + '%)');
+            await new Promise(function(resolve) { setImmediate(resolve); });
+        }
         try {
             var line = lines[i];
             if (!line.trim()) continue;
@@ -783,11 +789,6 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
                 row.push(cell.trim());
             }
 
-            // Log parsing progress every 10000 rows
-            if (i % 10000 === 0) {
-                console.log('Parsed', i, 'of', totalLines, 'rows...');
-            }
-            
             var docType = row[docTypeIdx] || '';
             var docNum = row[docNumIdx] || '';
             var docDate = row[dateIdx] || null;

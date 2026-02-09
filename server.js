@@ -176,6 +176,9 @@ async function initDB() {
         
         // WorkDrive auto-import tracking
         await pool.query('CREATE TABLE IF NOT EXISTS workdrive_imports (id SERIAL PRIMARY KEY, file_id VARCHAR(255) UNIQUE NOT NULL, file_name VARCHAR(255), file_type VARCHAR(50), processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, records_imported INTEGER DEFAULT 0, status VARCHAR(50), error_message TEXT)');
+
+        // Export job tracking for Zoho Flow webhook integration
+        await pool.query('CREATE TABLE IF NOT EXISTS export_jobs (id SERIAL PRIMARY KEY, job_id VARCHAR(100) UNIQUE NOT NULL, export_type VARCHAR(50), status VARCHAR(50) DEFAULT \'pending\', file_name VARCHAR(255), file_id VARCHAR(255), error_message TEXT, triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, completed_at TIMESTAMP)');
         
         // Migrate existing users: set PIN if not set, set display_name from username
         await pool.query("UPDATE users SET pin = LPAD(FLOOR(RANDOM() * 10000)::TEXT, 4, '0') WHERE pin IS NULL");
@@ -1459,6 +1462,164 @@ app.post('/api/zoho/sync', requireAuth, requireAdmin, async function(req, res) {
 });
 
 app.get('/api/zoho/sync-history', requireAuth, async function(req, res) { try { var result = await pool.query('SELECT * FROM sync_history ORDER BY created_at DESC LIMIT 20'); res.json(result.rows); } catch (err) { res.status(500).json({ error: err.message }); } });
+
+// =============================================
+// ZOHO FLOW WEBHOOK INTEGRATION
+// =============================================
+
+// Zoho Flow webhook URL - triggers export in Zoho Analytics
+var ZOHO_FLOW_WEBHOOK_URL = process.env.ZOHO_FLOW_WEBHOOK_URL || 'https://flow.zoho.com/691122364/flow/webhook/incoming?zapikey=1001.e31d40549cda427ea3bc24543a0525c5.8f70b89a06a4c2aacdd02e99d26ab2a6';
+
+// Trigger export via Zoho Flow webhook
+app.post('/api/trigger-export', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        var exportType = req.body.exportType || 'sales'; // 'sales' or 'inventory'
+        var jobId = 'export_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+
+        // Determine the callback URL based on the request host
+        var protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+        var host = req.headers['x-forwarded-host'] || req.headers.host;
+        var callbackUrl = protocol + '://' + host + '/api/zoho-export-callback';
+
+        console.log('Triggering export via Zoho Flow webhook...');
+        console.log('Export type:', exportType);
+        console.log('Job ID:', jobId);
+        console.log('Callback URL:', callbackUrl);
+
+        // Create job record
+        await pool.query(
+            'INSERT INTO export_jobs (job_id, export_type, status) VALUES ($1, $2, $3)',
+            [jobId, exportType, 'pending']
+        );
+
+        // POST to Zoho Flow webhook
+        var webhookResponse = await fetch(ZOHO_FLOW_WEBHOOK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                callbackUrl: callbackUrl,
+                exportType: exportType,
+                jobId: jobId
+            })
+        });
+
+        if (!webhookResponse.ok) {
+            var errorText = await webhookResponse.text();
+            console.error('Zoho Flow webhook error:', webhookResponse.status, errorText);
+            await pool.query(
+                'UPDATE export_jobs SET status = $1, error_message = $2, completed_at = NOW() WHERE job_id = $3',
+                ['failed', 'Webhook error: ' + webhookResponse.status, jobId]
+            );
+            return res.json({ success: false, error: 'Failed to trigger export: ' + webhookResponse.status });
+        }
+
+        var responseData = await webhookResponse.text();
+        console.log('Zoho Flow webhook response:', responseData);
+
+        // Update job status to processing
+        await pool.query(
+            'UPDATE export_jobs SET status = $1 WHERE job_id = $2',
+            ['processing', jobId]
+        );
+
+        res.json({
+            success: true,
+            message: 'Export triggered successfully',
+            jobId: jobId,
+            callbackUrl: callbackUrl
+        });
+    } catch (err) {
+        console.error('Trigger export error:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Callback endpoint for Zoho Flow to report export completion
+// NOTE: No auth required - this is called by Zoho Flow
+app.post('/api/zoho-export-callback', async function(req, res) {
+    try {
+        var payload = req.body;
+        console.log('Received Zoho export callback:', JSON.stringify(payload, null, 2));
+
+        var status = payload.status || 'unknown';
+        var fileName = payload.fileName || null;
+        var fileId = payload.fileId || null;
+        var jobId = payload.jobId || null;
+        var message = payload.message || null;
+
+        // If we have a jobId, update that specific job
+        if (jobId) {
+            await pool.query(
+                'UPDATE export_jobs SET status = $1, file_name = $2, file_id = $3, error_message = $4, completed_at = NOW() WHERE job_id = $5',
+                [status === 'success' ? 'completed' : 'failed', fileName, fileId, message, jobId]
+            );
+        } else {
+            // If no jobId, create a new record (for backwards compatibility)
+            var newJobId = 'callback_' + Date.now();
+            await pool.query(
+                'INSERT INTO export_jobs (job_id, export_type, status, file_name, file_id, error_message, completed_at) VALUES ($1, $2, $3, $4, $5, $6, NOW())',
+                [newJobId, 'unknown', status === 'success' ? 'completed' : 'failed', fileName, fileId, message]
+            );
+        }
+
+        console.log('Export callback processed - Status:', status, 'File:', fileName, 'FileId:', fileId);
+
+        // If export was successful and we have a fileId, optionally trigger auto-import
+        if (status === 'success' && fileId) {
+            console.log('Export completed successfully. File is ready for import:', fileName);
+            // The file is now in WorkDrive - the next auto-import cycle will pick it up
+            // Or the user can manually trigger import
+        }
+
+        res.json({ success: true, message: 'Callback received' });
+    } catch (err) {
+        console.error('Export callback error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Get export job status for frontend polling
+app.get('/api/export-status', requireAuth, async function(req, res) {
+    try {
+        var jobId = req.query.jobId;
+
+        if (jobId) {
+            // Get specific job status
+            var result = await pool.query(
+                'SELECT * FROM export_jobs WHERE job_id = $1',
+                [jobId]
+            );
+            if (result.rows.length === 0) {
+                return res.json({ success: false, error: 'Job not found' });
+            }
+            res.json({ success: true, job: result.rows[0] });
+        } else {
+            // Get recent export jobs
+            var result = await pool.query(
+                'SELECT * FROM export_jobs ORDER BY triggered_at DESC LIMIT 10'
+            );
+            res.json({ success: true, jobs: result.rows });
+        }
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Get all export jobs for display in admin panel
+app.get('/api/export-jobs', requireAuth, async function(req, res) {
+    try {
+        var result = await pool.query(
+            'SELECT * FROM export_jobs ORDER BY triggered_at DESC LIMIT 20'
+        );
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// =============================================
+// END ZOHO FLOW WEBHOOK INTEGRATION
+// =============================================
 
 // Data freshness endpoint - get last CSV import date
 app.get('/api/data-freshness', requireAuth, async function(req, res) {
@@ -3811,7 +3972,7 @@ function getHTML() {
     html += '<div id="zoho2Tab" class="tab-content active"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="zohoStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Workspace ID: </span><span class="status-value" id="zohoWorkspaceId">-</span></div><div class="status-item"><span class="status-label">View ID: </span><span class="status-value" id="zohoViewId">-</span></div></div><div style="display:flex;gap:1rem"><button class="btn btn-secondary" id="testZohoBtn">Test Connection</button><button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div><div id="zohoMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="import2Tab" class="tab-content"><div class="upload-area"><input type="file" id="csvFile" accept=".csv"><label for="csvFile">Click to upload CSV file</label></div><div id="importStatus"></div><button class="btn btn-danger" id="clearBtn" style="margin-top:1rem">Clear All Products</button></div>';
     html += '<div id="sales2Tab" class="tab-content"><p style="margin-bottom:1rem;color:#666">Import sales data (Sales Orders and Purchase Orders) from the PO-SO Query CSV export.</p><div class="upload-area"><input type="file" id="salesCsvFile" accept=".csv"><label for="salesCsvFile">Click to upload Sales CSV file</label></div><div id="salesImportStatus"></div><div id="salesDataStats" style="margin-top:1rem"></div><button class="btn btn-danger" id="clearSalesBtn" style="margin-top:1rem">Clear All Sales Data</button><p style="margin-top:0.5rem;font-size:0.75rem;color:#999">Use this to start fresh before uploading historical files.</p></div>';
-    html += '<div id="autoimport2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="autoImportStatus">Checking...</span></div><div class="status-item"><span class="status-label">Check Interval: </span><span class="status-value" id="autoImportInterval">-</span></div><div class="status-item"><span class="status-label">Inventory Files: </span><span class="status-value" id="autoImportInventory">-</span></div><div class="status-item"><span class="status-label">Sales-PO Files: </span><span class="status-value" id="autoImportSales">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">Automatically imports CSV files from two WorkDrive folders:<br>• <strong>Inventory folder</strong> - for Inventory Availability reports<br>• <strong>Sales-PO folder</strong> - for PO-SO Query exports</p><button class="btn btn-primary" id="checkWorkDriveBtn">Check All</button><button class="btn btn-secondary" id="checkSalesOnlyBtn" style="margin-left:0.5rem">Check Sales Only</button><button class="btn btn-danger" id="clearAutoImportBtn" style="margin-left:0.5rem">Clear History</button><div id="autoImportMessage" style="margin-top:1rem"></div><h4 style="margin-top:1.5rem;margin-bottom:0.5rem">Recent Imports</h4><div id="recentImportsList" style="max-height:200px;overflow-y:auto;font-size:0.8rem"></div></div>';
+    html += '<div id="autoimport2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="autoImportStatus">Checking...</span></div><div class="status-item"><span class="status-label">Check Interval: </span><span class="status-value" id="autoImportInterval">-</span></div><div class="status-item"><span class="status-label">Inventory Files: </span><span class="status-value" id="autoImportInventory">-</span></div><div class="status-item"><span class="status-label">Sales-PO Files: </span><span class="status-value" id="autoImportSales">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">Automatically imports CSV files from two WorkDrive folders:<br>• <strong>Inventory folder</strong> - for Inventory Availability reports<br>• <strong>Sales-PO folder</strong> - for PO-SO Query exports</p><button class="btn btn-primary" id="checkWorkDriveBtn">Check All</button><button class="btn btn-secondary" id="checkSalesOnlyBtn" style="margin-left:0.5rem">Check Sales Only</button><button class="btn btn-danger" id="clearAutoImportBtn" style="margin-left:0.5rem">Clear History</button><div id="autoImportMessage" style="margin-top:1rem"></div><h4 style="margin-top:1.5rem;margin-bottom:0.5rem;border-top:1px solid #ddd;padding-top:1rem">🔄 Trigger Export via Zoho Flow</h4><p style="color:#666;font-size:0.8rem;margin-bottom:0.5rem">Trigger a new Zoho Analytics export. The file will be uploaded to WorkDrive and ready for import.</p><div style="display:flex;gap:0.5rem;align-items:center;margin-bottom:0.5rem"><button class="btn btn-success" id="triggerExportBtn">Trigger Export</button><span id="exportJobStatus" style="font-size:0.8rem;color:#666;margin-left:0.5rem"></span></div><div id="exportJobsList" style="max-height:120px;overflow-y:auto;font-size:0.75rem;margin-bottom:1rem"></div><h4 style="margin-top:1.5rem;margin-bottom:0.5rem">Recent Imports</h4><div id="recentImportsList" style="max-height:200px;overflow-y:auto;font-size:0.8rem"></div></div>';
     html += '<div id="ai2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">API Status: </span><span class="status-value" id="aiStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Products Analyzed: </span><span class="status-value" id="aiAnalyzedCount">-</span></div><div class="status-item"><span class="status-label">Remaining: </span><span class="status-value" id="aiRemainingCount">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">AI analysis uses Claude Vision to generate searchable tags from product images. This enables searching by garment type (cardigan, hoodie), style (casual, formal), pattern (striped, floral), and more.</p><button class="btn btn-primary" id="runAiBtn">Analyze Next 100 Products</button><button class="btn btn-success" id="runAllAiBtn" style="margin-left:0.5rem">Analyze All (Background)</button><button class="btn btn-secondary" id="stopAiBtn" style="margin-left:0.5rem;display:none">Stop</button><div id="aiMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="cache2Tab" class="tab-content"><div class="status-box"><div class="status-item"><span class="status-label">Cache Status: </span><span class="status-value" id="cacheStatus">Checking...</span></div><div class="status-item"><span class="status-label">Cached Images: </span><span class="status-value" id="cachedCount">-</span></div><div class="status-item"><span class="status-label">Total Products with Images: </span><span class="status-value" id="totalImagesCount">-</span></div><div class="status-item"><span class="status-label">Cache Size: </span><span class="status-value" id="cacheSize">-</span></div></div><p style="color:#666;font-size:0.875rem;margin-bottom:1rem">Image caching stores product images locally to reduce Zoho API calls and speed up image loading. Images are cached on first view and refreshed when you upload a new inventory CSV.</p><button class="btn btn-primary" id="refreshCacheBtn">Refresh All Images</button><button class="btn btn-danger" id="clearCacheBtn" style="margin-left:0.5rem">Clear Cache</button><div id="cacheMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="users2Tab" class="tab-content"><table><thead><tr><th>Name</th><th>PIN</th><th>Role</th><th>Actions</th></tr></thead><tbody id="usersTable"></tbody></table><div class="add-form"><input type="text" id="newUserName" placeholder="Display Name"><select id="newRole"><option value="sales_rep">Sales Rep</option><option value="admin">Admin</option></select><button class="btn btn-primary" id="addUserBtn">Add User</button></div><p style="margin-top:1rem;font-size:0.8rem;color:#666">New users are assigned a random 4-digit PIN. They can change it after logging in.</p></div>';
@@ -3994,7 +4155,7 @@ function getHTML() {
 
     html += 'function clearTreemapFilter(){treemapFilters=[];if(treemapMode==="commodity"){selectedCategories=[];document.querySelectorAll("[data-cat]").forEach(function(btn){btn.classList.remove("active")});var allBtn=document.querySelector("[data-cat=\\"all\\"]");if(allBtn)allBtn.classList.add("active")}else{colorFilter=null;document.getElementById("colorFilterBtn").textContent="Color: All ▼";document.getElementById("clearColorBtn").classList.add("hidden")}document.getElementById("treemapClearFilter").classList.add("hidden");renderProducts()}';
 
-    html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var panel=e.target.closest(".admin-panel");panel.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});panel.querySelectorAll(".tab-content").forEach(function(c){c.classList.remove("active")});e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active");if(e.target.getAttribute("data-tab")==="cache2")loadCacheStatus();if(e.target.getAttribute("data-tab")==="autoimport2")loadAutoImportStatus();if(e.target.getAttribute("data-tab")==="merch2")loadMerchandisingTab()})}';
+    html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var panel=e.target.closest(".admin-panel");panel.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});panel.querySelectorAll(".tab-content").forEach(function(c){c.classList.remove("active")});e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active");if(e.target.getAttribute("data-tab")==="cache2")loadCacheStatus();if(e.target.getAttribute("data-tab")==="autoimport2"){loadAutoImportStatus();loadExportJobs()}if(e.target.getAttribute("data-tab")==="merch2")loadMerchandisingTab()})}';
     
     html += 'var sizeBtns=document.querySelectorAll(".size-btn");sizeBtns.forEach(function(btn){btn.addEventListener("click",function(e){sizeBtns.forEach(function(b){b.classList.remove("active")});e.target.classList.add("active");currentSize=e.target.getAttribute("data-size");document.getElementById("productGrid").className="product-grid size-"+currentSize;renderProducts()})});';
     
@@ -4183,6 +4344,13 @@ function getHTML() {
     html += 'document.getElementById("checkWorkDriveBtn").addEventListener("click",function(){var btn=this;btn.disabled=true;btn.textContent="Checking...";document.getElementById("autoImportMessage").innerHTML="<span style=\\"color:#666\\">Checking WorkDrive folders for new files...</span>";fetch("/api/workdrive-import/check-now",{method:"POST"}).then(function(r){return r.json()}).then(function(d){btn.disabled=false;btn.textContent="Check All";if(d.success){document.getElementById("autoImportMessage").innerHTML="<span class=\\"success\\">Processed "+d.processed+" new files</span>"}else{document.getElementById("autoImportMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadAutoImportStatus();loadProducts()})});';
     html += 'document.getElementById("checkSalesOnlyBtn").addEventListener("click",function(){var btn=this;btn.disabled=true;btn.textContent="Checking Sales...";document.getElementById("autoImportMessage").innerHTML="<span style=\\"color:#666\\">Checking Sales-PO folder only...</span>";fetch("/api/workdrive-import/check-sales-only",{method:"POST"}).then(function(r){return r.json()}).then(function(d){btn.disabled=false;btn.textContent="Check Sales Only";if(d.success){document.getElementById("autoImportMessage").innerHTML="<span class=\\"success\\">Processed "+d.processed+" sales file(s)</span>"}else{document.getElementById("autoImportMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadAutoImportStatus();loadProducts()})});';
     html += 'document.getElementById("clearAutoImportBtn").addEventListener("click",function(){if(!confirm("Clear import history? Files will be re-processed on next check."))return;fetch("/api/workdrive-import/clear-history",{method:"POST"}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("autoImportMessage").innerHTML="<span class=\\"success\\">History cleared</span>"}loadAutoImportStatus()})});';
+
+    // Trigger Export via Zoho Flow
+    html += 'var currentExportJobId=null;';
+    html += 'document.getElementById("triggerExportBtn").addEventListener("click",function(){var btn=this;btn.disabled=true;btn.textContent="Triggering...";document.getElementById("exportJobStatus").textContent="Triggering Zoho Flow export...";fetch("/api/trigger-export",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({exportType:"sales"})}).then(function(r){return r.json()}).then(function(d){btn.disabled=false;btn.textContent="Trigger Export";if(d.success){document.getElementById("exportJobStatus").innerHTML="<span class=\\"success\\">✓ Export triggered! Job ID: "+d.jobId+"</span>";currentExportJobId=d.jobId;pollExportStatus()}else{document.getElementById("exportJobStatus").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadExportJobs()})});';
+    html += 'function pollExportStatus(){if(!currentExportJobId)return;fetch("/api/export-status?jobId="+currentExportJobId).then(function(r){return r.json()}).then(function(d){if(d.success&&d.job){var job=d.job;var statusText="Status: "+job.status;if(job.file_name)statusText+=" - File: "+job.file_name;document.getElementById("exportJobStatus").innerHTML="<span style=\\"color:"+(job.status==="completed"?"#22c55e":job.status==="failed"?"#ef4444":"#666")+"\\">"+statusText+"</span>";if(job.status==="pending"||job.status==="processing"){setTimeout(pollExportStatus,3000)}else{loadAutoImportStatus();loadExportJobs()}}})}';
+    html += 'function loadExportJobs(){fetch("/api/export-jobs").then(function(r){return r.json()}).then(function(jobs){if(!jobs||jobs.length===0){document.getElementById("exportJobsList").innerHTML="<p style=\\"color:#666\\">No export jobs yet</p>";return}var html="<table style=\\"width:100%;border-collapse:collapse;font-size:0.75rem\\"><thead><tr style=\\"border-bottom:1px solid #ddd\\"><th style=\\"text-align:left;padding:2px\\">Job</th><th style=\\"text-align:left;padding:2px\\">Status</th><th style=\\"text-align:left;padding:2px\\">File</th><th style=\\"text-align:left;padding:2px\\">Time</th></tr></thead><tbody>";jobs.slice(0,5).forEach(function(job){var statusColor=job.status==="completed"?"#22c55e":job.status==="failed"?"#ef4444":"#f59e0b";html+="<tr><td style=\\"padding:2px\\">"+job.job_id.substring(0,15)+"...</td><td style=\\"padding:2px;color:"+statusColor+"\\">"+job.status+"</td><td style=\\"padding:2px\\">"+(job.file_name||"-")+"</td><td style=\\"padding:2px\\">"+new Date(job.triggered_at).toLocaleTimeString()+"</td></tr>"});html+="</tbody></table>";document.getElementById("exportJobsList").innerHTML=html})}';
+
     html += 'document.getElementById("refreshCacheBtn").addEventListener("click",function(){var btn=this;btn.disabled=true;btn.textContent="Refreshing...";document.getElementById("cacheMessage").innerHTML="<span style=\\"color:#666\\">Downloading images from Zoho WorkDrive... This may take a few minutes.</span>";fetch("/api/image-cache/refresh",{method:"POST"}).then(function(r){return r.json()}).then(function(d){btn.disabled=false;btn.textContent="Refresh All Images";if(d.success){document.getElementById("cacheMessage").innerHTML="<span class=\\"success\\">✓ Refreshed "+d.refreshed+" of "+d.total+" images"+(d.errors?" ("+d.errors+" errors)":"")+"</span>"}else{document.getElementById("cacheMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadCacheStatus()})});';
     html += 'document.getElementById("clearCacheBtn").addEventListener("click",function(){if(!confirm("Clear all cached images? They will be re-downloaded on next view."))return;fetch("/api/image-cache/clear",{method:"POST"}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("cacheMessage").innerHTML="<span class=\\"success\\">✓ Cleared "+d.deleted+" cached files</span>"}else{document.getElementById("cacheMessage").innerHTML="<span class=\\"error\\">"+d.error+"</span>"}loadCacheStatus()})});';
     

@@ -871,7 +871,10 @@ async function processWorkDriveFolder(folderId, fileType) {
     var processed = 0;
     try {
         var files = await listWorkDriveFiles(folderId);
-        console.log('Found ' + files.length + ' files in ' + fileType + ' folder');
+        console.log('Found ' + files.length + ' files in ' + fileType + ' folder (folderId: ' + folderId + ')');
+        if (files.length > 0) {
+            console.log('Files found:', files.map(function(f) { return f.attributes ? f.attributes.name : f.name; }).join(', '));
+        }
 
         // For inventory files, we ONLY process the NEWEST date's files
         // This ensures we always have a complete fresh dataset
@@ -962,17 +965,22 @@ async function processWorkDriveFolder(folderId, fileType) {
             var fileId = file.id;
             var fileName = file.attributes ? file.attributes.name : (file.name || 'unknown');
 
+            console.log('Checking file:', fileName, '(id:', fileId + ')');
+
             // Skip non-CSV files
-            if (!fileName.toLowerCase().endsWith('.csv')) continue;
+            if (!fileName.toLowerCase().endsWith('.csv')) {
+                console.log('  -> SKIPPED: Not a CSV file');
+                continue;
+            }
 
             // Check if already processed RECENTLY (within last 5 hours)
             // This allows re-processing files that are overwritten/updated every 6 hours
             var existing = await pool.query(
-                "SELECT id FROM workdrive_imports WHERE file_id = $1 AND processed_at > NOW() - INTERVAL '5 hours'",
+                "SELECT id, processed_at FROM workdrive_imports WHERE file_id = $1 AND processed_at > NOW() - INTERVAL '5 hours'",
                 [fileId]
             );
             if (existing.rows.length > 0) {
-                console.log('Skipping recently processed file:', fileName);
+                console.log('  -> SKIPPED: Already processed at', existing.rows[0].processed_at);
                 continue;
             }
 

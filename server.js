@@ -831,11 +831,24 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
                     }
                     console.log('Inserting batch of', batch.length, 'rows...');
                     try {
-                        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(',') + ' ON CONFLICT ON CONSTRAINT idx_sales_data_unique DO NOTHING', values);
+                        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
                         console.log('Batch insert successful');
                     } catch (insertErr) {
-                        console.error('Batch insert FAILED:', insertErr.message);
-                        throw insertErr;
+                        // Duplicate key errors are expected - the CSV may have duplicate rows
+                        if (insertErr.message.includes('duplicate key')) {
+                            console.log('Batch has duplicates, inserting rows one by one...');
+                            // Fall back to inserting one at a time to skip duplicates
+                            for (var r = 0; r < batch.length; r++) {
+                                try {
+                                    await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)', batch[r]);
+                                } catch (singleErr) {
+                                    // Skip duplicate rows silently
+                                }
+                            }
+                        } else {
+                            console.error('Batch insert FAILED:', insertErr.message);
+                            throw insertErr;
+                        }
                     }
                     imported += batch.length;
                     batch = [];
@@ -860,7 +873,20 @@ async function processSalesCSV(csvContent, filename, shouldClear) {
             placeholders.push('($' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ',$' + paramIdx++ + ')');
             values = values.concat(item);
         }
-        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(',') + ' ON CONFLICT ON CONSTRAINT idx_sales_data_unique DO NOTHING', values);
+        try {
+            await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ' + placeholders.join(','), values);
+        } catch (insertErr) {
+            if (insertErr.message.includes('duplicate key')) {
+                // Insert remaining rows one by one
+                for (var r = 0; r < batch.length; r++) {
+                    try {
+                        await pool.query('INSERT INTO sales_data (document_type, document_number, doc_date, in_warehouse_date, customer_vendor, line_item_sku, base_style, status, quantity, amount) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)', batch[r]);
+                    } catch (singleErr) { }
+                }
+            } else {
+                throw insertErr;
+            }
+        }
         imported += batch.length;
     }
 

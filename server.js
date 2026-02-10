@@ -5,6 +5,7 @@ const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
+const cron = require('node-cron');
 require('dotenv').config();
 
 // =============================================
@@ -4492,4 +4493,38 @@ initDB().then(function() {
     setTimeout(function() { startTokenRefreshJob(); }, 5000);
     setTimeout(function() { startSalesHistoryCacheJob(); }, 10000);
     setTimeout(function() { startWorkDriveImportJob(); }, 15000);
+
+    // Schedule daily export trigger at 2am EST
+    // Cron: minute hour day month weekday
+    cron.schedule('0 7 * * *', async function() {  // 7 UTC = 2am EST
+        console.log('[CRON] Triggering daily Zoho Flow export at', new Date().toISOString());
+        try {
+            var jobId = 'export_' + Date.now() + '_' + Math.random().toString(36).substring(2, 15);
+            await pool.query(
+                'INSERT INTO export_jobs (job_id, export_type, status) VALUES ($1, $2, $3)',
+                [jobId, 'sales', 'pending']
+            );
+
+            var webhookUrl = process.env.ZOHO_FLOW_WEBHOOK_URL || 'https://flow.zoho.com/691122364/flow/webhook/incoming?zapikey=1001.e31d40549cda427ea3bc24543a0525c5.77f014125de41156e64d1b960d9d8c9b&isdebug=false';
+            var callbackUrl = 'https://product-catalog-production-682f.up.railway.app/api/zoho-export-callback';
+
+            var response = await fetch(webhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ jobId: jobId, exportType: 'sales', callbackUrl: callbackUrl })
+            });
+
+            if (response.ok) {
+                await pool.query('UPDATE export_jobs SET status = $1 WHERE job_id = $2', ['processing', jobId]);
+                console.log('[CRON] Export triggered successfully, jobId:', jobId);
+            } else {
+                await pool.query('UPDATE export_jobs SET status = $1, error_message = $2 WHERE job_id = $3',
+                    ['failed', 'HTTP ' + response.status, jobId]);
+                console.log('[CRON] Export trigger failed:', response.status);
+            }
+        } catch (err) {
+            console.error('[CRON] Export trigger error:', err.message);
+        }
+    }, { timezone: 'America/New_York' });
+    console.log('Scheduled daily export trigger at 2am EST');
 });

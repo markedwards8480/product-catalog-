@@ -3679,7 +3679,74 @@ app.get('/', function(req, res) { res.send(getHTML()); });
 app.get('*', function(req, res) { res.send(getHTML()); });
 
 function getShareHTML(shareId) {
-    return '<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Product Selection - Mark Edwards Apparel</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f5f5f5;padding:2rem}.header{text-align:center;margin-bottom:2rem}.header h1{font-size:1.5rem;color:#333}.header p{color:#666;margin-top:0.5rem}.legend{max-width:1200px;margin:0 auto 1.5rem;padding:0.75rem 1rem;background:white;border-radius:8px;display:flex;gap:2rem;justify-content:center;font-size:0.8rem}.legend-item{display:flex;align-items:center;gap:0.5rem}.legend-dot{width:10px;height:10px;border-radius:50%}.legend-dot.dc{background:#059669}.legend-dot.coming{background:#0088c2}.product-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:1.5rem;max-width:1200px;margin:0 auto}.product-card{background:white;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1)}.product-image{height:280px;background:#f8f8f8;display:flex;align-items:center;justify-content:center}.product-image img{max-width:100%;max-height:100%;object-fit:contain}.product-info{padding:1rem}.product-name{font-size:1.1rem;font-weight:600;margin-bottom:0.25rem}.product-style{font-size:0.75rem;color:#666;margin-bottom:0.5rem}.qty-section{font-size:0.7rem}.qty-header{display:flex;justify-content:flex-end;gap:0.5rem;padding-bottom:0.25rem;border-bottom:1px solid #eee;margin-bottom:0.25rem}.qty-header span{width:50px;text-align:right;font-weight:500}.qty-header .h-dc{color:#059669}.qty-header .h-coming{color:#0088c2}.color-grid{display:grid;grid-template-columns:1fr;gap:0.125rem}.color-row{display:flex;align-items:center;padding:0.2rem 0;border-bottom:1px solid #f8f8f8}.color-row .c-name{flex:1;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:0.5rem}.color-row .c-dc{width:50px;text-align:right;color:#059669;font-weight:600}.color-row .c-coming{width:50px;text-align:right;color:#0088c2;font-weight:600}.total-bar{display:flex;align-items:center;margin-top:0.5rem;padding-top:0.5rem;border-top:2px solid #1e3a5f;font-weight:700;font-size:0.75rem}.total-bar .t-label{flex:1;color:#1e3a5f}.total-bar .t-dc{width:50px;text-align:right;color:#059669}.total-bar .t-coming{width:50px;text-align:right;color:#0088c2}.actions{text-align:center;margin-top:2rem}.btn{padding:0.75rem 2rem;border:none;border-radius:4px;cursor:pointer;font-size:1rem;text-decoration:none;display:inline-block;margin:0.5rem}.btn-primary{background:#1e3a5f;color:white}.eta-line{margin-top:0.4rem;font-size:0.7rem;color:#1565c0;font-weight:500}.loading{text-align:center;padding:3rem;color:#666}</style></head><body><div class="header"><h1 id="selectionName">Product Selection</h1><p id="selectionInfo"></p></div><div class="legend"><div class="legend-item"><span class="legend-dot dc"></span><span><strong>In DC</strong> - Ready to ship</span></div><div class="legend-item"><span class="legend-dot coming"></span><span><strong>Coming Soon</strong> - On order</span></div></div><div class="product-grid" id="productGrid"><div class="loading">Loading products...</div></div><div class="actions"><a class="btn btn-primary" id="pdfBtn" href="/api/selections/' + shareId + '/pdf" target="_blank">Download / Print PDF</a></div><script>fetch("/api/selections/' + shareId + '").then(function(r){return r.json()}).then(function(d){if(d.error){document.getElementById("productGrid").innerHTML=d.error.indexOf("expired")!==-1?"<p style=\\"text-align:center;padding:2rem;color:\#666;font-size:1.1rem\\">This selection link has expired. Please request a new link from your sales representative.</p>":"<p>Selection not found</p>";document.getElementById("pdfBtn").style.display="none";return}document.getElementById("selectionName").textContent=d.selection.name||"Product Selection";document.getElementById("selectionInfo").textContent="Created "+new Date(d.selection.created_at).toLocaleDateString()+" • "+d.products.length+" items";var h="";for(var i=0;i<d.products.length;i++){var p=d.products[i];var cols=p.colors||[];var totDC=0;var totCS=0;var colorRows="";for(var j=0;j<cols.length;j++){var inDC=cols[j].available_now||cols[j].available_qty||0;var comingSoon=cols[j].left_to_sell||0;totDC+=inDC;totCS+=comingSoon;colorRows+="<div class=\\"color-row\\"><span class=\\"c-name\\">"+cols[j].color_name+"</span><span class=\\"c-dc\\">"+inDC.toLocaleString()+"</span><span class=\\"c-coming\\">"+comingSoon.toLocaleString()+"</span></div>"}var imgUrl=p.image_url;if(imgUrl&&imgUrl.indexOf("download-accl.zoho.com")!==-1){var parts=imgUrl.split("/");imgUrl="/api/image/"+parts[parts.length-1]}var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";h+="<div class=\\"product-card\\"><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-name\\">"+p.name+"</div><div class=\\"product-style\\">"+p.style_id+"</div><div class=\\"qty-section\\"><div class=\\"qty-header\\"><span class=\\"h-dc\\">In DC</span><span class=\\"h-coming\\">Coming</span></div><div class=\\"color-grid\\">"+colorRows+"</div><div class=\\"total-bar\\"><span class=\\"t-label\\">TOTAL</span><span class=\\"t-dc\\">"+totDC.toLocaleString()+"</span><span class=\\"t-coming\\">"+totCS.toLocaleString()+"</span></div>"+(p.eta?"<div class=\\\"eta-line\\\">ETA: "+new Date(p.eta).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})+"</div>":"")+"</div></div></div>"}document.getElementById("productGrid").innerHTML=h}).catch(function(e){document.getElementById("productGrid").innerHTML="<p>Error loading selection</p>"});</script></body></html>';
+    var css = '*{margin:0;padding:0;box-sizing:border-box}';
+    css += 'body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;background:#f5f5f7;padding:0}';
+    css += '.top-bar{background:#1e3a5f;color:white;text-align:center;padding:0.75rem 2rem;font-size:0.9rem;font-weight:600;letter-spacing:0.05em}';
+    css += '.header{text-align:center;padding:1.5rem 2rem 0.5rem;background:white;border-bottom:1px solid #e5e5e7}';
+    css += '.header h1{font-size:1.5rem;color:#1e3a5f;font-weight:700;letter-spacing:-0.02em}';
+    css += '.header p{color:#86868b;margin-top:0.25rem;font-size:0.85rem}';
+    css += '.legend{max-width:1200px;margin:1.25rem auto;padding:0.6rem 1rem;background:white;border-radius:10px;display:flex;gap:2rem;justify-content:center;font-size:0.8rem;box-shadow:0 1px 3px rgba(0,0,0,0.06)}';
+    css += '.legend-item{display:flex;align-items:center;gap:0.4rem}';
+    css += '.legend-dot{width:8px;height:8px;border-radius:50%}.legend-dot.dc{background:#059669}.legend-dot.coming{background:#0088c2}';
+    css += '.product-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:1.25rem;max-width:1200px;margin:0 auto;padding:0 1.25rem}';
+    css += '.product-card{background:white;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.08);transition:box-shadow 0.2s}';
+    css += '.product-card:hover{box-shadow:0 4px 16px rgba(0,0,0,0.12)}';
+    css += '.product-image{height:280px;background:#fafafa;display:flex;align-items:center;justify-content:center}';
+    css += '.product-image img{max-width:100%;max-height:100%;object-fit:contain}';
+    css += '.product-info{padding:0.75rem 1rem 1rem}';
+    css += '.product-name{font-size:1rem;font-weight:700;color:#1e3a5f;margin-bottom:0.125rem}';
+    css += '.product-style{font-size:0.7rem;color:#86868b;margin-bottom:0.6rem;letter-spacing:0.02em}';
+    // Merch table styles - proper table layout
+    css += '.merch-table{width:100%;border-collapse:collapse;font-size:0.78rem}';
+    css += '.merch-table thead th{padding:0.35rem 0.5rem;text-align:right;font-weight:600;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.04em;border-bottom:2px solid #e5e5e7;background:#f8f9fa}';
+    css += '.merch-table thead th:first-child{text-align:left;width:auto}';
+    css += '.merch-table thead th.col-dc{color:#059669;width:65px}';
+    css += '.merch-table thead th.col-coming{color:#0088c2;width:75px}';
+    css += '.merch-table tbody td{padding:0.3rem 0.5rem;border-bottom:1px solid #f0f0f2}';
+    css += '.merch-table tbody td:first-child{font-weight:500;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px}';
+    css += '.merch-table tbody td.val-dc{text-align:right;color:#059669;font-weight:600;font-variant-numeric:tabular-nums}';
+    css += '.merch-table tbody td.val-coming{text-align:right;color:#0088c2;font-weight:600;font-variant-numeric:tabular-nums}';
+    css += '.merch-table tbody tr:last-child td{border-bottom:none}';
+    css += '.merch-table tfoot td{padding:0.4rem 0.5rem;font-weight:700;border-top:2px solid #1e3a5f;font-size:0.8rem}';
+    css += '.merch-table tfoot td:first-child{color:#1e3a5f}';
+    css += '.merch-table tfoot td.val-dc{text-align:right;color:#059669;font-variant-numeric:tabular-nums}';
+    css += '.merch-table tfoot td.val-coming{text-align:right;color:#0088c2;font-variant-numeric:tabular-nums}';
+    css += '.eta-line{margin-top:0.4rem;font-size:0.72rem;color:#1565c0;font-weight:600;display:flex;align-items:center;gap:0.3rem}';
+    css += '.eta-line::before{content:"";display:inline-block;width:6px;height:6px;background:#1565c0;border-radius:50%}';
+    css += '.actions{text-align:center;padding:2rem 0 3rem}';
+    css += '.btn{padding:0.75rem 2rem;border:none;border-radius:980px;cursor:pointer;font-size:0.9rem;font-weight:500;text-decoration:none;display:inline-block;margin:0.5rem;transition:all 0.2s}';
+    css += '.btn-primary{background:#1e3a5f;color:white}.btn-primary:hover{background:#2a4a6f}';
+    css += '.loading{text-align:center;padding:3rem;color:#86868b}';
+    css += '.footer{text-align:center;padding:1rem;color:#86868b;font-size:0.75rem;border-top:1px solid #e5e5e7;margin-top:1rem}';
+
+    var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Product Selection - Mark Edwards Apparel</title>';
+    html += '<style>' + css + '</style></head><body>';
+    html += '<div class="top-bar">MARK EDWARDS APPAREL</div>';
+    html += '<div class="header"><h1 id="selectionName">Product Selection</h1><p id="selectionInfo"></p></div>';
+    html += '<div class="legend"><div class="legend-item"><span class="legend-dot dc"></span><span><strong>In DC</strong> - Ready to ship</span></div><div class="legend-item"><span class="legend-dot coming"></span><span><strong>Coming Soon</strong> - On order</span></div></div>';
+    html += '<div class="product-grid" id="productGrid"><div class="loading">Loading products...</div></div>';
+    html += '<div class="actions"><a class="btn btn-primary" id="pdfBtn" href="/api/selections/' + shareId + '/pdf" target="_blank">Download / Print PDF</a></div>';
+    html += '<div class="footer">Mark Edwards Apparel &bull; Product availability subject to change</div>';
+    html += '<script>';
+    html += 'fetch("/api/selections/' + shareId + '").then(function(r){return r.json()}).then(function(d){';
+    html += 'if(d.error){document.getElementById("productGrid").innerHTML=d.error.indexOf("expired")!==-1?"<p style=\\"text-align:center;padding:2rem;color:#666;font-size:1.1rem\\">This selection link has expired. Please request a new link from your sales representative.</p>":"<p>Selection not found</p>";document.getElementById("pdfBtn").style.display="none";return}';
+    html += 'document.getElementById("selectionName").textContent=d.selection.name||"Product Selection";';
+    html += 'document.getElementById("selectionInfo").textContent="Created "+new Date(d.selection.created_at).toLocaleDateString()+" \\u2022 "+d.products.length+" items";';
+    html += 'var h="";for(var i=0;i<d.products.length;i++){var p=d.products[i];var cols=p.colors||[];var totDC=0;var totCS=0;';
+    html += 'var rows="";for(var j=0;j<cols.length;j++){var inDC=cols[j].available_now||cols[j].available_qty||0;var comingSoon=cols[j].left_to_sell||0;totDC+=inDC;totCS+=comingSoon;';
+    html += 'rows+="<tr><td>"+cols[j].color_name+"</td><td class=\\"val-dc\\">"+inDC.toLocaleString()+"</td><td class=\\"val-coming\\">"+comingSoon.toLocaleString()+"</td></tr>"}';
+    html += 'var imgUrl=p.image_url;if(imgUrl&&imgUrl.indexOf("download-accl.zoho.com")!==-1){var parts=imgUrl.split("/");imgUrl="/api/image/"+parts[parts.length-1]}';
+    html += 'var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";';
+    html += 'var etaHtml=p.eta?"<div class=\\"eta-line\\">Expected "+new Date(p.eta).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})+"</div>":"";';
+    html += 'h+="<div class=\\"product-card\\"><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-name\\">"+p.name+"</div><div class=\\"product-style\\">"+p.style_id+"</div>";';
+    html += 'h+="<table class=\\"merch-table\\"><thead><tr><th>Color</th><th class=\\"col-dc\\">In DC</th><th class=\\"col-coming\\">Coming</th></tr></thead>";';
+    html += 'h+="<tbody>"+rows+"</tbody>";';
+    html += 'h+="<tfoot><tr><td>TOTAL</td><td class=\\"val-dc\\">"+totDC.toLocaleString()+"</td><td class=\\"val-coming\\">"+totCS.toLocaleString()+"</td></tr></tfoot></table>";';
+    html += 'h+=etaHtml+"</div></div>"}';
+    html += 'document.getElementById("productGrid").innerHTML=h';
+    html += '}).catch(function(e){document.getElementById("productGrid").innerHTML="<p>Error loading selection</p>"});';
+    html += '</script></body></html>';
+    return html;
 }
 
 function getPDFHTML(selection, products, options) {

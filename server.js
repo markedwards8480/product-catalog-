@@ -3308,7 +3308,7 @@ app.get('/api/selections/:shareId', async function(req, res) {
         var result = await pool.query('SELECT * FROM selections WHERE share_id = $1', [req.params.shareId]);
         if (result.rows.length === 0) return res.status(404).json({ error: 'Selection not found' });
         var selection = result.rows[0];
-        var productsResult = await pool.query('SELECT p.id, p.style_id, p.name, p.category, p.image_url, json_agg(json_build_object(\'color_name\', pc.color_name, \'available_qty\', pc.available_qty)) FILTER (WHERE pc.id IS NOT NULL) as colors FROM products p LEFT JOIN product_colors pc ON p.id = pc.product_id WHERE p.id = ANY($1) GROUP BY p.id', [selection.product_ids]);
+        var productsResult = await pool.query('SELECT p.id, p.style_id, p.name, p.category, p.image_url, json_agg(json_build_object(\'color_name\', pc.color_name, \'available_qty\', pc.available_qty, \'available_now\', COALESCE(pc.available_now, pc.available_qty, 0), \'left_to_sell\', COALESCE(pc.left_to_sell, pc.available_qty, 0), \'on_hand\', pc.on_hand, \'open_order\', COALESCE(pc.open_order, 0), \'to_come\', COALESCE(pc.to_come, 0))) FILTER (WHERE pc.id IS NOT NULL) as colors FROM products p LEFT JOIN product_colors pc ON p.id = pc.product_id WHERE p.id = ANY($1) GROUP BY p.id', [selection.product_ids]);
         res.json({ selection: selection, products: productsResult.rows });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });

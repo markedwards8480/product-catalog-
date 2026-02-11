@@ -3316,7 +3316,7 @@ app.get('/api/selections/:shareId', async function(req, res) {
         var baseStyles = [...new Set(productsResult.rows.map(function(p) { return p.base_style; }).filter(Boolean))];
         var etaMap = {};
         if (baseStyles.length > 0) {
-            var etaResult = await pool.query("SELECT base_style, MIN(in_warehouse_date) as earliest_eta FROM sales_data WHERE base_style = ANY($1) AND document_type IN ('Purchase Order', 'PO', 'Bill') AND (status = 'open' OR status = 'draft' OR status = 'issued') AND in_warehouse_date IS NOT NULL AND in_warehouse_date >= CURRENT_DATE GROUP BY base_style", [baseStyles]);
+            var etaResult = await pool.query("SELECT base_style, MIN(in_warehouse_date) as earliest_eta FROM sales_data WHERE base_style = ANY($1) AND document_type IN ('Purchase Order', 'PO', 'Bill') AND (LOWER(status) = 'open' OR LOWER(status) = 'draft' OR LOWER(status) = 'issued') AND in_warehouse_date IS NOT NULL AND in_warehouse_date >= CURRENT_DATE GROUP BY base_style", [baseStyles]);
             etaResult.rows.forEach(function(r) { etaMap[r.base_style] = r.earliest_eta; });
         }
         var products = productsResult.rows.map(function(p) { p.eta = etaMap[p.base_style] || null; return p; });
@@ -3403,7 +3403,7 @@ app.get('/api/selections/:shareId/pdf', async function(req, res) {
         var baseStyles = [...new Set(productsResult.rows.map(function(p) { return p.base_style; }).filter(Boolean))];
         var etaMap = {};
         if (baseStyles.length > 0) {
-            var etaResult = await pool.query("SELECT base_style, MIN(in_warehouse_date) as earliest_eta FROM sales_data WHERE base_style = ANY($1) AND document_type IN ('Purchase Order', 'PO', 'Bill') AND (status = 'open' OR status = 'draft' OR status = 'issued') AND in_warehouse_date IS NOT NULL AND in_warehouse_date >= CURRENT_DATE GROUP BY base_style", [baseStyles]);
+            var etaResult = await pool.query("SELECT base_style, MIN(in_warehouse_date) as earliest_eta FROM sales_data WHERE base_style = ANY($1) AND document_type IN ('Purchase Order', 'PO', 'Bill') AND (LOWER(status) = 'open' OR LOWER(status) = 'draft' OR LOWER(status) = 'issued') AND in_warehouse_date IS NOT NULL AND in_warehouse_date >= CURRENT_DATE GROUP BY base_style", [baseStyles]);
             etaResult.rows.forEach(function(r) { etaMap[r.base_style] = r.earliest_eta; });
         }
         var products = productsResult.rows.map(function(p) { p.eta = etaMap[p.base_style] || null; return p; });

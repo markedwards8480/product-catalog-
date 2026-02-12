@@ -182,7 +182,13 @@ async function initDB() {
 
         // Export job tracking for Zoho Flow webhook integration
         await pool.query('CREATE TABLE IF NOT EXISTS export_jobs (id SERIAL PRIMARY KEY, job_id VARCHAR(100) UNIQUE NOT NULL, export_type VARCHAR(50), status VARCHAR(50) DEFAULT \'pending\', file_name VARCHAR(255), file_id VARCHAR(255), error_message TEXT, triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, completed_at TIMESTAMP)');
-        
+
+        // Catalog sharing recipients and schedules
+        await pool.query('CREATE TABLE IF NOT EXISTS catalog_subscriptions (id SERIAL PRIMARY KEY, recipient_name VARCHAR(255) NOT NULL, recipient_email VARCHAR(255) NOT NULL, company VARCHAR(255), categories TEXT[], frequency VARCHAR(50) DEFAULT \'weekly\', send_day VARCHAR(20) DEFAULT \'monday\', send_time VARCHAR(10) DEFAULT \'08:00\', quantity_mode VARCHAR(50) DEFAULT \'available_now\', min_quantity INTEGER DEFAULT 0, show_pricing BOOLEAN DEFAULT true, show_images BOOLEAN DEFAULT true, custom_message TEXT, is_active BOOLEAN DEFAULT true, created_by VARCHAR(255), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
+
+        // Log of every catalog email sent
+        await pool.query('CREATE TABLE IF NOT EXISTS catalog_send_log (id SERIAL PRIMARY KEY, subscription_id INTEGER REFERENCES catalog_subscriptions(id) ON DELETE SET NULL, recipient_email VARCHAR(255) NOT NULL, recipient_name VARCHAR(255), company VARCHAR(255), categories TEXT[], share_url TEXT, status VARCHAR(50) DEFAULT \'sent\', opened_at TIMESTAMP, clicked_at TIMESTAMP, error_message TEXT, sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
+
         // Migrate existing users: set PIN if not set, set display_name from username
         await pool.query("UPDATE users SET pin = LPAD(FLOOR(RANDOM() * 10000)::TEXT, 4, '0') WHERE pin IS NULL");
         await pool.query("UPDATE users SET display_name = username WHERE display_name IS NULL");
@@ -3674,6 +3680,320 @@ Response: {"message": "All filters cleared! Showing all products.", "actions": [
     }
 });
 
+// ============================================
+// CATALOG SUBSCRIPTION ENDPOINTS
+// ============================================
+
+// Get all subscriptions
+app.get('/api/catalog-subscriptions', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        var result = await pool.query(
+            'SELECT cs.*, ' +
+            '(SELECT COUNT(*) FROM catalog_send_log WHERE subscription_id = cs.id) as total_sent, ' +
+            '(SELECT sent_at FROM catalog_send_log WHERE subscription_id = cs.id ORDER BY sent_at DESC LIMIT 1) as last_sent ' +
+            'FROM catalog_subscriptions cs ORDER BY cs.company, cs.recipient_name'
+        );
+        res.json({ success: true, subscriptions: result.rows });
+    } catch (err) {
+        console.error('Error fetching subscriptions:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Create new subscription
+app.post('/api/catalog-subscriptions', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        var { recipient_name, recipient_email, company, categories, frequency,
+              send_day, send_time, quantity_mode, min_quantity, show_pricing,
+              show_images, custom_message } = req.body;
+
+        var result = await pool.query(
+            'INSERT INTO catalog_subscriptions (recipient_name, recipient_email, company, categories, frequency, send_day, send_time, quantity_mode, min_quantity, show_pricing, show_images, custom_message, created_by) ' +
+            'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *',
+            [recipient_name, recipient_email, company, categories, frequency,
+             send_day || 'monday', send_time || '08:00', quantity_mode || 'available_now',
+             min_quantity || 0, show_pricing !== false, show_images !== false,
+             custom_message || '', req.session.username || 'admin']
+        );
+        res.json({ success: true, subscription: result.rows[0] });
+    } catch (err) {
+        console.error('Error creating subscription:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Update subscription
+app.put('/api/catalog-subscriptions/:id', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        var { recipient_name, recipient_email, company, categories, frequency,
+              send_day, send_time, quantity_mode, min_quantity, show_pricing,
+              show_images, custom_message, is_active } = req.body;
+
+        var result = await pool.query(
+            'UPDATE catalog_subscriptions SET recipient_name=$1, recipient_email=$2, company=$3, ' +
+            'categories=$4, frequency=$5, send_day=$6, send_time=$7, quantity_mode=$8, ' +
+            'min_quantity=$9, show_pricing=$10, show_images=$11, custom_message=$12, ' +
+            'is_active=$13, updated_at=CURRENT_TIMESTAMP WHERE id=$14 RETURNING *',
+            [recipient_name, recipient_email, company, categories, frequency,
+             send_day, send_time, quantity_mode, min_quantity, show_pricing,
+             show_images, custom_message, is_active, req.params.id]
+        );
+        res.json({ success: true, subscription: result.rows[0] });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Delete subscription
+app.delete('/api/catalog-subscriptions/:id', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        await pool.query('DELETE FROM catalog_subscriptions WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Toggle active/inactive
+app.post('/api/catalog-subscriptions/:id/toggle', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        var result = await pool.query(
+            'UPDATE catalog_subscriptions SET is_active = NOT is_active, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *',
+            [req.params.id]
+        );
+        res.json({ success: true, subscription: result.rows[0] });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Send now (manual trigger)
+app.post('/api/catalog-subscriptions/:id/send-now', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        var sub = await pool.query('SELECT * FROM catalog_subscriptions WHERE id = $1', [req.params.id]);
+        if (sub.rows.length === 0) return res.json({ success: false, error: 'Subscription not found' });
+
+        var subscription = sub.rows[0];
+        var shareUrl = await generateCatalogShareUrl(subscription);
+
+        // Send the email
+        var emailResult = await sendCatalogEmail(subscription, shareUrl);
+
+        // Log it
+        await pool.query(
+            'INSERT INTO catalog_send_log (subscription_id, recipient_email, recipient_name, company, categories, share_url, status) ' +
+            'VALUES ($1, $2, $3, $4, $5, $6, $7)',
+            [subscription.id, subscription.recipient_email, subscription.recipient_name,
+             subscription.company, subscription.categories, shareUrl, emailResult.success ? 'sent' : 'failed']
+        );
+
+        res.json({ success: true, message: 'Email sent to ' + subscription.recipient_email });
+    } catch (err) {
+        console.error('Error sending catalog email:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Preview - generates the share URL without sending email
+app.post('/api/catalog-subscriptions/:id/preview', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        var sub = await pool.query('SELECT * FROM catalog_subscriptions WHERE id = $1', [req.params.id]);
+        if (sub.rows.length === 0) return res.json({ success: false, error: 'Subscription not found' });
+
+        var shareUrl = await generateCatalogShareUrl(sub.rows[0]);
+        res.json({ success: true, url: shareUrl });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Get send history
+app.get('/api/catalog-send-log', requireAuth, requireAdmin, async function(req, res) {
+    try {
+        var result = await pool.query(
+            'SELECT * FROM catalog_send_log ORDER BY sent_at DESC LIMIT 100'
+        );
+        res.json({ success: true, logs: result.rows });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Get available categories for the subscription form
+app.get('/api/catalog-categories', requireAuth, async function(req, res) {
+    try {
+        var result = await pool.query(
+            'SELECT DISTINCT category FROM products WHERE category IS NOT NULL AND category != \'\' ORDER BY category'
+        );
+        res.json({ success: true, categories: result.rows.map(function(r) { return r.category; }) });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
+
+// ============================================
+// CATALOG SHARING HELPER FUNCTIONS
+// ============================================
+
+// Generate a catalog share URL with filters baked in
+async function generateCatalogShareUrl(subscription) {
+    var query = 'SELECT p.id FROM products p LEFT JOIN product_colors pc ON p.id = pc.product_id WHERE 1=1';
+    var params = [];
+    var paramIdx = 1;
+
+    if (subscription.categories && subscription.categories.length > 0) {
+        query += ' AND p.category = ANY($' + paramIdx + ')';
+        params.push(subscription.categories);
+        paramIdx++;
+    }
+
+    if (subscription.min_quantity > 0) {
+        if (subscription.quantity_mode === 'left_to_sell') {
+            query += ' AND (COALESCE(pc.available_qty, 0) + COALESCE(pc.to_come, 0)) >= $' + paramIdx;
+        } else {
+            query += ' AND COALESCE(pc.available_qty, 0) >= $' + paramIdx;
+        }
+        params.push(subscription.min_quantity);
+        paramIdx++;
+    }
+
+    query += ' GROUP BY p.id';
+
+    var result = await pool.query(query, params);
+    var productIds = result.rows.map(function(r) { return r.id; });
+
+    var shareId = 'auto_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+    var selectionName = (subscription.company || 'Catalog') + ' - ' +
+                        (subscription.categories ? subscription.categories.join(', ') : 'All') +
+                        ' - ' + new Date().toLocaleDateString();
+
+    await pool.query(
+        'INSERT INTO selections (share_id, name, product_ids, created_by, share_type) VALUES ($1, $2, $3, $4, $5)',
+        [shareId, selectionName, productIds, 'auto-share', 'email']
+    );
+
+    var baseUrl = process.env.APP_URL || ('https://' + (process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:' + PORT));
+    return baseUrl + '/share/' + shareId;
+}
+
+// Send email via Resend (or placeholder for other providers)
+async function sendCatalogEmail(subscription, shareUrl) {
+    if (!process.env.RESEND_API_KEY) {
+        console.log('EMAIL WOULD SEND TO:', subscription.recipient_email);
+        console.log('SHARE URL:', shareUrl);
+        return { success: true, simulated: true };
+    }
+
+    try {
+        var emailBody = buildEmailBody(subscription, shareUrl);
+
+        var response = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + process.env.RESEND_API_KEY,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                from: process.env.EMAIL_FROM || 'Mark Edwards Apparel <catalog@markedwardsapparel.com>',
+                to: [subscription.recipient_email],
+                subject: 'Updated Product Catalog - ' + (subscription.company || 'Mark Edwards Apparel'),
+                html: emailBody
+            })
+        });
+
+        var result = await response.json();
+        return { success: response.ok, data: result };
+    } catch (err) {
+        console.error('Email send error:', err);
+        return { success: false, error: err.message };
+    }
+}
+
+// Build the HTML email body
+function buildEmailBody(subscription, shareUrl) {
+    var categories = subscription.categories ? subscription.categories.join(', ') : 'All Categories';
+    var customMsg = subscription.custom_message ? '<p style="font-size:16px;color:#333;margin-bottom:20px;">' + subscription.custom_message + '</p>' : '';
+
+    return '<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">' +
+        '<div style="background:#1a1a2e;color:white;padding:30px;text-align:center;border-radius:10px 10px 0 0;">' +
+            '<h1 style="margin:0;font-size:24px;">Mark Edwards Apparel</h1>' +
+            '<p style="margin:10px 0 0;opacity:0.8;">Product Catalog Update</p>' +
+        '</div>' +
+        '<div style="background:#f9f9f9;padding:30px;border:1px solid #ddd;">' +
+            (customMsg) +
+            '<p style="font-size:16px;color:#333;">Hi ' + subscription.recipient_name + ',</p>' +
+            '<p style="font-size:16px;color:#333;">Your updated product catalog is ready to view.</p>' +
+            '<div style="background:white;border:1px solid #e0e0e0;border-radius:8px;padding:20px;margin:20px 0;">' +
+                '<p style="margin:0 0 5px;color:#666;font-size:14px;"><strong>Categories:</strong> ' + categories + '</p>' +
+                '<p style="margin:0 0 5px;color:#666;font-size:14px;"><strong>View Mode:</strong> ' +
+                    (subscription.quantity_mode === 'left_to_sell' ? 'Left to Sell' : 'Available Now') + '</p>' +
+                (subscription.min_quantity > 0 ? '<p style="margin:0;color:#666;font-size:14px;"><strong>Min Qty:</strong> ' + subscription.min_quantity + '+ units</p>' : '') +
+            '</div>' +
+            '<div style="text-align:center;margin:30px 0;">' +
+                '<a href="' + shareUrl + '" style="background:#2196f3;color:white;text-decoration:none;padding:15px 40px;border-radius:8px;font-size:18px;font-weight:bold;">View Catalog →</a>' +
+            '</div>' +
+            '<p style="font-size:13px;color:#999;text-align:center;">This link shows live inventory data updated every 6 hours.</p>' +
+        '</div>' +
+        '<div style="text-align:center;padding:15px;color:#999;font-size:12px;">' +
+            '<p>Mark Edwards Apparel | Product Catalog</p>' +
+        '</div>' +
+    '</body></html>';
+}
+
+
+// ============================================
+// CRON: Scheduled Catalog Email Sender
+// ============================================
+function startCatalogEmailScheduler() {
+    console.log('Catalog email scheduler started');
+
+    setInterval(async function() {
+        try {
+            var now = new Date();
+            var currentDay = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'][now.getDay()];
+            var currentHour = now.getHours().toString().padStart(2, '0') + ':00';
+
+            var subs = await pool.query('SELECT * FROM catalog_subscriptions WHERE is_active = true');
+
+            for (var i = 0; i < subs.rows.length; i++) {
+                var sub = subs.rows[i];
+                var shouldSend = false;
+
+                if (sub.frequency === 'daily' && sub.send_time === currentHour) {
+                    shouldSend = true;
+                } else if (sub.frequency === 'weekly' && sub.send_day === currentDay && sub.send_time === currentHour) {
+                    shouldSend = true;
+                } else if (sub.frequency === 'biweekly' && sub.send_day === currentDay && sub.send_time === currentHour) {
+                    var lastLog = await pool.query(
+                        'SELECT sent_at FROM catalog_send_log WHERE subscription_id = $1 ORDER BY sent_at DESC LIMIT 1',
+                        [sub.id]
+                    );
+                    if (lastLog.rows.length === 0 || (now - new Date(lastLog.rows[0].sent_at)) >= 13 * 24 * 60 * 60 * 1000) {
+                        shouldSend = true;
+                    }
+                } else if (sub.frequency === 'monthly' && now.getDate() === 1 && sub.send_time === currentHour) {
+                    shouldSend = true;
+                }
+
+                if (shouldSend) {
+                    console.log('Sending scheduled catalog email to:', sub.recipient_email);
+                    var shareUrl = await generateCatalogShareUrl(sub);
+                    var emailResult = await sendCatalogEmail(sub, shareUrl);
+
+                    await pool.query(
+                        'INSERT INTO catalog_send_log (subscription_id, recipient_email, recipient_name, company, categories, share_url, status) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+                        [sub.id, sub.recipient_email, sub.recipient_name, sub.company, sub.categories, shareUrl, emailResult.success ? 'sent' : 'failed']
+                    );
+                }
+            }
+        } catch (err) {
+            console.error('Catalog scheduler error:', err);
+        }
+    }, 30 * 60 * 1000);
+}
+
+
 // Catch-all routes - MUST BE LAST
 app.get('/', function(req, res) { res.send(getHTML()); });
 app.get('*', function(req, res) { res.send(getHTML()); });
@@ -4083,7 +4403,7 @@ function getHTML() {
     html += '<div id="historyTab" class="tab-content"><table><thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Records</th><th>Error</th></tr></thead><tbody id="historyTable"></tbody></table></div></div>';
     
     // Admin panel (admin only)
-    html += '<div id="adminPanel" class="admin-panel hidden"><h2>Admin Settings</h2><div class="tabs"><button class="tab active" data-tab="zoho2">Zoho Sync</button><button class="tab" data-tab="import2">Import CSV</button><button class="tab" data-tab="sales2">Import Sales</button><button class="tab" data-tab="autoimport2">Auto Import</button><button class="tab" data-tab="ai2">AI Analysis</button><button class="tab" data-tab="cache2">Image Cache</button><button class="tab" data-tab="users2">Users</button><button class="tab" data-tab="system2">System Health</button><button class="tab" data-tab="merch2">Merchandising</button></div>';
+    html += '<div id="adminPanel" class="admin-panel hidden"><h2>Admin Settings</h2><div class="tabs"><button class="tab active" data-tab="zoho2">Zoho Sync</button><button class="tab" data-tab="import2">Import CSV</button><button class="tab" data-tab="sales2">Import Sales</button><button class="tab" data-tab="autoimport2">Auto Import</button><button class="tab" data-tab="ai2">AI Analysis</button><button class="tab" data-tab="cache2">Image Cache</button><button class="tab" data-tab="users2">Users</button><button class="tab" data-tab="system2">System Health</button><button class="tab" data-tab="merch2">Merchandising</button><button class="tab" data-tab="catalogShare2">📧 Catalog Sharing</button></div>';
     html += '<div id="zoho2Tab" class="tab-content active"><div class="status-box"><div class="status-item"><span class="status-label">Status: </span><span class="status-value" id="zohoStatusText">Checking...</span></div><div class="status-item"><span class="status-label">Workspace ID: </span><span class="status-value" id="zohoWorkspaceId">-</span></div><div class="status-item"><span class="status-label">View ID: </span><span class="status-value" id="zohoViewId">-</span></div></div><div style="display:flex;gap:1rem"><button class="btn btn-secondary" id="testZohoBtn">Test Connection</button><button class="btn btn-success" id="syncZohoBtn">Sync Now</button></div><div id="zohoMessage" style="margin-top:1rem"></div></div>';
     html += '<div id="import2Tab" class="tab-content"><div class="upload-area"><input type="file" id="csvFile" accept=".csv"><label for="csvFile">Click to upload CSV file</label></div><div id="importStatus"></div><button class="btn btn-danger" id="clearBtn" style="margin-top:1rem">Clear All Products</button></div>';
     html += '<div id="sales2Tab" class="tab-content"><p style="margin-bottom:1rem;color:#666">Import sales data (Sales Orders and Purchase Orders) from the PO-SO Query CSV export.</p><div class="upload-area"><input type="file" id="salesCsvFile" accept=".csv"><label for="salesCsvFile">Click to upload Sales CSV file</label></div><div id="salesImportStatus"></div><div id="salesDataStats" style="margin-top:1rem"></div><button class="btn btn-danger" id="clearSalesBtn" style="margin-top:1rem">Clear All Sales Data</button><p style="margin-top:0.5rem;font-size:0.75rem;color:#999">Use this to start fresh before uploading historical files.</p></div>';
@@ -4106,8 +4426,53 @@ function getHTML() {
     html += '<div class="merch-section scorecard-section"><h3>🎯 Customer Assortment Scorecard</h3>';
     html += '<div class="scorecard-customer-select"><label>Select Customer:</label><select id="scorecardCustomer"><option value="">-- Choose a customer --</option></select></div>';
     html += '<div id="scorecardContent"><div class="scorecard-empty">Select a customer to view their assortment metrics</div></div></div>';
-    html += '</div></div>';
-    
+    html += '</div>';
+
+    // Catalog Sharing tab content
+    html += '<div id="catalogShare2Tab" class="tab-content">';
+    html += '<h3 style="margin-top:0;color:#1e3a5f">📧 Automated Catalog Sharing</h3>';
+    html += '<p style="color:#86868b;margin-bottom:20px;font-size:0.875rem">Set up automatic catalog emails to your buyers. They receive a link to a live, filtered view of your inventory.</p>';
+
+    // Add New Subscription Form
+    html += '<div style="background:#f5f5f7;border:1px solid #e5e5e7;border-radius:12px;padding:20px;margin-bottom:25px;">';
+    html += '<h4 style="margin-top:0;color:#0088c2;font-size:1rem">➕ Add New Recipient</h4>';
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:15px;margin-bottom:15px;">';
+    html += '<div><label style="display:block;color:#86868b;margin-bottom:5px;font-size:13px;">Recipient Name *</label><input type="text" id="subRecipientName" placeholder="Joe Smith" style="width:100%;padding:10px;border-radius:8px;border:1px solid #d2d2d7;background:white;color:#1e3a5f;box-sizing:border-box;font-size:0.875rem"></div>';
+    html += '<div><label style="display:block;color:#86868b;margin-bottom:5px;font-size:13px;">Email Address *</label><input type="email" id="subRecipientEmail" placeholder="joe@burlington.com" style="width:100%;padding:10px;border-radius:8px;border:1px solid #d2d2d7;background:white;color:#1e3a5f;box-sizing:border-box;font-size:0.875rem"></div>';
+    html += '<div><label style="display:block;color:#86868b;margin-bottom:5px;font-size:13px;">Company</label><input type="text" id="subCompany" placeholder="Burlington" style="width:100%;padding:10px;border-radius:8px;border:1px solid #d2d2d7;background:white;color:#1e3a5f;box-sizing:border-box;font-size:0.875rem"></div>';
+    html += '</div>';
+
+    html += '<div style="margin-bottom:15px;"><label style="display:block;color:#86868b;margin-bottom:5px;font-size:13px;">Categories (click to select)</label><div id="subCategoryPills" style="display:flex;flex-wrap:wrap;gap:8px;"></div></div>';
+
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:15px;margin-bottom:15px;">';
+    html += '<div><label style="display:block;color:#86868b;margin-bottom:5px;font-size:13px;">Frequency</label><select id="subFrequency" style="width:100%;padding:10px;border-radius:8px;border:1px solid #d2d2d7;background:white;color:#1e3a5f;font-size:0.875rem"><option value="daily">Daily</option><option value="weekly" selected>Weekly</option><option value="biweekly">Every 2 Weeks</option><option value="monthly">Monthly</option></select></div>';
+    html += '<div><label style="display:block;color:#86868b;margin-bottom:5px;font-size:13px;">Send Day</label><select id="subSendDay" style="width:100%;padding:10px;border-radius:8px;border:1px solid #d2d2d7;background:white;color:#1e3a5f;font-size:0.875rem"><option value="monday" selected>Monday</option><option value="tuesday">Tuesday</option><option value="wednesday">Wednesday</option><option value="thursday">Thursday</option><option value="friday">Friday</option><option value="saturday">Saturday</option><option value="sunday">Sunday</option></select></div>';
+    html += '<div><label style="display:block;color:#86868b;margin-bottom:5px;font-size:13px;">Send Time</label><select id="subSendTime" style="width:100%;padding:10px;border-radius:8px;border:1px solid #d2d2d7;background:white;color:#1e3a5f;font-size:0.875rem"><option value="06:00">6:00 AM</option><option value="07:00">7:00 AM</option><option value="08:00" selected>8:00 AM</option><option value="09:00">9:00 AM</option><option value="10:00">10:00 AM</option><option value="11:00">11:00 AM</option><option value="12:00">12:00 PM</option><option value="13:00">1:00 PM</option><option value="14:00">2:00 PM</option><option value="15:00">3:00 PM</option><option value="16:00">4:00 PM</option><option value="17:00">5:00 PM</option></select></div>';
+    html += '<div><label style="display:block;color:#86868b;margin-bottom:5px;font-size:13px;">Quantity View</label><select id="subQuantityMode" style="width:100%;padding:10px;border-radius:8px;border:1px solid #d2d2d7;background:white;color:#1e3a5f;font-size:0.875rem"><option value="available_now">Available Now</option><option value="left_to_sell">Left to Sell</option></select></div>';
+    html += '</div>';
+
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:15px;margin-bottom:15px;">';
+    html += '<div><label style="display:block;color:#86868b;margin-bottom:5px;font-size:13px;">Min Quantity</label><input type="number" id="subMinQty" value="0" min="0" style="width:100%;padding:10px;border-radius:8px;border:1px solid #d2d2d7;background:white;color:#1e3a5f;box-sizing:border-box;font-size:0.875rem"></div>';
+    html += '<div style="display:flex;align-items:center;padding-top:20px;"><label style="color:#86868b;font-size:13px;cursor:pointer;"><input type="checkbox" id="subShowPricing" checked style="margin-right:8px;"> Show Pricing</label></div>';
+    html += '<div style="display:flex;align-items:center;padding-top:20px;"><label style="color:#86868b;font-size:13px;cursor:pointer;"><input type="checkbox" id="subShowImages" checked style="margin-right:8px;"> Include Images</label></div>';
+    html += '</div>';
+
+    html += '<div style="margin-bottom:15px;"><label style="display:block;color:#86868b;margin-bottom:5px;font-size:13px;">Custom Message (optional - included in email)</label><textarea id="subCustomMessage" rows="2" placeholder="Hi Joe, here&#39;s your updated catalog for this week..." style="width:100%;padding:10px;border-radius:8px;border:1px solid #d2d2d7;background:white;color:#1e3a5f;resize:vertical;box-sizing:border-box;font-family:inherit;font-size:0.875rem"></textarea></div>';
+
+    html += '<button onclick="createSubscription()" class="btn btn-primary" style="font-size:15px;padding:12px 30px;">✅ Add Subscription</button>';
+    html += '</div>';
+
+    // Active Subscriptions List
+    html += '<h4 style="color:#0088c2;font-size:1rem">📋 Active Subscriptions</h4>';
+    html += '<div id="subscriptionsList" style="margin-bottom:25px;"><p style="color:#86868b;">Loading...</p></div>';
+
+    // Send History
+    html += '<h4 style="color:#0088c2;margin-top:30px;font-size:1rem">📜 Send History</h4>';
+    html += '<div id="sendHistoryList"><p style="color:#86868b;">Loading...</p></div>';
+    html += '</div>';
+
+    html += '</div>';
+
     html += '<div class="stats"><div><div class="stat-value" id="totalStyles">0</div><div class="stat-label">Styles</div></div><div id="availNowStat" class="stat-box"><div class="stat-value" id="totalAvailNow">0</div><div class="stat-label">Avail Now</div></div><div id="leftToSellStat" class="stat-box stat-active"><div class="stat-value" id="totalLeftToSell">0</div><div class="stat-label">Left to Sell</div></div>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div id="availToSellStat" class="stat-box" style="display:none"><div class="stat-value" id="totalAvailToSell" style="color:#1e3a5f">0</div><div class="stat-label">Avail to Sell</div></div><div id="oversoldStat" class="stat-box" style="display:none"><div class="stat-value" id="totalOversold" style="color:#ff3b30">0</div><div class="stat-label">Oversold</div></div>' : '') + '<div class="qty-toggle"><button class="qty-toggle-btn" id="toggleAvailableNow" data-mode="available_now">Available Now</button><button class="qty-toggle-btn active" id="toggleLeftToSell" data-mode="left_to_sell">Left to Sell</button>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<div style="display:flex;align-items:center;gap:0.5rem;margin-left:1rem;padding-left:1rem;border-left:1px solid #ddd"><input type="checkbox" id="supplyDemandToggle" style="cursor:pointer"><label for="supplyDemandToggle" style="cursor:pointer;font-size:0.75rem;white-space:nowrap">Supply vs Demand</label></div>' : '') + '</div><div style="margin-left:auto;text-align:right;font-size:0.7rem;color:#999"><span id="dataFreshness">Loading...</span></div></div>';
     html += '<div class="view-controls"><div class="search-box" style="display:flex;align-items:center;gap:0.5rem;margin-right:1.5rem;position:relative"><input type="text" id="searchInput" placeholder="Search products..." style="padding:0.5rem 0.75rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;width:200px"><button id="clearSearchBtn" style="padding:0.4rem 0.6rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.75rem">Clear</button><span id="aiSearchIndicator" class="hidden" style="position:absolute;top:100%;left:0;font-size:0.65rem;color:#0088c2;white-space:nowrap">AI-enhanced search</span></div><label>View:</label><button class="size-btn" data-size="list">List</button><button class="size-btn" data-size="small">Small</button><button class="size-btn active" data-size="medium">Medium</button><button class="size-btn" data-size="large">Large</button><div class="feature-toggle active-indicator" id="groupByStyleWrapper"><input type="checkbox" id="groupByStyleToggle" checked><label for="groupByStyleToggle">Group by Style</label></div><label style="margin-left:1.5rem">Sort:</label><select id="sortSelect" style="padding:0.5rem 0.75rem;border:2px solid #1e3a5f;border-radius:8px;font-size:0.8125rem;background:#1e3a5f;color:white;font-weight:500;cursor:pointer"><option value="name-asc">Name A-Z</option><option value="name-desc">Name Z-A</option><option value="qty-high" selected>Qty High-Low</option><option value="qty-low">Qty Low-High</option><option value="newest">Newest First</option></select><div class="qty-filter-group" style="margin-left:1.5rem"><label>Qty:</label><input type="number" id="minQty" placeholder="Min"><span>-</span><input type="number" id="maxQty" placeholder="Max"><button id="resetQtyBtn" style="padding:0.4rem 0.75rem;border:1px solid #ddd;background:#f5f5f5;border-radius:4px;cursor:pointer;font-size:0.75rem">Reset</button></div><span style="margin-left:auto"></span><button class="select-mode-btn" id="selectModeBtn">Select for Sharing</button></div>';
     html += '<div class="filters"><button class="filter-btn special" data-special="new">New Arrivals</button><button class="filter-btn special" data-special="picks">My Picks</button><button class="filter-btn special" data-special="notes">Has Notes</button>' + (SUPPLY_DEMAND_FEATURE_ENABLED ? '<button class="filter-btn special" data-special="oversold" style="background:#fff0f0;border-color:#ff3b30;color:#ff3b30">Oversold</button>' : '') + '<button id="resetAllFiltersBtn" style="padding:0.5rem 1rem;border:1px solid #86868b;background:#f5f5f7;color:#1e3a5f;border-radius:980px;cursor:pointer;font-weight:600;font-size:0.8125rem;margin-left:1rem">✕ Clear All Filters</button><div class="filter-summary-badge" id="filterSummaryBadge" onclick="openFilterPanel()"><span>📋 View Active</span><span class="filter-count-badge" id="filterCountBadge">0</span></div><span class="filter-divider"></span><div style="display:inline-flex;position:relative;align-items:center;margin-right:0.5rem"><button class="filter-btn" id="colorFilterBtn" style="font-weight:500">Color: All ▼</button><button class="filter-btn hidden" id="clearColorBtn" style="margin-left:0.25rem;padding:0.4rem 0.625rem">✕</button><div id="colorDropdown" class="color-dropdown hidden"></div></div><div style="display:inline-flex;position:relative;align-items:center;margin-right:0.5rem"><button class="filter-btn" id="customerFilterBtn" style="font-weight:500">Customer: All ▼</button><button class="filter-btn hidden" id="clearCustomerBtn" style="margin-left:0.25rem;padding:0.4rem 0.625rem">✕</button><div id="customerDropdown" class="multi-dropdown hidden"><div class="multi-dropdown-header"><input type="text" id="customerSearch" placeholder="Search customers..." style="width:100%;padding:0.5rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;margin-bottom:0.5rem"><div style="display:flex;gap:0.5rem"><button id="applyCustomerFilter" class="btn btn-primary btn-sm">Apply</button><button id="clearCustomerFilter" class="btn btn-secondary btn-sm">Clear</button></div></div><div id="customerList" class="multi-dropdown-list"></div></div></div><div style="display:inline-flex;position:relative;align-items:center;margin-right:0.5rem"><button class="filter-btn" id="supplierFilterBtn" style="font-weight:500">Supplier: All ▼</button><button class="filter-btn hidden" id="clearSupplierBtn" style="margin-left:0.25rem;padding:0.4rem 0.625rem">✕</button><div id="supplierDropdown" class="multi-dropdown hidden"><div class="multi-dropdown-header"><input type="text" id="supplierSearch" placeholder="Search suppliers..." style="width:100%;padding:0.5rem;border:1px solid #ddd;border-radius:6px;font-size:0.875rem;margin-bottom:0.5rem"><div style="display:flex;gap:0.5rem"><button id="applySupplierFilter" class="btn btn-primary btn-sm">Apply</button><button id="clearSupplierFilter" class="btn btn-secondary btn-sm">Clear</button></div></div><div id="supplierList" class="multi-dropdown-list"></div></div></div><span class="filter-divider"></span><span id="categoryFilters"></span></div>';
@@ -4270,7 +4635,7 @@ function getHTML() {
 
     html += 'function clearTreemapFilter(){treemapFilters=[];if(treemapMode==="commodity"){selectedCategories=[];document.querySelectorAll("[data-cat]").forEach(function(btn){btn.classList.remove("active")});var allBtn=document.querySelector("[data-cat=\\"all\\"]");if(allBtn)allBtn.classList.add("active")}else{colorFilter=null;document.getElementById("colorFilterBtn").textContent="Color: All ▼";document.getElementById("clearColorBtn").classList.add("hidden")}document.getElementById("treemapClearFilter").classList.add("hidden");renderProducts()}';
 
-    html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var panel=e.target.closest(".admin-panel");panel.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});panel.querySelectorAll(".tab-content").forEach(function(c){c.classList.remove("active")});e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active");if(e.target.getAttribute("data-tab")==="cache2")loadCacheStatus();if(e.target.getAttribute("data-tab")==="autoimport2"){loadAutoImportStatus();loadExportJobs()}if(e.target.getAttribute("data-tab")==="merch2")loadMerchandisingTab()})}';
+    html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var panel=e.target.closest(".admin-panel");panel.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});panel.querySelectorAll(".tab-content").forEach(function(c){c.classList.remove("active")});e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active");if(e.target.getAttribute("data-tab")==="cache2")loadCacheStatus();if(e.target.getAttribute("data-tab")==="autoimport2"){loadAutoImportStatus();loadExportJobs()}if(e.target.getAttribute("data-tab")==="merch2")loadMerchandisingTab();if(e.target.getAttribute("data-tab")==="catalogShare2")loadCatalogSharingPanel()})}';
     
     html += 'var sizeBtns=document.querySelectorAll(".size-btn");sizeBtns.forEach(function(btn){btn.addEventListener("click",function(e){sizeBtns.forEach(function(b){b.classList.remove("active")});e.target.classList.add("active");currentSize=e.target.getAttribute("data-size");document.getElementById("productGrid").className="product-grid size-"+currentSize;renderProducts()})});';
     
@@ -4497,7 +4862,32 @@ function getHTML() {
     html += 'function updateFocus(cards){cards.forEach(function(c,i){c.classList.toggle("focused",i===focusedIndex)});if(focusedIndex>=0&&cards[focusedIndex]){cards[focusedIndex].scrollIntoView({block:"nearest",behavior:"smooth"})}}';
     
     // Compact header scroll handler removed
-    
+
+    // ============================================
+    // CATALOG SHARING FUNCTIONS
+    // ============================================
+    html += 'var selectedSubCategories=[];';
+
+    html += 'async function loadCatalogSharingPanel(){try{var res=await fetch("/api/catalog-categories");var data=await res.json();if(data.success){var container=document.getElementById("subCategoryPills");var h=\'<div class="sub-cat-pill active" data-cat="all" onclick="toggleSubCategory(this,\\\'all\\\')" style="padding:6px 14px;border-radius:20px;cursor:pointer;font-size:13px;border:1px solid #0088c2;background:#0088c2;color:white;font-weight:600;">All Categories</div>\';data.categories.forEach(function(cat){h+=\'<div class="sub-cat-pill" data-cat="\'+cat+\'" onclick="toggleSubCategory(this,\\\'\'+cat+\'\\\')" style="padding:6px 14px;border-radius:20px;cursor:pointer;font-size:13px;border:1px solid #d2d2d7;background:transparent;color:#6e6e73;">\'+cat+\'</div>\'});container.innerHTML=h}}catch(err){console.error("Error loading categories:",err)}loadSubscriptions();loadSendHistory()}';
+
+    html += 'function toggleSubCategory(el,category){if(category==="all"){selectedSubCategories=[];document.querySelectorAll(".sub-cat-pill").forEach(function(p){p.style.background="transparent";p.style.color="#6e6e73";p.style.borderColor="#d2d2d7"});el.style.background="#0088c2";el.style.color="white";el.style.borderColor="#0088c2";return}var allPill=document.querySelector(\'.sub-cat-pill[data-cat="all"]\');allPill.style.background="transparent";allPill.style.color="#6e6e73";allPill.style.borderColor="#d2d2d7";var idx=selectedSubCategories.indexOf(category);if(idx>-1){selectedSubCategories.splice(idx,1);el.style.background="transparent";el.style.color="#6e6e73";el.style.borderColor="#d2d2d7"}else{selectedSubCategories.push(category);el.style.background="#0088c2";el.style.color="white";el.style.borderColor="#0088c2"}if(selectedSubCategories.length===0){allPill.style.background="#0088c2";allPill.style.color="white";allPill.style.borderColor="#0088c2"}}';
+
+    html += 'async function createSubscription(){var name=document.getElementById("subRecipientName").value.trim();var email=document.getElementById("subRecipientEmail").value.trim();var company=document.getElementById("subCompany").value.trim();if(!name||!email){alert("Please enter recipient name and email");return}var body={recipient_name:name,recipient_email:email,company:company,categories:selectedSubCategories.length>0?selectedSubCategories:null,frequency:document.getElementById("subFrequency").value,send_day:document.getElementById("subSendDay").value,send_time:document.getElementById("subSendTime").value,quantity_mode:document.getElementById("subQuantityMode").value,min_quantity:parseInt(document.getElementById("subMinQty").value)||0,show_pricing:document.getElementById("subShowPricing").checked,show_images:document.getElementById("subShowImages").checked,custom_message:document.getElementById("subCustomMessage").value.trim()};try{var res=await fetch("/api/catalog-subscriptions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});var data=await res.json();if(data.success){document.getElementById("subRecipientName").value="";document.getElementById("subRecipientEmail").value="";document.getElementById("subCompany").value="";document.getElementById("subCustomMessage").value="";document.getElementById("subMinQty").value="0";selectedSubCategories=[];loadCatalogSharingPanel();alert("Subscription created!")}else{alert("Error: "+data.error)}}catch(err){alert("Error: "+err.message)}}';
+
+    html += 'function formatTime(timeStr){if(!timeStr)return"";var parts=timeStr.split(":");var hour=parseInt(parts[0]);var ampm=hour>=12?"PM":"AM";if(hour>12)hour-=12;if(hour===0)hour=12;return hour+":"+(parts[1]||"00")+" "+ampm}';
+
+    html += 'async function loadSubscriptions(){try{var res=await fetch("/api/catalog-subscriptions");var data=await res.json();if(!data.success)return;var container=document.getElementById("subscriptionsList");if(data.subscriptions.length===0){container.innerHTML=\'<p style="color:#86868b;font-style:italic;">No subscriptions yet. Add one above!</p>\';return}var h="";data.subscriptions.forEach(function(sub){var cats=sub.categories?sub.categories.join(", "):"All Categories";var statusColor=sub.is_active?"#34c759":"#ff3b30";var statusText=sub.is_active?"Active":"Paused";var lastSent=sub.last_sent?new Date(sub.last_sent).toLocaleString():"Never";var freqText=sub.frequency.charAt(0).toUpperCase()+sub.frequency.slice(1);if(sub.frequency!=="daily"&&sub.frequency!=="monthly"){freqText+=" ("+sub.send_day.charAt(0).toUpperCase()+sub.send_day.slice(1)+")"}freqText+=" at "+formatTime(sub.send_time);h+=\'<div style="background:#f5f5f7;border:1px solid #e5e5e7;border-radius:12px;padding:18px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">\'+\'<div style="flex:1;">\'+\'<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">\'+\'<strong style="font-size:16px;color:#1e3a5f;">\'+sub.recipient_name+\'</strong>\'+\'<span style="color:#86868b;font-size:14px;">\'+sub.recipient_email+\'</span>\'+(sub.company?\'<span style="background:#e8f4f8;padding:2px 10px;border-radius:10px;font-size:12px;color:#0088c2;">\'+sub.company+\'</span>\':"")+\'<span style="background:\'+statusColor+\'22;color:\'+statusColor+\';padding:2px 10px;border-radius:10px;font-size:12px;font-weight:bold;">\'+statusText+\'</span>\'+\'</div>\'+\'<div style="color:#86868b;font-size:13px;">\'+\'📂 \'+cats+\' &nbsp;|&nbsp; 🔄 \'+freqText+\' &nbsp;|&nbsp; 📊 \'+(sub.quantity_mode==="left_to_sell"?"Left to Sell":"Available Now")+(sub.min_quantity>0?" (min "+sub.min_quantity+")":"")+" &nbsp;|&nbsp; 📧 "+sub.total_sent+" sent &nbsp;|&nbsp; Last: "+lastSent+\'</div>\'+\'</div>\'+\'<div style="display:flex;gap:8px;flex-shrink:0;">\'+\'<button onclick="previewSubscription(\'+sub.id+\')" class="btn btn-secondary" style="padding:8px 14px;font-size:12px;" title="Preview link">👁 Preview</button>\'+\'<button onclick="sendNow(\'+sub.id+\')" style="background:#ff9500;color:white;border:none;padding:8px 14px;border-radius:980px;cursor:pointer;font-size:12px;" title="Send immediately">📤 Send Now</button>\'+\'<button onclick="toggleSubscription(\'+sub.id+\')" class="btn btn-secondary" style="padding:8px 14px;font-size:12px;" title="Pause/Resume">\'+(sub.is_active?"⏸ Pause":"▶ Resume")+\'</button>\'+\'<button onclick="deleteSubscription(\'+sub.id+\')" class="btn btn-danger" style="padding:8px 14px;font-size:12px;" title="Delete">🗑</button>\'+\'</div>\'+\'</div>\'});container.innerHTML=h}catch(err){console.error("Error loading subscriptions:",err);document.getElementById("subscriptionsList").innerHTML=\'<p style="color:#ff3b30;">Error loading subscriptions</p>\'}}';
+
+    html += 'async function loadSendHistory(){try{var res=await fetch("/api/catalog-send-log");var data=await res.json();if(!data.success)return;var container=document.getElementById("sendHistoryList");if(data.logs.length===0){container.innerHTML=\'<p style="color:#86868b;font-style:italic;">No emails sent yet.</p>\';return}var h=\'<table style="width:100%;border-collapse:collapse;font-size:13px;"><tr style="border-bottom:1px solid #e5e5e7;"><th style="text-align:left;padding:8px;color:#86868b;">Date</th><th style="text-align:left;padding:8px;color:#86868b;">Recipient</th><th style="text-align:left;padding:8px;color:#86868b;">Company</th><th style="text-align:left;padding:8px;color:#86868b;">Categories</th><th style="text-align:left;padding:8px;color:#86868b;">Status</th><th style="text-align:left;padding:8px;color:#86868b;">Link</th></tr>\';data.logs.forEach(function(log){var statusColor=log.status==="sent"?"#34c759":"#ff3b30";h+=\'<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:8px;">\'+new Date(log.sent_at).toLocaleString()+\'</td><td style="padding:8px;">\'+log.recipient_name+\'<br><span style="color:#86868b;font-size:12px;">\'+log.recipient_email+\'</span></td><td style="padding:8px;">\'+(log.company||"-")+\'</td><td style="padding:8px;">\'+(log.categories?log.categories.join(", "):"All")+\'</td><td style="padding:8px;"><span style="color:\'+statusColor+\';">\'+log.status+\'</span></td><td style="padding:8px;"><a href="\'+log.share_url+\'" target="_blank" style="color:#0088c2;">View →</a></td></tr>\'});h+="</table>";container.innerHTML=h}catch(err){console.error("Error loading send history:",err)}}';
+
+    html += 'async function previewSubscription(id){try{var res=await fetch("/api/catalog-subscriptions/"+id+"/preview",{method:"POST"});var data=await res.json();if(data.success){window.open(data.url,"_blank")}else{alert("Error: "+data.error)}}catch(err){alert("Error: "+err.message)}}';
+
+    html += 'async function sendNow(id){if(!confirm("Send catalog email now?"))return;try{var res=await fetch("/api/catalog-subscriptions/"+id+"/send-now",{method:"POST"});var data=await res.json();if(data.success){alert(data.message);loadSubscriptions();loadSendHistory()}else{alert("Error: "+data.error)}}catch(err){alert("Error: "+err.message)}}';
+
+    html += 'async function toggleSubscription(id){try{var res=await fetch("/api/catalog-subscriptions/"+id+"/toggle",{method:"POST"});var data=await res.json();if(data.success){loadSubscriptions()}}catch(err){alert("Error: "+err.message)}}';
+
+    html += 'async function deleteSubscription(id){if(!confirm("Delete this subscription? This cannot be undone."))return;try{var res=await fetch("/api/catalog-subscriptions/"+id,{method:"DELETE"});var data=await res.json();if(data.success){loadSubscriptions();loadSendHistory()}}catch(err){alert("Error: "+err.message)}}';
+
     html += 'checkSession();fetchOpenOrders();';
     html += '</script></body></html>';
     return html;
@@ -4584,6 +4974,7 @@ initDB().then(function() {
     setTimeout(function() { startTokenRefreshJob(); }, 5000);
     setTimeout(function() { startSalesHistoryCacheJob(); }, 10000);
     setTimeout(function() { startWorkDriveImportJob(); }, 15000);
+    setTimeout(function() { startCatalogEmailScheduler(); }, 20000);
 
     // Schedule daily export trigger at 2am EST
     // Cron: minute hour day month weekday

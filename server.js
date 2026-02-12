@@ -4710,6 +4710,9 @@ function getHTML() {
     
     html += '</div></div></div>';
     
+    // Order Request overlay
+    html += '<div class="order-request-overlay" id="orOverlay" onclick="closeOrOverlay(event)"><div class="order-request-box" id="orBox"></div></div>';
+
     html += '<script>';
     html += 'var products=[];var allProducts=[];var groupedProducts=[];var lastImportId=null;var selectedCategories=[];var colorFilter=null;var specialFilter=null;var currentSort="qty-high";var currentSize="medium";var selectedProducts=[];var selectionMode=false;var currentShareId=null;var userPicks=[];var userNotes={};var currentModalProductId=null;var currentModalBaseStyle=null;var focusedIndex=-1;var qtyMode="left_to_sell";var groupByStyle=true;var minColorsFilter=0;var supplyDemandMode=false;var openOrdersByStyle={};var importPOsByStyle={};';
     
@@ -5066,9 +5069,7 @@ function getHTML() {
     html += 'async function deleteSubscription(id){if(!confirm("Delete this subscription? This cannot be undone."))return;try{var res=await fetch("/api/catalog-subscriptions/"+id,{method:"DELETE"});var data=await res.json();if(data.success){loadSubscriptions();loadSendHistory()}}catch(err){alert("Error: "+err.message)}}';
 
 
-    // ORDER REQUEST SYSTEM - overlay + functions
-    html += '<div class="order-request-overlay" id="orOverlay" onclick="closeOrOverlay(event)"><div class="order-request-box" id="orBox"></div></div>';
-
+    // ORDER REQUEST SYSTEM - functions
     html += 'var orCustomersLoaded=false;var orCustomerList=[];';
     html += 'function closeOrOverlay(e){if(e.target.id==="orOverlay")e.target.classList.remove("active")}';
     html += 'var orSizePresets={Alpha:["XS","S","M","L","XL","2XL","3XL"],Numeric:["0","2","4","6","8","10","12","14"],Waist:["28","29","30","31","32","33","34","36","38","40"],OneSize:["OS"]};';

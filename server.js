@@ -192,6 +192,13 @@ async function initDB() {
         // Log of every catalog email sent
         await pool.query('CREATE TABLE IF NOT EXISTS catalog_send_log (id SERIAL PRIMARY KEY, subscription_id INTEGER REFERENCES catalog_subscriptions(id) ON DELETE SET NULL, recipient_email VARCHAR(255) NOT NULL, recipient_name VARCHAR(255), company VARCHAR(255), categories TEXT[], share_url TEXT, status VARCHAR(50) DEFAULT \'sent\', opened_at TIMESTAMP, clicked_at TIMESTAMP, error_message TEXT, sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
 
+        // Order Requests system
+        await pool.query('CREATE TABLE IF NOT EXISTS order_requests (id SERIAL PRIMARY KEY, request_number VARCHAR(20) UNIQUE NOT NULL, user_id INTEGER, user_name VARCHAR(255), customer_name VARCHAR(255) NOT NULL, style_id VARCHAR(100), base_style VARCHAR(100), product_name VARCHAR(255), color_info VARCHAR(255), size_breakdown TEXT NOT NULL, total_qty INTEGER DEFAULT 0, notes TEXT, status VARCHAR(50) DEFAULT \'pending\', zoho_so_number VARCHAR(100), admin_notes TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
+        try { await pool.query('ALTER TABLE order_requests ADD COLUMN IF NOT EXISTS color_info VARCHAR(255)'); } catch(e) {}
+        try { await pool.query('ALTER TABLE order_requests ADD COLUMN IF NOT EXISTS admin_notes TEXT'); } catch(e) {}
+        try { await pool.query('CREATE INDEX IF NOT EXISTS idx_order_requests_status ON order_requests(status)'); } catch(e) {}
+        try { await pool.query('CREATE INDEX IF NOT EXISTS idx_order_requests_user ON order_requests(user_id)'); } catch(e) {}
+
         // Migrate existing users: set PIN if not set, set display_name from username
         await pool.query("UPDATE users SET pin = LPAD(FLOOR(RANDOM() * 10000)::TEXT, 4, '0') WHERE pin IS NULL");
         await pool.query("UPDATE users SET display_name = username WHERE display_name IS NULL");
@@ -1951,6 +1958,151 @@ app.get('/api/suppliers', async function(req, res) {
         res.status(500).json({ success: false, error: err.message });
     }
 });
+
+
+// ============================================
+// ORDER REQUESTS API
+// ============================================
+
+async function getNextRequestNumber() {
+    var result = await pool.query("SELECT request_number FROM order_requests ORDER BY id DESC LIMIT 1");
+    if (result.rows.length === 0) return 'OR-0001';
+    var last = result.rows[0].request_number;
+    var num = parseInt(last.replace('OR-', '')) + 1;
+    return 'OR-' + num.toString().padStart(4, '0');
+}
+
+async function sendOrderRequestEmail(orderRequest) {
+    if (!process.env.RESEND_API_KEY) {
+        console.log('ORDER EMAIL WOULD SEND:', orderRequest.request_number);
+        return { success: true, simulated: true };
+    }
+    var notifyEmail = process.env.ORDER_NOTIFY_EMAIL;
+    if (!notifyEmail) {
+        console.log('ORDER_NOTIFY_EMAIL not configured');
+        return { success: false, error: 'not configured' };
+    }
+    try {
+        var sizeStr = '';
+        try {
+            var sizes = JSON.parse(orderRequest.size_breakdown);
+            if (Array.isArray(sizes)) {
+                sizeStr = sizes.map(function(s) { return s.size + ': ' + s.qty; }).join(', ');
+            } else {
+                sizeStr = Object.keys(sizes).map(function(k) { return k + ': ' + sizes[k]; }).join(', ');
+            }
+        } catch(e) { sizeStr = orderRequest.size_breakdown; }
+
+        var emailHtml = '<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">' +
+            '<div style="background:#1a1a2e;color:white;padding:30px;text-align:center;border-radius:10px 10px 0 0;">' +
+            '<h1 style="margin:0;font-size:24px;">New Order Request</h1>' +
+            '<p style="margin:10px 0 0;opacity:0.8;">' + orderRequest.request_number + '</p></div>' +
+            '<div style="background:#f9f9f9;padding:30px;border:1px solid #ddd;">' +
+            '<table style="width:100%;border-collapse:collapse;font-size:15px;">' +
+            '<tr><td style="padding:10px 0;color:#666;font-weight:bold;width:140px">Sales Rep:</td><td>' + (orderRequest.user_name || 'Unknown') + '</td></tr>' +
+            '<tr><td style="padding:10px 0;color:#666;font-weight:bold">Customer:</td><td style="font-weight:bold;font-size:17px">' + orderRequest.customer_name + '</td></tr>' +
+            '<tr><td style="padding:10px 0;color:#666;font-weight:bold">Style:</td><td>' + (orderRequest.style_id || orderRequest.base_style || '') + ' - ' + (orderRequest.product_name || '') + '</td></tr>' +
+            (orderRequest.color_info ? '<tr><td style="padding:10px 0;color:#666;font-weight:bold">Color:</td><td>' + orderRequest.color_info + '</td></tr>' : '') +
+            '<tr><td style="padding:10px 0;color:#666;font-weight:bold">Total Qty:</td><td style="font-weight:bold;font-size:17px">' + orderRequest.total_qty + ' units</td></tr>' +
+            '<tr><td style="padding:10px 0;color:#666;font-weight:bold">Sizes:</td><td>' + sizeStr + '</td></tr>' +
+            (orderRequest.notes ? '<tr><td style="padding:10px 0;color:#666;font-weight:bold;vertical-align:top">Notes:</td><td style="background:#fff8e1;border-radius:4px;padding:10px">' + orderRequest.notes.replace(/\n/g, '<br>') + '</td></tr>' : '') +
+            '</table></div>' +
+            '<div style="text-align:center;padding:15px;color:#999;font-size:12px"><p>Mark Edwards Apparel | Order Request System</p></div></body></html>';
+
+        var response = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + process.env.RESEND_API_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                from: process.env.EMAIL_FROM || 'Mark Edwards Apparel <catalog@markedwardsapparel.com>',
+                to: notifyEmail.split(',').map(function(e) { return e.trim(); }),
+                subject: 'New Order Request ' + orderRequest.request_number + ' - ' + orderRequest.customer_name + ' (' + orderRequest.total_qty + ' units)',
+                html: emailHtml
+            })
+        });
+        var result = await response.json();
+        console.log('Order email:', orderRequest.request_number, response.ok ? 'OK' : 'FAILED');
+        return { success: response.ok, data: result };
+    } catch (err) {
+        console.error('Order email error:', err);
+        return { success: false, error: err.message };
+    }
+}
+
+app.post('/api/order-requests', async function(req, res) {
+    try {
+        var requestNumber = await getNextRequestNumber();
+        var b = req.body;
+        if (!b.customer_name || !b.size_breakdown) {
+            return res.status(400).json({ success: false, error: 'Customer and size breakdown required' });
+        }
+        var userId = req.session.userId || null;
+        var userName = req.session.displayName || req.session.username || 'Unknown';
+        var sb = typeof b.size_breakdown === 'string' ? b.size_breakdown : JSON.stringify(b.size_breakdown);
+        var result = await pool.query(
+            'INSERT INTO order_requests (request_number, user_id, user_name, customer_name, style_id, base_style, product_name, color_info, size_breakdown, total_qty, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *',
+            [requestNumber, userId, userName, b.customer_name, b.style_id||null, b.base_style||null, b.product_name||null, b.color_info||null, sb, b.total_qty||0, b.notes||null]
+        );
+        var orderReq = result.rows[0];
+        sendOrderRequestEmail(orderReq).catch(function(err) { console.error('Background email failed:', err); });
+        res.json({ success: true, order: orderReq });
+    } catch (err) {
+        console.error('Create order request error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+app.get('/api/order-requests', async function(req, res) {
+    try {
+        var status = req.query.status;
+        var isAdmin = req.session.role === 'admin';
+        var userId = req.session.userId;
+        var query = 'SELECT * FROM order_requests';
+        var cond = [];
+        var params = [];
+        if (status && status !== 'all') { params.push(status); cond.push('status = $' + params.length); }
+        if (!isAdmin && userId) { params.push(userId); cond.push('user_id = $' + params.length); }
+        if (cond.length > 0) query += ' WHERE ' + cond.join(' AND ');
+        query += ' ORDER BY created_at DESC LIMIT 200';
+        var result = await pool.query(query, params);
+        res.json({ success: true, orders: result.rows });
+    } catch (err) {
+        console.error('Get order requests error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+app.get('/api/order-requests/pending-count', async function(req, res) {
+    try {
+        var result = await pool.query("SELECT COUNT(*) FROM order_requests WHERE status = 'pending'");
+        res.json({ success: true, count: parseInt(result.rows[0].count) });
+    } catch (err) { res.json({ success: true, count: 0 }); }
+});
+
+app.put('/api/order-requests/:id', async function(req, res) {
+    try {
+        var b = req.body;
+        var sets = ['updated_at = CURRENT_TIMESTAMP'];
+        var params = [];
+        if (b.status) { params.push(b.status); sets.push('status = $' + params.length); }
+        if (b.zoho_so_number !== undefined) { params.push(b.zoho_so_number); sets.push('zoho_so_number = $' + params.length); }
+        if (b.admin_notes !== undefined) { params.push(b.admin_notes); sets.push('admin_notes = $' + params.length); }
+        params.push(req.params.id);
+        var result = await pool.query('UPDATE order_requests SET ' + sets.join(', ') + ' WHERE id = $' + params.length + ' RETURNING *', params);
+        if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Not found' });
+        res.json({ success: true, order: result.rows[0] });
+    } catch (err) {
+        console.error('Update order request error:', err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+app.delete('/api/order-requests/:id', async function(req, res) {
+    try {
+        await pool.query('DELETE FROM order_requests WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
 
 // Get styles for selected customers
 app.get('/api/styles-by-customers', async function(req, res) {
@@ -4204,9 +4356,38 @@ function getHTML() {
     // Modal - Apple style
     html += '.modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:none;align-items:center;justify-content:center;z-index:1000}.modal.active{display:flex}.modal-content{background:white;border-radius:18px;max-width:98vw;width:1600px;max-height:98vh;overflow:auto;position:relative;box-shadow:0 20px 60px rgba(0,0,0,0.2)}.modal-body{display:flex;min-height:850px}.modal-image{width:60%;background:#f5f5f7;min-height:850px;display:flex;align-items:center;justify-content:center;padding:2rem}.modal-image img{max-width:100%;max-height:900px;object-fit:contain}.modal-details{width:40%;padding:2.5rem;overflow-y:auto;max-height:850px;background:white}.modal-details h2,.modal-details h3{background:none!important;margin:0;padding:0}.modal-close{position:absolute;top:1rem;right:1rem;background:rgba(0,0,0,0.06);border:none;font-size:1.25rem;cursor:pointer;border-radius:50%;width:32px;height:32px;z-index:10;color:#1e3a5f;transition:background 0.2s}.modal-close:hover{background:rgba(0,0,0,0.1)}';
     html += '.modal-actions{margin-top:1.5rem;padding-top:1rem;border-top:1px solid #f5f5f7;display:flex;gap:0.5rem;flex-wrap:wrap}';
+
+    html += '.order-request-modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:none;align-items:center;justify-content:center;z-index:1002}.order-request-modal.active{display:flex}.order-request-modal-content{background:white;border-radius:18px;padding:2rem;max-width:560px;width:95%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.2)}';
+    html += '.order-request-modal h3{margin:0 0 1.5rem;font-weight:700;color:#1e3a5f;font-size:1.25rem}';
+    html += '.or-form-group{margin-bottom:1rem}.or-form-group label{display:block;font-size:0.8rem;font-weight:600;color:#666;margin-bottom:0.35rem}.or-form-group input,.or-form-group select,.or-form-group textarea{width:100%;padding:0.75rem 1rem;border:1.5px solid #e0e0e0;border-radius:10px;font-family:inherit;font-size:0.9rem;box-sizing:border-box}.or-form-group input:focus,.or-form-group select:focus,.or-form-group textarea:focus{outline:none;border-color:#0088c2}';
+    html += '.or-size-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:0.5rem}.or-size-item{display:flex;flex-direction:column;align-items:center;gap:0.25rem}.or-size-item label{font-size:0.75rem;font-weight:700;color:#1e3a5f;margin:0}.or-size-item input{width:65px;text-align:center;padding:0.5rem;font-size:0.95rem;font-weight:600}';
+    html += '.or-total-row{display:flex;justify-content:space-between;align-items:center;padding:0.75rem 1rem;background:#f0f7ff;border-radius:10px;margin:1rem 0;font-weight:700;color:#1e3a5f;font-size:1rem}';
+    html += '.or-product-info{display:flex;gap:1rem;align-items:center;padding:1rem;background:#f8f9fa;border-radius:10px;margin-bottom:1.5rem}.or-product-info img{width:60px;height:60px;object-fit:contain;border-radius:8px;background:white}.or-product-info .or-pi-text{flex:1}.or-product-info .or-pi-style{font-size:0.8rem;color:#0088c2;font-weight:600}.or-product-info .or-pi-name{font-size:0.95rem;font-weight:600;color:#1e3a5f}';
+    html += '.or-actions{display:flex;gap:0.75rem;justify-content:flex-end;margin-top:1.5rem}.or-actions .btn{padding:0.75rem 1.5rem;font-size:0.9rem}';
+    html += '.or-success{text-align:center;padding:2rem 1rem}.or-success h3{color:#34a853;margin-bottom:0.5rem}.or-success .or-req-num{font-size:1.5rem;font-weight:700;color:#1e3a5f;margin:0.5rem 0}';
+    html += '.order-badge{background:#ff3b30;color:white;border-radius:10px;padding:1px 6px;font-size:0.7rem;font-weight:700;margin-left:4px;vertical-align:super}';
+    html += '.orders-panel{background:#fff;padding:2rem;border-radius:18px;margin-bottom:2rem;border:1px solid rgba(0,0,0,0.04)}.orders-panel h2{margin-bottom:1.5rem;font-weight:600;color:#1e3a5f;font-size:1.25rem}';
+    html += '.order-card{border:1px solid #e8e8e8;border-radius:12px;padding:1rem;margin-bottom:0.75rem}.order-card:hover{border-color:#0088c2}.order-card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem}.order-card-num{font-weight:700;color:#1e3a5f;font-size:0.95rem}';
+    html += '.order-status{display:inline-block;padding:2px 10px;border-radius:12px;font-size:0.75rem;font-weight:600;text-transform:uppercase}.order-status.pending{background:#fff3cd;color:#856404}.order-status.processing{background:#cce5ff;color:#004085}.order-status.completed{background:#d4edda;color:#155724}.order-status.cancelled{background:#f8d7da;color:#721c24}';
+    html += '.ocb-row{display:flex;justify-content:space-between;padding:0.2rem 0}.ocb-label{color:#999;font-size:0.8rem}.ocb-val{font-weight:500}';
+    html += '.order-card-so{margin-top:0.5rem;padding:0.5rem 0.75rem;background:#e8f5e9;border-radius:8px;font-size:0.85rem;color:#2e7d32;font-weight:600}';
     html += '.note-section{margin-top:1rem;padding-top:1rem;border-top:1px solid #f5f5f7}.note-section textarea{width:100%;height:80px;margin-top:0.5rem;padding:0.875rem;border:none;border-radius:12px;font-family:inherit;resize:vertical;background:#f5f5f7;transition:background 0.2s}.note-section textarea:focus{outline:none;background:#ebebed}';
     html += '.selection-bar{position:fixed;bottom:0;left:0;right:0;background:#1e3a5f;color:white;padding:1rem 2rem;display:flex;justify-content:space-between;align-items:center;z-index:100;transform:translateY(100%);transition:transform 0.3s}.selection-bar.visible{transform:translateY(0)}';
     
+
+    // Order Request modal
+    html += '<div class="order-request-modal" id="orderRequestModal"><div class="order-request-modal-content">';
+    html += '<div id="orderFormView"><h3>📋 Create Order Request</h3>';
+    html += '<div class="or-product-info"><img id="orProductImg" src="" alt=""><div class="or-pi-text"><div class="or-pi-style" id="orProductStyle"></div><div class="or-pi-name" id="orProductName"></div></div></div>';
+    html += '<div class="or-form-group"><label>Customer / Retailer</label><select id="orCustomer"><option value="">Select a customer...</option></select></div>';
+    html += '<div class="or-form-group"><label>Size Breakdown</label><p style="font-size:0.75rem;color:#999;margin:0 0 0.5rem">Choose a size preset then enter quantities.</p><div id="orSizeGrid"></div></div>';
+    html += '<div class="or-total-row"><span>Total Quantity</span><span id="orTotalQty">0</span></div>';
+    html += '<div class="or-form-group"><label>Notes / Special Instructions</label><textarea id="orNotes" rows="3" placeholder="Ship date, packaging, special pricing, etc."></textarea></div>';
+    html += '<div class="or-actions"><button class="btn btn-secondary" id="orCancelBtn">Cancel</button><button class="btn btn-primary" id="orSubmitBtn" style="background:#34a853;border-color:#34a853">Submit Order Request</button></div>';
+    html += '</div>';
+    html += '<div id="orderSuccessView" class="or-success hidden"><div style="font-size:3rem;margin-bottom:1rem">✅</div><h3 style="color:#34a853">Order Request Submitted!</h3><div class="or-req-num" id="orSuccessNum"></div><p style="color:#666;margin:1rem 0">Sent to order entry team. Check Orders panel for updates.</p><div class="or-actions" style="justify-content:center"><button class="btn btn-primary" id="orDoneBtn">Done</button></div></div>';
+    html += '</div></div>';
+
     // Help modal styles
     html += '.help-modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);display:none;align-items:center;justify-content:center;z-index:1002;overflow-y:auto;padding:2rem}.help-modal.active{display:flex}.help-content{background:white;border-radius:12px;max-width:900px;width:95%;max-height:90vh;overflow-y:auto;padding:2rem;position:relative;box-shadow:0 20px 60px rgba(0,0,0,0.15)}';
     html += '.help-content h2{margin-bottom:1.5rem;color:#555;font-weight:500}.help-sections{display:flex;flex-direction:column;gap:2rem}';
@@ -4385,7 +4566,7 @@ function getHTML() {
     html += '<div id="loginPage" class="login-page" style="display:none"><div class="login-box"><h1>Mark Edwards Apparel<br><span style="font-size:0.8em;font-weight:normal">Product Catalog</span></h1><form id="loginForm"><div class="form-group"><label>Select User</label><select id="loginUserSelect" required style="width:100%;padding:0.875rem 1rem;border:none;border-radius:12px;font-size:1rem;background:#f5f5f7;appearance:none;cursor:pointer"><option value="">-- Select your name --</option></select></div><input type="hidden" id="loginPin" value="0000"><button type="submit" class="btn btn-primary" style="width:100%">Sign In</button><div id="loginError" class="error hidden"></div></form></div></div>';
     
     html += '<div id="mainApp">';
-    html += '<header class="header"><h1 style="color:#1e3a5f;font-weight:700;font-size:1.5rem">Mark Edwards Apparel</h1><div class="header-right"><div class="user-menu-wrapper" style="position:relative"><button class="btn btn-secondary" id="userMenuBtn" style="display:flex;align-items:center;gap:0.5rem"><span id="userInfo">Welcome</span> ▾</button><div id="userMenu" class="user-menu hidden"><button class="user-menu-item" id="changePinBtn">Change PIN</button><button class="user-menu-item" id="logoutBtn">Sign Out</button></div></div><button class="btn btn-secondary" id="helpBtn">User Guide</button><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn">Admin</button></div></header>';
+    html += '<header class="header"><h1 style="color:#1e3a5f;font-weight:700;font-size:1.5rem">Mark Edwards Apparel</h1><div class="header-right"><div class="user-menu-wrapper" style="position:relative"><button class="btn btn-secondary" id="userMenuBtn" style="display:flex;align-items:center;gap:0.5rem"><span id="userInfo">Welcome</span> ▾</button><div id="userMenu" class="user-menu hidden"><button class="user-menu-item" id="changePinBtn">Change PIN</button><button class="user-menu-item" id="logoutBtn">Sign Out</button></div></div><button class="btn btn-secondary" id="helpBtn">User Guide</button><button class="btn btn-secondary" id="ordersBtn">Orders<span class="order-badge hidden" id="ordersBadge"></span></button><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn">Admin</button></div></header>';
 
     // Toggle button for treemap (fixed position)
     html += '<button class="treemap-toggle-btn" id="openTreemapShelf">📊 Merch</button>';
@@ -4404,8 +4585,14 @@ function getHTML() {
     // Main content area
     html += '<div class="main-content-area">';
 
+    // Orders panel
+    html += '<main class="main"><div id="ordersPanel" class="orders-panel hidden"><h2>Order Requests</h2><div class="tabs"><button class="tab active" data-tab="myOrders">My Orders</button><button class="tab" data-tab="adminOrders" id="adminOrdersTab" style="display:none">All Orders (Admin)</button></div>';
+    html += '<div id="myOrdersTab" class="tab-content active"><div style="margin-bottom:1rem;display:flex;gap:0.5rem;align-items:center"><select id="myOrdersFilter" style="padding:0.5rem;border-radius:8px;border:1px solid #ddd;font-size:0.85rem"><option value="all">All</option><option value="pending">Pending</option><option value="processing">Processing</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option></select><span id="myOrdersCount" style="font-size:0.8rem;color:#999"></span></div><div id="myOrdersList"></div></div>';
+    html += '<div id="adminOrdersTab2" class="tab-content"><div style="margin-bottom:1rem;display:flex;gap:0.5rem;align-items:center"><select id="adminOrdersFilter" style="padding:0.5rem;border-radius:8px;border:1px solid #ddd;font-size:0.85rem"><option value="all">All</option><option value="pending" selected>Pending</option><option value="processing">Processing</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option></select><span id="adminOrdersCount" style="font-size:0.8rem;color:#999"></span></div><div id="adminOrdersList"></div></div>';
+    html += '</div>';
+
     // History panel (visible to all users)
-    html += '<main class="main"><div id="historyPanel" class="admin-panel hidden"><h2>History & Status</h2><div class="tabs"><button class="tab active" data-tab="shares">Sharing History</button><button class="tab" data-tab="freshness">Data Freshness</button><button class="tab" data-tab="history">Sync History</button></div>';
+    html += '<div id="historyPanel" class="admin-panel hidden"><h2>History & Status</h2><div class="tabs"><button class="tab active" data-tab="shares">Sharing History</button><button class="tab" data-tab="freshness">Data Freshness</button><button class="tab" data-tab="history">Sync History</button></div>';
     html += '<div id="sharesTab" class="tab-content active"><table class="share-history-table"><thead><tr><th>Date</th><th>Name</th><th>Sales Rep</th><th>Type</th><th>Items</th><th>Actions</th></tr></thead><tbody id="sharesTable"></tbody></table></div>';
     html += '<div id="freshnessTab" class="tab-content"><div class="freshness-info" id="freshnessInfo"><p><strong>Last Data Update:</strong> <span id="lastUpdateTime">Loading...</span></p><p><strong>Records Imported:</strong> <span id="lastUpdateRecords">-</span></p></div><p style="color:#666;font-size:0.875rem;margin-top:1rem">This shows when the product catalog data was last updated via CSV import.</p></div>';
     html += '<div id="historyTab" class="tab-content"><table><thead><tr><th>Date</th><th>Type</th><th>Status</th><th>Records</th><th>Error</th></tr></thead><tbody id="historyTable"></tbody></table></div></div>';
@@ -4509,7 +4696,7 @@ function getHTML() {
     html += '<div class="share-modal" id="shareModal"><div class="share-modal-content"><h3>Share Selection</h3><div id="shareForm"><input type="text" id="selectionName" placeholder="Name this selection (e.g. Spring Collection for Acme Co)"><div style="margin:1rem 0"><label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.875rem;color:#4a5568"><input type="checkbox" id="hideQuantities" style="width:18px;height:18px;accent-color:#0088c2"> Hide quantities (Available Now & Left to Sell)</label></div><div class="share-modal-actions"><button class="btn btn-secondary" id="cancelShareBtn">Cancel</button><button class="btn btn-primary" id="createShareBtn">Create Link</button></div></div><div class="share-result hidden" id="shareResult"><p style="margin-bottom:1rem;color:#666" id="shareNameDisplay"></p><div class="share-buttons"><button class="share-action-btn" id="emailLinkBtn">Email Link</button><button class="share-action-btn" id="textLinkBtn">Text Link</button><button class="share-action-btn" id="copyLinkBtn">Copy Link</button><a class="share-action-btn" id="pdfLink" href="" target="_blank">Download PDF</a></div><div style="margin-top:1.5rem;text-align:center"><button class="btn btn-secondary" id="closeShareModalBtn">Done</button></div></div></div></div>';
     
     // Product modal
-    html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button><div class="modal-body"><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div style="margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid #e0e0e0"><div class="product-style" id="modalStyle" style="color:#0088c2;font-size:0.875rem;font-weight:600;margin-bottom:0.25rem"></div><h2 id="modalName" style="margin:0;padding:0;font-size:1.75rem;font-weight:600;color:#1e3a5f;background:none"></h2><p id="modalCategory" style="color:#6e6e73;margin:0.25rem 0 0;font-size:0.875rem"></p></div><div id="modalColors"></div><div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div><div class="modal-actions"><button class="btn btn-secondary btn-sm" id="modalPickBtn">♡ Add to My Picks</button></div><div class="sales-history-section"><h3 style="margin:1.5rem 0 0.5rem;font-size:1rem;display:flex;align-items:center;gap:0.5rem;color:#1e3a5f;background:none">Sales & Import PO History <span id="salesHistoryLoading" style="font-size:0.75rem;color:#666;font-weight:normal">(loading...)</span></h3><p style="margin:0 0 0.75rem;font-size:0.75rem;color:#999;font-style:italic">(Showing trailing 12 months)</p><div id="salesHistorySummary" style="display:flex;gap:0.5rem;margin-bottom:0.75rem"></div><div id="salesHistoryFilter" style="margin-bottom:0.5rem;font-size:0.8rem;color:#666"></div><div id="salesHistoryList" style="max-height:200px;overflow-y:auto;font-size:0.875rem"></div></div><div class="note-section"><label><strong>Notes:</strong></label><textarea id="modalNote" placeholder="Add notes about this product..."></textarea><button class="btn btn-sm btn-primary" id="saveNoteBtn">Save Note</button></div></div></div></div></div>';
+    html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button><div class="modal-body"><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div style="margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid #e0e0e0"><div class="product-style" id="modalStyle" style="color:#0088c2;font-size:0.875rem;font-weight:600;margin-bottom:0.25rem"></div><h2 id="modalName" style="margin:0;padding:0;font-size:1.75rem;font-weight:600;color:#1e3a5f;background:none"></h2><p id="modalCategory" style="color:#6e6e73;margin:0.25rem 0 0;font-size:0.875rem"></p></div><div id="modalColors"></div><div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div><div class="modal-actions"><button class="btn btn-secondary btn-sm" id="modalPickBtn">♡ Add to My Picks</button><button class="btn btn-primary btn-sm" id="modalOrderBtn" style="background:#34a853;border-color:#34a853">📋 Order Request</button></div><div class="sales-history-section"><h3 style="margin:1.5rem 0 0.5rem;font-size:1rem;display:flex;align-items:center;gap:0.5rem;color:#1e3a5f;background:none">Sales & Import PO History <span id="salesHistoryLoading" style="font-size:0.75rem;color:#666;font-weight:normal">(loading...)</span></h3><p style="margin:0 0 0.75rem;font-size:0.75rem;color:#999;font-style:italic">(Showing trailing 12 months)</p><div id="salesHistorySummary" style="display:flex;gap:0.5rem;margin-bottom:0.75rem"></div><div id="salesHistoryFilter" style="margin-bottom:0.5rem;font-size:0.8rem;color:#666"></div><div id="salesHistoryList" style="max-height:200px;overflow-y:auto;font-size:0.875rem"></div></div><div class="note-section"><label><strong>Notes:</strong></label><textarea id="modalNote" placeholder="Add notes about this product..."></textarea><button class="btn btn-sm btn-primary" id="saveNoteBtn">Save Note</button></div></div></div></div></div>';
     
     
     // Change PIN modal
@@ -4557,7 +4744,7 @@ function getHTML() {
     html += 'var products=[];var allProducts=[];var groupedProducts=[];var lastImportId=null;var selectedCategories=[];var colorFilter=null;var specialFilter=null;var currentSort="qty-high";var currentSize="medium";var selectedProducts=[];var selectionMode=false;var currentShareId=null;var userPicks=[];var userNotes={};var currentModalProductId=null;var currentModalBaseStyle=null;var focusedIndex=-1;var qtyMode="left_to_sell";var groupByStyle=true;var minColorsFilter=0;var supplyDemandMode=false;var openOrdersByStyle={};var importPOsByStyle={};';
     
     html += 'function checkSession(){loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();loadShares();loadHistory()}';
-    html += 'function showApp(displayName,r){document.getElementById("loginPage").style.display="none";document.getElementById("mainApp").style.display="block";document.getElementById("userInfo").textContent=displayName||"User";if(r==="admin"){document.getElementById("adminBtn").style.display="inline-block"}}';
+    html += 'var currentUserRole="sales";function showApp(displayName,r){document.getElementById("loginPage").style.display="none";document.getElementById("mainApp").style.display="block";document.getElementById("userInfo").textContent=displayName||"User";currentUserRole=r||"sales";if(r==="admin"){document.getElementById("adminBtn").style.display="inline-block";var at=document.getElementById("adminOrdersTab");if(at)at.style.display="inline-block"}setTimeout(function(){loadOrderBadge()},1000)}';
     
     html += 'var currentDisplayName="";';
     html += 'function loadLoginUsers(){showApp("User","admin");loadProducts();loadPicks();loadNotes();loadZohoStatus();loadDataFreshness();loadShares();loadHistory();loadUsers();loadAiStatus()}';
@@ -4571,8 +4758,8 @@ function getHTML() {
     html += 'document.getElementById("helpBtn").addEventListener("click",function(){document.getElementById("helpModal").classList.add("active")});';
     html += 'document.getElementById("helpClose").addEventListener("click",function(){document.getElementById("helpModal").classList.remove("active")});';
     html += 'document.getElementById("helpModal").addEventListener("click",function(e){if(e.target.id==="helpModal")document.getElementById("helpModal").classList.remove("active")});';
-    html += 'document.getElementById("historyBtn").addEventListener("click",function(){document.getElementById("historyPanel").classList.toggle("hidden");document.getElementById("adminPanel").classList.add("hidden")});';
-    html += 'document.getElementById("adminBtn").addEventListener("click",function(){document.getElementById("adminPanel").classList.toggle("hidden");document.getElementById("historyPanel").classList.add("hidden");if(!document.getElementById("adminPanel").classList.contains("hidden")){loadSystemHealth();loadSalesStats()}});';
+    html += 'document.getElementById("ordersBtn").addEventListener("click",function(){document.getElementById("ordersPanel").classList.toggle("hidden");document.getElementById("historyPanel").classList.add("hidden");document.getElementById("adminPanel").classList.add("hidden");if(!document.getElementById("ordersPanel").classList.contains("hidden")){loadMyOrders()}});document.getElementById("historyBtn").addEventListener("click",function(){document.getElementById("historyPanel").classList.toggle("hidden");document.getElementById("adminPanel").classList.add("hidden");document.getElementById("ordersPanel").classList.add("hidden")});';
+    html += 'document.getElementById("adminBtn").addEventListener("click",function(){document.getElementById("adminPanel").classList.toggle("hidden");document.getElementById("historyPanel").classList.add("hidden");document.getElementById("ordersPanel").classList.add("hidden");if(!document.getElementById("adminPanel").classList.contains("hidden")){loadSystemHealth();loadSalesStats()}});';
     
     // Chat functionality
     html += 'var chatOpen=false;';
@@ -4653,7 +4840,7 @@ function getHTML() {
 
     html += 'function clearTreemapFilter(){treemapFilters=[];if(treemapMode==="commodity"){selectedCategories=[];document.querySelectorAll("[data-cat]").forEach(function(btn){btn.classList.remove("active")});var allBtn=document.querySelector("[data-cat=\\"all\\"]");if(allBtn)allBtn.classList.add("active")}else{colorFilter=null;document.getElementById("colorFilterBtn").textContent="Color: All ▼";document.getElementById("clearColorBtn").classList.add("hidden")}document.getElementById("treemapClearFilter").classList.add("hidden");renderProducts()}';
 
-    html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var panel=e.target.closest(".admin-panel");panel.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});panel.querySelectorAll(".tab-content").forEach(function(c){c.classList.remove("active")});e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active");if(e.target.getAttribute("data-tab")==="cache2")loadCacheStatus();if(e.target.getAttribute("data-tab")==="autoimport2"){loadAutoImportStatus();loadExportJobs()}if(e.target.getAttribute("data-tab")==="merch2")loadMerchandisingTab();if(e.target.getAttribute("data-tab")==="catalogShare2")loadCatalogSharingPanel()})}';
+    html += 'var tabs=document.querySelectorAll(".tab");for(var i=0;i<tabs.length;i++){tabs[i].addEventListener("click",function(e){var panel=e.target.closest(".admin-panel")||e.target.closest(".orders-panel");if(!panel)return;panel.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});panel.querySelectorAll(".tab-content").forEach(function(c){c.classList.remove("active")});e.target.classList.add("active");document.getElementById(e.target.getAttribute("data-tab")+"Tab").classList.add("active");if(e.target.getAttribute("data-tab")==="cache2")loadCacheStatus();if(e.target.getAttribute("data-tab")==="autoimport2"){loadAutoImportStatus();loadExportJobs()}if(e.target.getAttribute("data-tab")==="merch2")loadMerchandisingTab();if(e.target.getAttribute("data-tab")==="catalogShare2")loadCatalogSharingPanel();if(e.target.getAttribute("data-tab")==="adminOrders")loadAdminOrders();if(e.target.getAttribute("data-tab")==="myOrders")loadMyOrders()})}';
     
     html += 'var sizeBtns=document.querySelectorAll(".size-btn");sizeBtns.forEach(function(btn){btn.addEventListener("click",function(e){sizeBtns.forEach(function(b){b.classList.remove("active")});e.target.classList.add("active");currentSize=e.target.getAttribute("data-size");document.getElementById("productGrid").className="product-grid size-"+currentSize;renderProducts()})});';
     
@@ -4875,7 +5062,7 @@ function getHTML() {
     html += 'document.getElementById("saveNoteBtn").addEventListener("click",function(){console.log("Save note button clicked");if(currentModalBaseStyle){console.log("Base Style:",currentModalBaseStyle);var btn=this;var originalText=btn.textContent;btn.textContent="Saving...";btn.disabled=true;var note=document.getElementById("modalNote").value;console.log("Note value:",note);fetch("/api/notes/"+encodeURIComponent(currentModalBaseStyle),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({note:note})}).then(function(r){console.log("Response status:",r.status);return r.json()}).then(function(d){console.log("Response data:",d);if(d.success){if(note.trim()){userNotes[currentModalBaseStyle]=note}else{delete userNotes[currentModalBaseStyle]}renderProducts();btn.textContent="✓ Saved!";setTimeout(function(){btn.textContent=originalText;btn.disabled=false},1500)}else{console.error("Save failed:",d);btn.textContent="Error";setTimeout(function(){btn.textContent=originalText;btn.disabled=false},1500)}}).catch(function(err){console.error("Fetch error:",err);btn.textContent="Error";setTimeout(function(){btn.textContent=originalText;btn.disabled=false},1500)})}else{console.error("No currentModalBaseStyle")}});';
     
     // Keyboard navigation
-    html += 'document.addEventListener("keydown",function(e){if(document.getElementById("modal").classList.contains("active")){if(e.key==="Escape"){document.getElementById("modal").classList.remove("active")}return}if(document.getElementById("shareModal").classList.contains("active")){if(e.key==="Escape"){document.getElementById("shareModal").classList.remove("active")}return}if(document.activeElement.tagName==="INPUT"||document.activeElement.tagName==="TEXTAREA")return;var cards=document.querySelectorAll(".product-card");if(cards.length===0)return;if(e.key==="ArrowRight"||e.key==="ArrowDown"){e.preventDefault();focusedIndex=Math.min(focusedIndex+1,cards.length-1);updateFocus(cards)}else if(e.key==="ArrowLeft"||e.key==="ArrowUp"){e.preventDefault();focusedIndex=Math.max(focusedIndex-1,0);updateFocus(cards)}else if(e.key==="Enter"&&focusedIndex>=0){e.preventDefault();var id=parseInt(products[focusedIndex].id);if(selectionMode){var idx=selectedProducts.indexOf(id);if(idx===-1){selectedProducts.push(id)}else{selectedProducts.splice(idx,1)}updateSelectionUI();renderProducts()}else{showProductModal(id)}}else if(e.key===" "&&focusedIndex>=0&&selectionMode){e.preventDefault();var id=parseInt(products[focusedIndex].id);var idx=selectedProducts.indexOf(id);if(idx===-1){selectedProducts.push(id)}else{selectedProducts.splice(idx,1)}updateSelectionUI();renderProducts()}});';
+    html += 'document.addEventListener("keydown",function(e){if(document.getElementById("orderRequestModal").classList.contains("active")){if(e.key==="Escape"){document.getElementById("orderRequestModal").classList.remove("active")}return}if(document.getElementById("modal").classList.contains("active")){if(e.key==="Escape"){document.getElementById("modal").classList.remove("active")}return}if(document.getElementById("shareModal").classList.contains("active")){if(e.key==="Escape"){document.getElementById("shareModal").classList.remove("active")}return}if(document.activeElement.tagName==="INPUT"||document.activeElement.tagName==="TEXTAREA")return;var cards=document.querySelectorAll(".product-card");if(cards.length===0)return;if(e.key==="ArrowRight"||e.key==="ArrowDown"){e.preventDefault();focusedIndex=Math.min(focusedIndex+1,cards.length-1);updateFocus(cards)}else if(e.key==="ArrowLeft"||e.key==="ArrowUp"){e.preventDefault();focusedIndex=Math.max(focusedIndex-1,0);updateFocus(cards)}else if(e.key==="Enter"&&focusedIndex>=0){e.preventDefault();var id=parseInt(products[focusedIndex].id);if(selectionMode){var idx=selectedProducts.indexOf(id);if(idx===-1){selectedProducts.push(id)}else{selectedProducts.splice(idx,1)}updateSelectionUI();renderProducts()}else{showProductModal(id)}}else if(e.key===" "&&focusedIndex>=0&&selectionMode){e.preventDefault();var id=parseInt(products[focusedIndex].id);var idx=selectedProducts.indexOf(id);if(idx===-1){selectedProducts.push(id)}else{selectedProducts.splice(idx,1)}updateSelectionUI();renderProducts()}});';
     
     html += 'function updateFocus(cards){cards.forEach(function(c,i){c.classList.toggle("focused",i===focusedIndex)});if(focusedIndex>=0&&cards[focusedIndex]){cards[focusedIndex].scrollIntoView({block:"nearest",behavior:"smooth"})}}';
     
@@ -4907,6 +5094,28 @@ function getHTML() {
     html += 'async function toggleSubscription(id){try{var res=await fetch("/api/catalog-subscriptions/"+id+"/toggle",{method:"POST"});var data=await res.json();if(data.success){loadSubscriptions()}}catch(err){alert("Error: "+err.message)}}';
 
     html += 'async function deleteSubscription(id){if(!confirm("Delete this subscription? This cannot be undone."))return;try{var res=await fetch("/api/catalog-subscriptions/"+id,{method:"DELETE"});var data=await res.json();if(data.success){loadSubscriptions();loadSendHistory()}}catch(err){alert("Error: "+err.message)}}';
+
+    html += '</script><script>';
+    html += 'var orderCustomersLoaded=false;';
+    html += 'var sizePresets={Alpha:["XS","S","M","L","XL","2XL","3XL"],Numeric:["0","2","4","6","8","10","12","14"],Waist:["28","29","30","31","32","33","34","36","38","40"],OneSize:["OS"],Custom:[]};';
+    html += 'document.getElementById("modalOrderBtn").addEventListener("click",openOrderRequestModal);';
+    html += 'document.getElementById("orCancelBtn").addEventListener("click",function(){document.getElementById("orderRequestModal").classList.remove("active")});';
+    html += 'document.getElementById("orDoneBtn").addEventListener("click",function(){document.getElementById("orderRequestModal").classList.remove("active")});';
+    html += 'document.getElementById("orderRequestModal").addEventListener("click",function(e){if(e.target.id==="orderRequestModal")e.target.classList.remove("active")});';
+    html += 'document.getElementById("myOrdersFilter").addEventListener("change",loadMyOrders);';
+    html += 'document.getElementById("adminOrdersFilter").addEventListener("change",loadAdminOrders);';
+    html += 'function openOrderRequestModal(){document.getElementById("orProductStyle").textContent=document.getElementById("modalStyle").textContent;document.getElementById("orProductName").textContent=document.getElementById("modalName").textContent;document.getElementById("orProductImg").src=document.getElementById("modalImage").src;document.getElementById("orderFormView").classList.remove("hidden");document.getElementById("orderSuccessView").classList.add("hidden");document.getElementById("orNotes").value="";if(!orderCustomersLoaded)loadOrderCustomers();buildSizeGrid("Alpha");document.getElementById("orderRequestModal").classList.add("active")}';
+    html += 'function loadOrderCustomers(){fetch("/api/customers").then(function(r){return r.json()}).then(function(d){if(d.success){var sel=document.getElementById("orCustomer");sel.innerHTML="";var o0=document.createElement("option");o0.value="";o0.textContent="Select a customer...";sel.appendChild(o0);d.customers.forEach(function(c){var op=document.createElement("option");op.value=c.name;op.textContent=c.name;sel.appendChild(op)});orderCustomersLoaded=true}}).catch(function(e){console.error(e)})}';
+    html += 'function buildSizeGrid(preset){var grid=document.getElementById("orSizeGrid");grid.innerHTML="";var bar=document.createElement("div");bar.style.cssText="margin-bottom:0.75rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center";var sp=document.createElement("span");sp.style.cssText="font-size:0.75rem;color:#999";sp.textContent="Preset: ";bar.appendChild(sp);Object.keys(sizePresets).forEach(function(p){var b=document.createElement("button");b.textContent=p;b.style.cssText="padding:3px 10px;font-size:0.7rem;border-radius:6px;border:1px solid #ccc;cursor:pointer;"+(p===preset?"background:#0088c2;color:white":"background:white");b.onclick=function(){buildSizeGrid(p)};bar.appendChild(b)});grid.appendChild(bar);if(preset==="Custom"){var ci=document.createElement("input");ci.type="text";ci.placeholder="Enter sizes comma-separated (e.g. 4,6,8,10,12)";ci.style.cssText="width:100%;padding:0.5rem;border:1px solid #ddd;border-radius:8px;font-size:0.85rem;box-sizing:border-box";ci.onchange=function(){buildCustomSizes(ci.value,grid)};grid.appendChild(ci)}else{var g=document.createElement("div");g.className="or-size-grid";sizePresets[preset].forEach(function(s){var item=document.createElement("div");item.className="or-size-item";var lbl=document.createElement("label");lbl.textContent=s;var inp=document.createElement("input");inp.type="number";inp.min="0";inp.placeholder="0";inp.setAttribute("data-size",s);inp.className="or-size-input";inp.oninput=updateOrderTotal;item.appendChild(lbl);item.appendChild(inp);g.appendChild(item)});grid.appendChild(g)}}';
+    html += 'function buildCustomSizes(val,grid){var old=grid.querySelector(".or-size-grid");if(old)old.remove();var sizes=val.split(",").map(function(s){return s.trim()}).filter(Boolean);var g=document.createElement("div");g.className="or-size-grid";sizes.forEach(function(s){var item=document.createElement("div");item.className="or-size-item";var lbl=document.createElement("label");lbl.textContent=s;var inp=document.createElement("input");inp.type="number";inp.min="0";inp.placeholder="0";inp.setAttribute("data-size",s);inp.className="or-size-input";inp.oninput=updateOrderTotal;item.appendChild(lbl);item.appendChild(inp);g.appendChild(item)});grid.appendChild(g)}';
+    html += 'function updateOrderTotal(){var t=0;document.querySelectorAll(".or-size-input").forEach(function(inp){t+=parseInt(inp.value)||0});document.getElementById("orTotalQty").textContent=t.toLocaleString()}';
+    html += 'document.getElementById("orSubmitBtn").addEventListener("click",function(){var customer=document.getElementById("orCustomer").value;if(!customer){alert("Please select a customer");return}var sizes=[];var total=0;document.querySelectorAll(".or-size-input").forEach(function(inp){var qty=parseInt(inp.value)||0;if(qty>0){sizes.push({size:inp.getAttribute("data-size"),qty:qty});total+=qty}});if(total===0){alert("Enter quantities for at least one size");return}var btn=this;btn.disabled=true;btn.textContent="Submitting...";var style=document.getElementById("orProductStyle").textContent;var body={customer_name:customer,style_id:style,base_style:style.split("-")[0],product_name:document.getElementById("orProductName").textContent,color_info:(document.getElementById("modalCategory")||{}).textContent||"",size_breakdown:JSON.stringify(sizes),total_qty:total,notes:document.getElementById("orNotes").value.trim()};fetch("/api/order-requests",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(d){if(d.success){document.getElementById("orderFormView").classList.add("hidden");document.getElementById("orderSuccessView").classList.remove("hidden");document.getElementById("orSuccessNum").textContent=d.order.request_number;loadOrderBadge()}else{alert("Error: "+(d.error||"Unknown"))}btn.disabled=false;btn.textContent="Submit Order Request"}).catch(function(e){alert("Error: "+e.message);btn.disabled=false;btn.textContent="Submit Order Request"})});';
+    html += 'function loadOrderBadge(){fetch("/api/order-requests/pending-count").then(function(r){return r.json()}).then(function(d){var b=document.getElementById("ordersBadge");if(d.count>0){b.textContent=d.count;b.classList.remove("hidden")}else{b.classList.add("hidden")}}).catch(function(){})}';
+    html += 'function loadMyOrders(){var st=document.getElementById("myOrdersFilter").value;fetch("/api/order-requests?status="+st).then(function(r){return r.json()}).then(function(d){if(d.success)renderOrderCards(d.orders,"myOrdersList","myOrdersCount",false)}).catch(function(e){console.error(e)})}';
+    html += 'function loadAdminOrders(){var st=document.getElementById("adminOrdersFilter").value;fetch("/api/order-requests?status="+st).then(function(r){return r.json()}).then(function(d){if(d.success)renderOrderCards(d.orders,"adminOrdersList","adminOrdersCount",true)}).catch(function(e){console.error(e)})}';
+    html += 'function renderOrderCards(orders,cid,countId,isAdmin){var c=document.getElementById(cid);var ce=document.getElementById(countId);ce.textContent=orders.length+" order"+(orders.length!==1?"s":"");c.innerHTML="";if(!orders.length){c.innerHTML="<p style=color:#999;font-style:italic;padding:1rem>No order requests found.</p>";return}orders.forEach(function(o){var card=document.createElement("div");card.className="order-card";var sizes="";try{var s=JSON.parse(o.size_breakdown);if(Array.isArray(s))sizes=s.map(function(x){return x.size+":"+x.qty}).join(", ");else sizes=Object.keys(s).map(function(k){return k+":"+s[k]}).join(", ")}catch(e){sizes=o.size_breakdown}var dt=new Date(o.created_at).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"});var hdr=document.createElement("div");hdr.className="order-card-header";hdr.innerHTML="<span class=order-card-num>"+o.request_number+"</span>";var badge=document.createElement("span");badge.className="order-status "+o.status;badge.textContent=o.status;hdr.appendChild(badge);card.appendChild(hdr);var body=document.createElement("div");body.style.cssText="font-size:0.85rem;color:#555";var rows=[["Customer",o.customer_name],["Style",(o.style_id||o.base_style||"-")+" - "+(o.product_name||"")]];if(o.color_info)rows.push(["Color",o.color_info]);rows.push(["Qty",(o.total_qty||0).toLocaleString()+" units ("+sizes+")"]);if(o.notes)rows.push(["Notes",o.notes]);rows.push(["Submitted",dt+(isAdmin?" by "+(o.user_name||"Unknown"):"")]);rows.forEach(function(r){var row=document.createElement("div");row.className="ocb-row";row.innerHTML="<span class=ocb-label>"+r[0]+"</span><span class=ocb-val>"+r[1]+"</span>";body.appendChild(row)});card.appendChild(body);if(o.zoho_so_number){var so=document.createElement("div");so.className="order-card-so";so.textContent="Zoho SO: "+o.zoho_so_number;card.appendChild(so)}if(o.admin_notes){var an=document.createElement("div");an.style.cssText="margin-top:0.5rem;padding:0.5rem 0.75rem;background:#f0f4f8;border-radius:8px;font-size:0.8rem;color:#1e3a5f";an.textContent=o.admin_notes;card.appendChild(an)}if(isAdmin&&(o.status==="pending"||o.status==="processing")){var af=document.createElement("div");af.style.cssText="margin-top:0.75rem;border-top:1px solid #eee;padding-top:0.75rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center";var si=document.createElement("input");si.type="text";si.placeholder="Zoho SO #";si.id="soInput"+o.id;si.value=o.zoho_so_number||"";si.style.cssText="padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:0.8rem;width:110px";af.appendChild(si);var ni=document.createElement("input");ni.type="text";ni.placeholder="Admin note";ni.id="noteInput"+o.id;ni.value=o.admin_notes||"";ni.style.cssText="padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:0.8rem;flex:1";af.appendChild(ni);var cb=document.createElement("button");cb.textContent="Complete";cb.style.cssText="padding:5px 12px;font-size:0.75rem;background:#34a853;color:white;border:none;border-radius:980px;cursor:pointer";cb.onclick=(function(oid){return function(){completeOrder(oid)}})(o.id);af.appendChild(cb);if(o.status==="pending"){var pb=document.createElement("button");pb.textContent="Processing";pb.style.cssText="padding:5px 12px;font-size:0.75rem;background:#0088c2;color:white;border:none;border-radius:980px;cursor:pointer";pb.onclick=(function(oid){return function(){updateOrderStatus(oid,"processing")}})(o.id);af.appendChild(pb);var xb=document.createElement("button");xb.textContent="Cancel";xb.style.cssText="padding:5px 12px;font-size:0.75rem;background:#dc3545;color:white;border:none;border-radius:980px;cursor:pointer";xb.onclick=(function(oid){return function(){updateOrderStatus(oid,"cancelled")}})(o.id);af.appendChild(xb)}card.appendChild(af)}c.appendChild(card)})}';
+    html += 'function updateOrderStatus(id,status){fetch("/api/order-requests/"+id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:status})}).then(function(r){return r.json()}).then(function(d){if(d.success){loadAdminOrders();loadMyOrders();loadOrderBadge()}else alert("Error: "+d.error)}).catch(function(e){alert(e.message)})}';
+    html += 'function completeOrder(id){var so=document.getElementById("soInput"+id).value.trim();var note=document.getElementById("noteInput"+id).value.trim();if(!so){alert("Enter the Zoho SO number");return}fetch("/api/order-requests/"+id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:"completed",zoho_so_number:so,admin_notes:note||null})}).then(function(r){return r.json()}).then(function(d){if(d.success){loadAdminOrders();loadMyOrders();loadOrderBadge()}else alert("Error: "+d.error)}).catch(function(e){alert(e.message)})}';
 
     html += 'checkSession();fetchOpenOrders();';
     html += '</script></body></html>';

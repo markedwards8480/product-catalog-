@@ -192,10 +192,6 @@ async function initDB() {
         // Log of every catalog email sent
         await pool.query('CREATE TABLE IF NOT EXISTS catalog_send_log (id SERIAL PRIMARY KEY, subscription_id INTEGER REFERENCES catalog_subscriptions(id) ON DELETE SET NULL, recipient_email VARCHAR(255) NOT NULL, recipient_name VARCHAR(255), company VARCHAR(255), categories TEXT[], share_url TEXT, status VARCHAR(50) DEFAULT \'sent\', opened_at TIMESTAMP, clicked_at TIMESTAMP, error_message TEXT, sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
 
-        // Order Requests
-        await pool.query('CREATE TABLE IF NOT EXISTS order_requests (id SERIAL PRIMARY KEY, request_number VARCHAR(20) UNIQUE NOT NULL, user_id INTEGER, user_name VARCHAR(255), customer_name VARCHAR(255) NOT NULL, style_id VARCHAR(100), base_style VARCHAR(100), product_name VARCHAR(255), color_info VARCHAR(255), size_breakdown TEXT NOT NULL, total_qty INTEGER DEFAULT 0, notes TEXT, status VARCHAR(50) DEFAULT \'pending\', zoho_so_number VARCHAR(100), admin_notes TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
-        try { await pool.query('CREATE INDEX IF NOT EXISTS idx_order_requests_status ON order_requests(status)'); } catch(e) {}
-
         // Migrate existing users: set PIN if not set, set display_name from username
         await pool.query("UPDATE users SET pin = LPAD(FLOOR(RANDOM() * 10000)::TEXT, 4, '0') WHERE pin IS NULL");
         await pool.query("UPDATE users SET display_name = username WHERE display_name IS NULL");
@@ -1955,151 +1951,6 @@ app.get('/api/suppliers', async function(req, res) {
         res.status(500).json({ success: false, error: err.message });
     }
 });
-
-
-// ============================================
-// ORDER REQUESTS API
-// ============================================
-
-async function getNextRequestNumber() {
-    var result = await pool.query("SELECT request_number FROM order_requests ORDER BY id DESC LIMIT 1");
-    if (result.rows.length === 0) return 'OR-0001';
-    var last = result.rows[0].request_number;
-    var num = parseInt(last.replace('OR-', '')) + 1;
-    return 'OR-' + num.toString().padStart(4, '0');
-}
-
-async function sendOrderRequestEmail(orderRequest) {
-    if (!process.env.RESEND_API_KEY) {
-        console.log('ORDER EMAIL WOULD SEND:', orderRequest.request_number);
-        return { success: true, simulated: true };
-    }
-    var notifyEmail = process.env.ORDER_NOTIFY_EMAIL;
-    if (!notifyEmail) {
-        console.log('ORDER_NOTIFY_EMAIL not configured');
-        return { success: false, error: 'not configured' };
-    }
-    try {
-        var sizeStr = '';
-        try {
-            var sizes = JSON.parse(orderRequest.size_breakdown);
-            if (Array.isArray(sizes)) {
-                sizeStr = sizes.map(function(s) { return s.size + ': ' + s.qty; }).join(', ');
-            } else {
-                sizeStr = Object.keys(sizes).map(function(k) { return k + ': ' + sizes[k]; }).join(', ');
-            }
-        } catch(e) { sizeStr = orderRequest.size_breakdown; }
-
-        var emailHtml = '<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">' +
-            '<div style="background:#1a1a2e;color:white;padding:30px;text-align:center;border-radius:10px 10px 0 0;">' +
-            '<h1 style="margin:0;font-size:24px;">New Order Request</h1>' +
-            '<p style="margin:10px 0 0;opacity:0.8;">' + orderRequest.request_number + '</p></div>' +
-            '<div style="background:#f9f9f9;padding:30px;border:1px solid #ddd;">' +
-            '<table style="width:100%;border-collapse:collapse;font-size:15px;">' +
-            '<tr><td style="padding:10px 0;color:#666;font-weight:bold;width:140px">Sales Rep:</td><td>' + (orderRequest.user_name || 'Unknown') + '</td></tr>' +
-            '<tr><td style="padding:10px 0;color:#666;font-weight:bold">Customer:</td><td style="font-weight:bold;font-size:17px">' + orderRequest.customer_name + '</td></tr>' +
-            '<tr><td style="padding:10px 0;color:#666;font-weight:bold">Style:</td><td>' + (orderRequest.style_id || orderRequest.base_style || '') + ' - ' + (orderRequest.product_name || '') + '</td></tr>' +
-            (orderRequest.color_info ? '<tr><td style="padding:10px 0;color:#666;font-weight:bold">Color:</td><td>' + orderRequest.color_info + '</td></tr>' : '') +
-            '<tr><td style="padding:10px 0;color:#666;font-weight:bold">Total Qty:</td><td style="font-weight:bold;font-size:17px">' + orderRequest.total_qty + ' units</td></tr>' +
-            '<tr><td style="padding:10px 0;color:#666;font-weight:bold">Sizes:</td><td>' + sizeStr + '</td></tr>' +
-            (orderRequest.notes ? '<tr><td style="padding:10px 0;color:#666;font-weight:bold;vertical-align:top">Notes:</td><td style="background:#fff8e1;border-radius:4px;padding:10px">' + orderRequest.notes.replace(/\n/g, '<br>') + '</td></tr>' : '') +
-            '</table></div>' +
-            '<div style="text-align:center;padding:15px;color:#999;font-size:12px"><p>Mark Edwards Apparel | Order Request System</p></div></body></html>';
-
-        var response = await fetch('https://api.resend.com/emails', {
-            method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + process.env.RESEND_API_KEY, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                from: process.env.EMAIL_FROM || 'Mark Edwards Apparel <catalog@markedwardsapparel.com>',
-                to: notifyEmail.split(',').map(function(e) { return e.trim(); }),
-                subject: 'New Order Request ' + orderRequest.request_number + ' - ' + orderRequest.customer_name + ' (' + orderRequest.total_qty + ' units)',
-                html: emailHtml
-            })
-        });
-        var result = await response.json();
-        console.log('Order email:', orderRequest.request_number, response.ok ? 'OK' : 'FAILED');
-        return { success: response.ok, data: result };
-    } catch (err) {
-        console.error('Order email error:', err);
-        return { success: false, error: err.message };
-    }
-}
-
-app.post('/api/order-requests', async function(req, res) {
-    try {
-        var requestNumber = await getNextRequestNumber();
-        var b = req.body;
-        if (!b.customer_name || !b.size_breakdown) {
-            return res.status(400).json({ success: false, error: 'Customer and size breakdown required' });
-        }
-        var userId = req.session.userId || null;
-        var userName = req.session.displayName || req.session.username || 'Unknown';
-        var sb = typeof b.size_breakdown === 'string' ? b.size_breakdown : JSON.stringify(b.size_breakdown);
-        var result = await pool.query(
-            'INSERT INTO order_requests (request_number, user_id, user_name, customer_name, style_id, base_style, product_name, color_info, size_breakdown, total_qty, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *',
-            [requestNumber, userId, userName, b.customer_name, b.style_id||null, b.base_style||null, b.product_name||null, b.color_info||null, sb, b.total_qty||0, b.notes||null]
-        );
-        var orderReq = result.rows[0];
-        sendOrderRequestEmail(orderReq).catch(function(err) { console.error('Background email failed:', err); });
-        res.json({ success: true, order: orderReq });
-    } catch (err) {
-        console.error('Create order request error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-app.get('/api/order-requests', async function(req, res) {
-    try {
-        var status = req.query.status;
-        var isAdmin = req.session.role === 'admin';
-        var userId = req.session.userId;
-        var query = 'SELECT * FROM order_requests';
-        var cond = [];
-        var params = [];
-        if (status && status !== 'all') { params.push(status); cond.push('status = $' + params.length); }
-        if (!isAdmin && userId) { params.push(userId); cond.push('user_id = $' + params.length); }
-        if (cond.length > 0) query += ' WHERE ' + cond.join(' AND ');
-        query += ' ORDER BY created_at DESC LIMIT 200';
-        var result = await pool.query(query, params);
-        res.json({ success: true, orders: result.rows });
-    } catch (err) {
-        console.error('Get order requests error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-app.get('/api/order-requests/pending-count', async function(req, res) {
-    try {
-        var result = await pool.query("SELECT COUNT(*) FROM order_requests WHERE status = 'pending'");
-        res.json({ success: true, count: parseInt(result.rows[0].count) });
-    } catch (err) { res.json({ success: true, count: 0 }); }
-});
-
-app.put('/api/order-requests/:id', async function(req, res) {
-    try {
-        var b = req.body;
-        var sets = ['updated_at = CURRENT_TIMESTAMP'];
-        var params = [];
-        if (b.status) { params.push(b.status); sets.push('status = $' + params.length); }
-        if (b.zoho_so_number !== undefined) { params.push(b.zoho_so_number); sets.push('zoho_so_number = $' + params.length); }
-        if (b.admin_notes !== undefined) { params.push(b.admin_notes); sets.push('admin_notes = $' + params.length); }
-        params.push(req.params.id);
-        var result = await pool.query('UPDATE order_requests SET ' + sets.join(', ') + ' WHERE id = $' + params.length + ' RETURNING *', params);
-        if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Not found' });
-        res.json({ success: true, order: result.rows[0] });
-    } catch (err) {
-        console.error('Update order request error:', err);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-app.delete('/api/order-requests/:id', async function(req, res) {
-    try {
-        await pool.query('DELETE FROM order_requests WHERE id = $1', [req.params.id]);
-        res.json({ success: true });
-    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
-});
-
 
 // Get styles for selected customers
 app.get('/api/styles-by-customers', async function(req, res) {
@@ -4353,14 +4204,6 @@ function getHTML() {
     // Modal - Apple style
     html += '.modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:none;align-items:center;justify-content:center;z-index:1000}.modal.active{display:flex}.modal-content{background:white;border-radius:18px;max-width:98vw;width:1600px;max-height:98vh;overflow:auto;position:relative;box-shadow:0 20px 60px rgba(0,0,0,0.2)}.modal-body{display:flex;min-height:850px}.modal-image{width:60%;background:#f5f5f7;min-height:850px;display:flex;align-items:center;justify-content:center;padding:2rem}.modal-image img{max-width:100%;max-height:900px;object-fit:contain}.modal-details{width:40%;padding:2.5rem;overflow-y:auto;max-height:850px;background:white}.modal-details h2,.modal-details h3{background:none!important;margin:0;padding:0}.modal-close{position:absolute;top:1rem;right:1rem;background:rgba(0,0,0,0.06);border:none;font-size:1.25rem;cursor:pointer;border-radius:50%;width:32px;height:32px;z-index:10;color:#1e3a5f;transition:background 0.2s}.modal-close:hover{background:rgba(0,0,0,0.1)}';
     html += '.modal-actions{margin-top:1.5rem;padding-top:1rem;border-top:1px solid #f5f5f7;display:flex;gap:0.5rem;flex-wrap:wrap}';
-    html += '.order-request-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:none;align-items:center;justify-content:center;z-index:1002}.order-request-overlay.active{display:flex}.order-request-box{background:white;border-radius:18px;padding:2rem;max-width:560px;width:95%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.2)}';
-    html += '.or-form-group{margin-bottom:1rem}.or-form-group label{display:block;font-size:0.8rem;font-weight:600;color:#666;margin-bottom:0.35rem}.or-form-group input,.or-form-group select,.or-form-group textarea{width:100%;padding:0.75rem 1rem;border:1.5px solid #e0e0e0;border-radius:10px;font-family:inherit;font-size:0.9rem;box-sizing:border-box}.or-form-group input:focus,.or-form-group select:focus,.or-form-group textarea:focus{outline:none;border-color:#0088c2}';
-    html += '.or-size-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:0.5rem}.or-size-item{display:flex;flex-direction:column;align-items:center;gap:0.25rem}.or-size-item label{font-size:0.75rem;font-weight:700;color:#1e3a5f;margin:0}.or-size-item input{width:65px;text-align:center;padding:0.5rem;font-size:0.95rem;font-weight:600}';
-    html += '.or-total-row{display:flex;justify-content:space-between;align-items:center;padding:0.75rem 1rem;background:#f0f7ff;border-radius:10px;margin:1rem 0;font-weight:700;color:#1e3a5f;font-size:1rem}';
-    html += '.order-card{border:1px solid #e8e8e8;border-radius:12px;padding:1rem;margin-bottom:0.75rem}.order-card:hover{border-color:#0088c2}';
-    html += '.order-status{display:inline-block;padding:2px 10px;border-radius:12px;font-size:0.75rem;font-weight:600;text-transform:uppercase}.order-status.pending{background:#fff3cd;color:#856404}.order-status.processing{background:#cce5ff;color:#004085}.order-status.completed{background:#d4edda;color:#155724}.order-status.cancelled{background:#f8d7da;color:#721c24}';
-    html += '.ocb-row{display:flex;justify-content:space-between;padding:0.2rem 0}.ocb-label{color:#999;font-size:0.8rem}.ocb-val{font-weight:500}';
-    html += '.order-card-so{margin-top:0.5rem;padding:0.5rem 0.75rem;background:#e8f5e9;border-radius:8px;font-size:0.85rem;color:#2e7d32;font-weight:600}';
     html += '.note-section{margin-top:1rem;padding-top:1rem;border-top:1px solid #f5f5f7}.note-section textarea{width:100%;height:80px;margin-top:0.5rem;padding:0.875rem;border:none;border-radius:12px;font-family:inherit;resize:vertical;background:#f5f5f7;transition:background 0.2s}.note-section textarea:focus{outline:none;background:#ebebed}';
     html += '.selection-bar{position:fixed;bottom:0;left:0;right:0;background:#1e3a5f;color:white;padding:1rem 2rem;display:flex;justify-content:space-between;align-items:center;z-index:100;transform:translateY(100%);transition:transform 0.3s}.selection-bar.visible{transform:translateY(0)}';
     
@@ -4542,7 +4385,7 @@ function getHTML() {
     html += '<div id="loginPage" class="login-page" style="display:none"><div class="login-box"><h1>Mark Edwards Apparel<br><span style="font-size:0.8em;font-weight:normal">Product Catalog</span></h1><form id="loginForm"><div class="form-group"><label>Select User</label><select id="loginUserSelect" required style="width:100%;padding:0.875rem 1rem;border:none;border-radius:12px;font-size:1rem;background:#f5f5f7;appearance:none;cursor:pointer"><option value="">-- Select your name --</option></select></div><input type="hidden" id="loginPin" value="0000"><button type="submit" class="btn btn-primary" style="width:100%">Sign In</button><div id="loginError" class="error hidden"></div></form></div></div>';
     
     html += '<div id="mainApp">';
-    html += '<header class="header"><h1 style="color:#1e3a5f;font-weight:700;font-size:1.5rem">Mark Edwards Apparel</h1><div class="header-right"><div class="user-menu-wrapper" style="position:relative"><button class="btn btn-secondary" id="userMenuBtn" style="display:flex;align-items:center;gap:0.5rem"><span id="userInfo">Welcome</span> ▾</button><div id="userMenu" class="user-menu hidden"><button class="user-menu-item" id="changePinBtn">Change PIN</button><button class="user-menu-item" id="logoutBtn">Sign Out</button></div></div><button class="btn btn-secondary" id="helpBtn">User Guide</button><button class="btn btn-secondary" onclick="toggleOrdersPanel()">Orders</button><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn">Admin</button></div></header>';
+    html += '<header class="header"><h1 style="color:#1e3a5f;font-weight:700;font-size:1.5rem">Mark Edwards Apparel</h1><div class="header-right"><div class="user-menu-wrapper" style="position:relative"><button class="btn btn-secondary" id="userMenuBtn" style="display:flex;align-items:center;gap:0.5rem"><span id="userInfo">Welcome</span> ▾</button><div id="userMenu" class="user-menu hidden"><button class="user-menu-item" id="changePinBtn">Change PIN</button><button class="user-menu-item" id="logoutBtn">Sign Out</button></div></div><button class="btn btn-secondary" id="helpBtn">User Guide</button><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn">Admin</button></div></header>';
 
     // Toggle button for treemap (fixed position)
     html += '<button class="treemap-toggle-btn" id="openTreemapShelf">📊 Merch</button>';
@@ -4666,7 +4509,7 @@ function getHTML() {
     html += '<div class="share-modal" id="shareModal"><div class="share-modal-content"><h3>Share Selection</h3><div id="shareForm"><input type="text" id="selectionName" placeholder="Name this selection (e.g. Spring Collection for Acme Co)"><div style="margin:1rem 0"><label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.875rem;color:#4a5568"><input type="checkbox" id="hideQuantities" style="width:18px;height:18px;accent-color:#0088c2"> Hide quantities (Available Now & Left to Sell)</label></div><div class="share-modal-actions"><button class="btn btn-secondary" id="cancelShareBtn">Cancel</button><button class="btn btn-primary" id="createShareBtn">Create Link</button></div></div><div class="share-result hidden" id="shareResult"><p style="margin-bottom:1rem;color:#666" id="shareNameDisplay"></p><div class="share-buttons"><button class="share-action-btn" id="emailLinkBtn">Email Link</button><button class="share-action-btn" id="textLinkBtn">Text Link</button><button class="share-action-btn" id="copyLinkBtn">Copy Link</button><a class="share-action-btn" id="pdfLink" href="" target="_blank">Download PDF</a></div><div style="margin-top:1.5rem;text-align:center"><button class="btn btn-secondary" id="closeShareModalBtn">Done</button></div></div></div></div>';
     
     // Product modal
-    html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button><div class="modal-body"><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div style="margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid #e0e0e0"><div class="product-style" id="modalStyle" style="color:#0088c2;font-size:0.875rem;font-weight:600;margin-bottom:0.25rem"></div><h2 id="modalName" style="margin:0;padding:0;font-size:1.75rem;font-weight:600;color:#1e3a5f;background:none"></h2><p id="modalCategory" style="color:#6e6e73;margin:0.25rem 0 0;font-size:0.875rem"></p></div><div id="modalColors"></div><div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div><div class="modal-actions"><button class="btn btn-secondary btn-sm" id="modalPickBtn">♡ Add to My Picks</button><button class="btn btn-primary btn-sm" onclick="openOrderRequestForm()" style="background:#34a853;border-color:#34a853">📋 Order Request</button></div><div class="sales-history-section"><h3 style="margin:1.5rem 0 0.5rem;font-size:1rem;display:flex;align-items:center;gap:0.5rem;color:#1e3a5f;background:none">Sales & Import PO History <span id="salesHistoryLoading" style="font-size:0.75rem;color:#666;font-weight:normal">(loading...)</span></h3><p style="margin:0 0 0.75rem;font-size:0.75rem;color:#999;font-style:italic">(Showing trailing 12 months)</p><div id="salesHistorySummary" style="display:flex;gap:0.5rem;margin-bottom:0.75rem"></div><div id="salesHistoryFilter" style="margin-bottom:0.5rem;font-size:0.8rem;color:#666"></div><div id="salesHistoryList" style="max-height:200px;overflow-y:auto;font-size:0.875rem"></div></div><div class="note-section"><label><strong>Notes:</strong></label><textarea id="modalNote" placeholder="Add notes about this product..."></textarea><button class="btn btn-sm btn-primary" id="saveNoteBtn">Save Note</button></div></div></div></div></div>';
+    html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button><div class="modal-body"><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div style="margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid #e0e0e0"><div class="product-style" id="modalStyle" style="color:#0088c2;font-size:0.875rem;font-weight:600;margin-bottom:0.25rem"></div><h2 id="modalName" style="margin:0;padding:0;font-size:1.75rem;font-weight:600;color:#1e3a5f;background:none"></h2><p id="modalCategory" style="color:#6e6e73;margin:0.25rem 0 0;font-size:0.875rem"></p></div><div id="modalColors"></div><div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div><div class="modal-actions"><button class="btn btn-secondary btn-sm" id="modalPickBtn">♡ Add to My Picks</button></div><div class="sales-history-section"><h3 style="margin:1.5rem 0 0.5rem;font-size:1rem;display:flex;align-items:center;gap:0.5rem;color:#1e3a5f;background:none">Sales & Import PO History <span id="salesHistoryLoading" style="font-size:0.75rem;color:#666;font-weight:normal">(loading...)</span></h3><p style="margin:0 0 0.75rem;font-size:0.75rem;color:#999;font-style:italic">(Showing trailing 12 months)</p><div id="salesHistorySummary" style="display:flex;gap:0.5rem;margin-bottom:0.75rem"></div><div id="salesHistoryFilter" style="margin-bottom:0.5rem;font-size:0.8rem;color:#666"></div><div id="salesHistoryList" style="max-height:200px;overflow-y:auto;font-size:0.875rem"></div></div><div class="note-section"><label><strong>Notes:</strong></label><textarea id="modalNote" placeholder="Add notes about this product..."></textarea><button class="btn btn-sm btn-primary" id="saveNoteBtn">Save Note</button></div></div></div></div></div>';
     
     
     // Change PIN modal
@@ -4710,9 +4553,6 @@ function getHTML() {
     
     html += '</div></div></div>';
     
-    // Order Request overlay
-    html += '<div class="order-request-overlay" id="orOverlay" onclick="closeOrOverlay(event)"><div class="order-request-box" id="orBox"></div></div>';
-
     html += '<script>';
     html += 'var products=[];var allProducts=[];var groupedProducts=[];var lastImportId=null;var selectedCategories=[];var colorFilter=null;var specialFilter=null;var currentSort="qty-high";var currentSize="medium";var selectedProducts=[];var selectionMode=false;var currentShareId=null;var userPicks=[];var userNotes={};var currentModalProductId=null;var currentModalBaseStyle=null;var focusedIndex=-1;var qtyMode="left_to_sell";var groupByStyle=true;var minColorsFilter=0;var supplyDemandMode=false;var openOrdersByStyle={};var importPOsByStyle={};';
     
@@ -5067,28 +4907,6 @@ function getHTML() {
     html += 'async function toggleSubscription(id){try{var res=await fetch("/api/catalog-subscriptions/"+id+"/toggle",{method:"POST"});var data=await res.json();if(data.success){loadSubscriptions()}}catch(err){alert("Error: "+err.message)}}';
 
     html += 'async function deleteSubscription(id){if(!confirm("Delete this subscription? This cannot be undone."))return;try{var res=await fetch("/api/catalog-subscriptions/"+id,{method:"DELETE"});var data=await res.json();if(data.success){loadSubscriptions();loadSendHistory()}}catch(err){alert("Error: "+err.message)}}';
-
-
-    // ORDER REQUEST SYSTEM - functions
-    html += 'var orCustomersLoaded=false;var orCustomerList=[];';
-    html += 'function closeOrOverlay(e){if(e.target.id==="orOverlay")e.target.classList.remove("active")}';
-    html += 'var orSizePresets={Alpha:["XS","S","M","L","XL","2XL","3XL"],Numeric:["0","2","4","6","8","10","12","14"],Waist:["28","29","30","31","32","33","34","36","38","40"],OneSize:["OS"]};';
-
-    html += 'function openOrderRequestForm(){var style=document.getElementById("modalStyle").textContent;var name=document.getElementById("modalName").textContent;var img=document.getElementById("modalImage").src;var cat=(document.getElementById("modalCategory")||{}).textContent||"";if(!orCustomersLoaded){fetch("/api/customers").then(function(r){return r.json()}).then(function(d){if(d.success){orCustomerList=d.customers.map(function(c){return c.name});orCustomersLoaded=true;showOrderForm(style,name,img,cat)}}).catch(function(){showOrderForm(style,name,img,cat)})}else{showOrderForm(style,name,img,cat)}}';
-
-    html += 'function showOrderForm(style,name,img,cat){var box=document.getElementById("orBox");box.innerHTML="";var h3=document.createElement("h3");h3.textContent="Create Order Request";h3.style.cssText="margin:0 0 1.5rem;font-weight:700;color:#1e3a5f;font-size:1.25rem";box.appendChild(h3);var info=document.createElement("div");info.style.cssText="display:flex;gap:1rem;align-items:center;padding:1rem;background:#f8f9fa;border-radius:10px;margin-bottom:1.5rem";var im=document.createElement("img");im.src=img;im.style.cssText="width:60px;height:60px;object-fit:contain;border-radius:8px;background:white";info.appendChild(im);var td=document.createElement("div");var ts=document.createElement("div");ts.style.cssText="font-size:0.8rem;color:#0088c2;font-weight:600";ts.textContent=style;td.appendChild(ts);var tn=document.createElement("div");tn.style.cssText="font-size:0.95rem;font-weight:600;color:#1e3a5f";tn.textContent=name;td.appendChild(tn);info.appendChild(td);box.appendChild(info);var cg=document.createElement("div");cg.className="or-form-group";var cl=document.createElement("label");cl.textContent="Customer / Retailer";cg.appendChild(cl);var sel=document.createElement("select");sel.id="orCust";sel.style.cssText="width:100%;padding:0.75rem 1rem;border:1.5px solid #e0e0e0;border-radius:10px;font-size:0.9rem";var o0=document.createElement("option");o0.value="";o0.textContent="Select a customer...";sel.appendChild(o0);orCustomerList.forEach(function(c){var op=document.createElement("option");op.value=c;op.textContent=c;sel.appendChild(op)});cg.appendChild(sel);box.appendChild(cg);var sg=document.createElement("div");sg.className="or-form-group";var sl=document.createElement("label");sl.textContent="Size Breakdown";sg.appendChild(sl);var pb=document.createElement("div");pb.id="orPresetBar";sg.appendChild(pb);var sd=document.createElement("div");sd.id="orSizes";sg.appendChild(sd);box.appendChild(sg);var tr=document.createElement("div");tr.className="or-total-row";tr.innerHTML="<span>Total Quantity</span><span id=orTotal>0</span>";box.appendChild(tr);var ng=document.createElement("div");ng.className="or-form-group";var nl=document.createElement("label");nl.textContent="Notes / Special Instructions";ng.appendChild(nl);var ta=document.createElement("textarea");ta.id="orNotes";ta.rows=3;ta.placeholder="Ship date, packaging, pricing, etc.";ta.style.cssText="width:100%;padding:0.75rem 1rem;border:1.5px solid #e0e0e0;border-radius:10px;font-family:inherit;font-size:0.9rem;box-sizing:border-box";ng.appendChild(ta);box.appendChild(ng);var acts=document.createElement("div");acts.style.cssText="display:flex;gap:0.75rem;justify-content:flex-end;margin-top:1.5rem";var cbtn=document.createElement("button");cbtn.className="btn btn-secondary";cbtn.textContent="Cancel";cbtn.onclick=function(){document.getElementById("orOverlay").classList.remove("active")};acts.appendChild(cbtn);var sbtn=document.createElement("button");sbtn.className="btn btn-primary";sbtn.id="orSubmitBtn";sbtn.textContent="Submit Order Request";sbtn.style.cssText="background:#34a853;border-color:#34a853";sbtn.onclick=function(){doSubmitOrder(style,style.split("-")[0],name,cat)};acts.appendChild(sbtn);box.appendChild(acts);buildOrPresets("Alpha");document.getElementById("orOverlay").classList.add("active")}';
-
-    html += 'function buildOrPresets(active){var bar=document.getElementById("orPresetBar");bar.innerHTML="";var sp=document.createElement("span");sp.style.cssText="font-size:0.75rem;color:#999";sp.textContent="Preset: ";bar.appendChild(sp);bar.style.cssText="margin-bottom:0.75rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center";Object.keys(orSizePresets).forEach(function(p){var b=document.createElement("button");b.textContent=p;b.style.cssText="padding:3px 10px;font-size:0.7rem;border-radius:6px;border:1px solid #ccc;cursor:pointer;"+(p===active?"background:#0088c2;color:white":"background:white");b.onclick=function(){buildOrPresets(p);buildOrSizeInputs(orSizePresets[p])};bar.appendChild(b)});buildOrSizeInputs(orSizePresets[active]||[])}';
-
-    html += 'function buildOrSizeInputs(sizes){var c=document.getElementById("orSizes");c.innerHTML="";var g=document.createElement("div");g.className="or-size-grid";sizes.forEach(function(s){var item=document.createElement("div");item.className="or-size-item";var lbl=document.createElement("label");lbl.textContent=s;var inp=document.createElement("input");inp.type="number";inp.min="0";inp.placeholder="0";inp.setAttribute("data-size",s);inp.className="or-size-input";inp.oninput=calcOrTotal;item.appendChild(lbl);item.appendChild(inp);g.appendChild(item)});c.appendChild(g)}';
-
-    html += 'function calcOrTotal(){var t=0;document.querySelectorAll(".or-size-input").forEach(function(i){t+=parseInt(i.value)||0});document.getElementById("orTotal").textContent=t.toLocaleString()}';
-
-    html += 'function doSubmitOrder(styleId,baseStyle,prodName,colorInfo){var cust=document.getElementById("orCust").value;if(!cust){alert("Please select a customer");return}var sizes=[];var total=0;document.querySelectorAll(".or-size-input").forEach(function(i){var q=parseInt(i.value)||0;if(q>0){sizes.push({size:i.getAttribute("data-size"),qty:q});total+=q}});if(!total){alert("Enter quantities for at least one size");return}var btn=document.getElementById("orSubmitBtn");btn.disabled=true;btn.textContent="Submitting...";fetch("/api/order-requests",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({customer_name:cust,style_id:styleId,base_style:baseStyle,product_name:prodName,color_info:colorInfo,size_breakdown:JSON.stringify(sizes),total_qty:total,notes:(document.getElementById("orNotes")||{}).value||""})}).then(function(r){return r.json()}).then(function(d){btn.disabled=false;btn.textContent="Submit Order Request";if(d.success){document.getElementById("orBox").innerHTML="<div style=text-align:center;padding:2rem><div style=font-size:3rem;margin-bottom:1rem>\u2705</div><h3 style=color:#34a853>Order Request Submitted!</h3><div style=font-size:1.5rem;font-weight:700;color:#1e3a5f;margin:0.5rem>"+d.order.request_number+"</div><p style=color:#666;margin:1rem>Sent to order entry team.</p><button class=btn onclick=document.getElementById(\'orOverlay\').classList.remove(\'active\') style=margin-top:1rem>Done</button></div>"}else{alert("Error: "+(d.error||"Unknown"))}}).catch(function(e){btn.disabled=false;btn.textContent="Submit Order Request";alert("Error: "+e.message)})}';
-
-    html += 'function toggleOrdersPanel(){var p=document.getElementById("ordersListPanel");if(!p){var main=document.querySelector(".main");var d=document.createElement("div");d.id="ordersListPanel";d.style.cssText="background:white;padding:2rem;border-radius:18px;margin-bottom:2rem;border:1px solid rgba(0,0,0,0.04)";d.innerHTML="<h2 style=margin-bottom:1rem;font-weight:600;color:#1e3a5f;font-size:1.25rem>Order Requests</h2><div style=margin-bottom:1rem><select id=orListFilter onchange=loadOrdersList() style=padding:0.5rem;border-radius:8px;border:1px_solid_#ddd;font-size:0.85rem><option value=all>All</option><option value=pending>Pending</option><option value=processing>Processing</option><option value=completed>Completed</option></select></div><div id=orListContent>Loading...</div>";main.insertBefore(d,main.firstChild);loadOrdersList()}else{p.style.display=p.style.display==="none"?"":"none";if(p.style.display!=="none")loadOrdersList()}}';
-
-    html += 'function loadOrdersList(){var f=document.getElementById("orListFilter");var st=f?f.value:"all";fetch("/api/order-requests?status="+st).then(function(r){return r.json()}).then(function(d){var c=document.getElementById("orListContent");if(!d.success||!d.orders.length){c.innerHTML="<p style=color:#999;font-style:italic>No orders found.</p>";return}c.innerHTML="";d.orders.forEach(function(o){var card=document.createElement("div");card.className="order-card";var sizes="";try{var s=JSON.parse(o.size_breakdown);if(Array.isArray(s))sizes=s.map(function(x){return x.size+":"+x.qty}).join(", ");else sizes=Object.keys(s).map(function(k){return k+":"+s[k]}).join(", ")}catch(e){sizes=o.size_breakdown}var dt=new Date(o.created_at).toLocaleDateString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});var h="<div style=display:flex;justify-content:space-between;margin-bottom:0.5rem><span style=font-weight:700;color:#1e3a5f>"+o.request_number+"</span><span class=\"order-status "+o.status+"\">"+o.status+"</span></div>";h+="<div style=font-size:0.85rem;color:#555>";h+="<div class=ocb-row><span class=ocb-label>Customer</span><span class=ocb-val>"+o.customer_name+"</span></div>";h+="<div class=ocb-row><span class=ocb-label>Style</span><span class=ocb-val>"+(o.style_id||"-")+" - "+(o.product_name||"")+"</span></div>";h+="<div class=ocb-row><span class=ocb-label>Qty</span><span class=ocb-val>"+o.total_qty+" units ("+sizes+")</span></div>";if(o.notes)h+="<div class=ocb-row><span class=ocb-label>Notes</span><span class=ocb-val>"+o.notes+"</span></div>";h+="<div class=ocb-row><span class=ocb-label>Submitted</span><span class=ocb-val>"+dt+" by "+(o.user_name||"Unknown")+"</span></div></div>";if(o.zoho_so_number)h+="<div class=order-card-so>Zoho SO: "+o.zoho_so_number+"</div>";card.innerHTML=h;c.appendChild(card)})}).catch(function(e){console.error(e)})}';
 
     html += 'checkSession();fetchOpenOrders();';
     html += '</script></body></html>';

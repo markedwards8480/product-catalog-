@@ -4377,6 +4377,91 @@ function getHTML() {
     html += '.treemap-shelf-total{display:flex;align-items:center;gap:0.75rem}';
     html += '@media(max-width:900px){.treemap-shelf.open{width:260px}.treemap-shelf-inner{width:260px}}';
 
+    // ═══ DASHBOARD VIEW CSS ═══
+    html += '.view-mode-toggle{display:inline-flex;background:#f0f4f8;border-radius:980px;padding:2px;margin-right:1rem}.view-mode-btn{padding:0.4rem 0.9rem;border:none;background:transparent;cursor:pointer;font-size:0.75rem;font-weight:500;border-radius:980px;transition:all 0.15s;color:#6e6e73;font-family:inherit}.view-mode-btn.active{background:#0E7C86;color:white;box-shadow:0 1px 4px rgba(14,124,134,0.3)}';
+    html += '.dashboard-left-panel{display:none;width:300px;background:#fff;border-right:1px solid #e0e0e0;overflow-y:auto;flex-shrink:0;position:sticky;top:48px;height:calc(100vh - 48px)}.dashboard-left-panel::-webkit-scrollbar{width:5px}.dashboard-left-panel::-webkit-scrollbar-thumb{background:#ddd;border-radius:3px}';
+    html += '.dlp-section{padding:12px 14px;border-bottom:1px solid #f0f0f0}.dlp-section:last-child{border-bottom:none}';
+    html += '.dlp-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#86868b;margin-bottom:8px;display:flex;align-items:center;gap:5px}';
+    html += '.dlp-search{width:100%;padding:8px 10px 8px 32px;border:1px solid #e0e0e0;border-radius:8px;font-size:13px;background:#f5f5f7 url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'14\' height=\'14\' fill=\'none\' viewBox=\'0 0 24 24\' stroke=\'%2386868b\' stroke-width=\'2\'%3E%3Ccircle cx=\'11\' cy=\'11\' r=\'8\'/%3E%3Cpath d=\'m21 21-4.35-4.35\'/%3E%3C/svg%3E") 10px center no-repeat;font-family:inherit}.dlp-search:focus{outline:none;border-color:#0E7C86;background-color:#fff}';
+    html += '.dlp-filter-row{margin-bottom:8px}.dlp-label{font-size:11.5px;color:#6e6e73;font-weight:500;margin-bottom:3px;display:block}.dlp-select{width:100%;padding:7px 28px 7px 10px;border:1px solid #e0e0e0;border-radius:6px;font-size:12.5px;font-family:inherit;appearance:none;background:#f5f5f7 url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'10\' viewBox=\'0 0 24 24\' fill=\'none\' stroke=\'%2386868b\' stroke-width=\'2\'%3E%3Cpath d=\'m6 9 6 6 6-6\'/%3E%3C/svg%3E") right 8px center no-repeat;cursor:pointer}.dlp-select:focus{outline:none;border-color:#0E7C86}';
+    html += '.dlp-qty-row{display:flex;align-items:center;gap:5px}.dlp-qty-input{flex:1;padding:7px 5px;border:1px solid #e0e0e0;border-radius:6px;font-size:12.5px;text-align:center;background:#f5f5f7;font-family:inherit}.dlp-qty-input:focus{outline:none;border-color:#0E7C86}';
+    html += '.dlp-quick-filters{display:grid;grid-template-columns:1fr 1fr;gap:5px}.dlp-qf-btn{padding:7px 8px;border:1px solid #e0e0e0;border-radius:6px;font-size:11.5px;font-weight:500;background:#f5f5f7;color:#4a5568;cursor:pointer;transition:all 0.15s;display:flex;align-items:center;justify-content:space-between;font-family:inherit}.dlp-qf-btn:hover{border-color:#0E7C86;color:#0E7C86}.dlp-qf-btn.active{background:#e6f5f6;border-color:#0E7C86;color:#0E7C86;font-weight:600}.dlp-qf-count{font-size:11px;font-weight:700;background:#eee;padding:1px 6px;border-radius:10px;color:#1e3a5f}.dlp-qf-btn.active .dlp-qf-count{background:#0E7C86;color:#fff}';
+    html += '.dlp-clear-btn{width:100%;padding:7px;border:1px solid #e0e0e0;border-radius:6px;font-size:11.5px;font-weight:500;background:transparent;color:#86868b;cursor:pointer;margin-top:6px;font-family:inherit}.dlp-clear-btn:hover{border-color:#ff3b30;color:#ff3b30}';
+    html += '.dlp-treemap-grid{display:flex;flex-wrap:wrap;gap:4px}.dlp-treemap-total{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.dlp-treemap-total-label{font-size:12px;color:#6e6e73;font-weight:500}.dlp-treemap-total-val{font-size:14px;font-weight:700;color:#0E7C86}';
+    html += '.dlp-avail-row{display:flex;align-items:center;gap:6px;margin-bottom:7px}.dlp-avail-label{font-size:11px;color:#6e6e73;font-weight:500;width:55px;flex-shrink:0}.dlp-avail-track{flex:1;height:16px;background:#f0f0f0;border-radius:4px;overflow:hidden}.dlp-avail-fill{height:100%;border-radius:4px;display:flex;align-items:center;padding-left:5px}.dlp-avail-text{font-size:10px;font-weight:600;color:#fff;white-space:nowrap}.dlp-avail-val{font-size:11.5px;font-weight:600;color:#1e3a5f;width:45px;text-align:right;flex-shrink:0}';
+    // Dashboard mode layout changes
+    html += 'body.dashboard-mode .treemap-toggle-btn{display:none}body.dashboard-mode .treemap-shelf{display:none!important}body.dashboard-mode .dashboard-left-panel{display:block}body.dashboard-mode .stats{padding:0.75rem 2rem}body.dashboard-mode .stats .stat-value{font-size:1.5rem}body.dashboard-mode .view-controls{padding:0.625rem 1.5rem}body.dashboard-mode .filters{display:none}body.dashboard-mode .product-grid{padding:1rem 1.5rem}';
+    // ═══ END DASHBOARD VIEW CSS ═══
+
+    // ═══ V3 DASHBOARD THEME CSS ═══
+    html += '@import url("https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&display=swap");';
+    // V3 base: same layout behavior as dashboard-mode
+    html += 'body.dashboard-v3 .treemap-toggle-btn{display:none}body.dashboard-v3 .treemap-shelf{display:none!important}body.dashboard-v3 .dashboard-left-panel{display:block}body.dashboard-v3 .filters{display:none}body.dashboard-v3 .product-grid{padding:1rem 1.5rem}';
+    // V3 font override
+    html += 'body.dashboard-v3,body.dashboard-v3 *{font-family:"DM Sans",-apple-system,BlinkMacSystemFont,sans-serif}';
+    // V3 header - dark navy with teal stripe
+    html += 'body.dashboard-v3 .header{background:#1B2A3D;border-top:3px solid #0E7C86;border-bottom:none;height:52px}';
+    html += 'body.dashboard-v3 .header h1{color:#fff;font-size:1rem;font-weight:600}';
+    html += 'body.dashboard-v3 .header h1::after{content:" Product Catalog";color:#0E7C86;font-weight:700}';
+    html += 'body.dashboard-v3 .header-right .btn-secondary{color:#94A3B8;font-size:12px}body.dashboard-v3 .header-right .btn-secondary:hover{color:#fff;background:rgba(255,255,255,0.08)}';
+    html += 'body.dashboard-v3 #userMenuBtn{color:#94A3B8}body.dashboard-v3 #userMenuBtn span{color:#fff}';
+    // V3 view mode toggle in header
+    html += 'body.dashboard-v3 .view-mode-toggle{background:rgba(255,255,255,0.1)}body.dashboard-v3 .view-mode-btn{color:rgba(255,255,255,0.6)}body.dashboard-v3 .view-mode-btn.active{background:#0E7C86;color:#fff}';
+    // V3 body background
+    html += 'body.dashboard-v3{background:#F4F5F7}';
+    // V3 stats bar
+    html += 'body.dashboard-v3 .stats{background:#fff;padding:14px 24px;border-bottom:1px solid #E2E5EA}';
+    html += 'body.dashboard-v3 .stats .stat-value{font-size:1.75rem;font-weight:700;color:#1A2332;letter-spacing:-0.02em}';
+    html += 'body.dashboard-v3 .stats .stat-label{color:#8A94A3;font-size:0.6875rem}';
+    html += 'body.dashboard-v3 .stats .stat-box{opacity:1}';
+    // V3 qty toggle
+    html += 'body.dashboard-v3 .qty-toggle{background:#F4F5F7;border:1px solid #E2E5EA}body.dashboard-v3 .qty-toggle-btn{color:#5A6577}body.dashboard-v3 .qty-toggle-btn.active{background:#0E7C86;box-shadow:none}';
+    // V3 view controls
+    html += 'body.dashboard-v3 .view-controls{background:#fff;padding:10px 20px;border-bottom:1px solid #E2E5EA}';
+    html += 'body.dashboard-v3 .size-btn{border-radius:4px;font-size:12px}body.dashboard-v3 .size-btn.active{background:#F4F5F7;color:#1A2332}';
+    html += 'body.dashboard-v3 .select-mode-btn{border-radius:6px;font-size:13px;font-weight:600}body.dashboard-v3 .select-mode-btn:hover{background:rgba(14,124,134,0.08);color:#0E7C86}body.dashboard-v3 .select-mode-btn.active{background:#0E7C86}';
+    // V3 left panel
+    html += 'body.dashboard-v3 .dashboard-left-panel{background:#fff;border-right:1px solid #E2E5EA;width:300px}';
+    html += 'body.dashboard-v3 .dlp-section{padding:14px 16px;border-bottom:1px solid #EEF0F3}';
+    html += 'body.dashboard-v3 .dlp-title{color:#8A94A3;font-size:11px}';
+    html += 'body.dashboard-v3 .dlp-search{background:#F4F5F7;border:1px solid #E2E5EA;border-radius:6px}body.dashboard-v3 .dlp-search:focus{border-color:#0E7C86;background:#fff}';
+    html += 'body.dashboard-v3 .dlp-select{background:#F4F5F7;border:1px solid #E2E5EA;border-radius:6px}body.dashboard-v3 .dlp-select:focus{border-color:#0E7C86}';
+    html += 'body.dashboard-v3 .dlp-label{color:#5A6577}';
+    html += 'body.dashboard-v3 .dlp-qty-input{background:#F4F5F7;border:1px solid #E2E5EA;border-radius:6px}body.dashboard-v3 .dlp-qty-input:focus{border-color:#0E7C86}';
+    html += 'body.dashboard-v3 .dlp-qf-btn{background:#F4F5F7;border:1px solid #E2E5EA;border-radius:6px;color:#5A6577}body.dashboard-v3 .dlp-qf-btn:hover{border-color:#0E7C86;color:#0E7C86}body.dashboard-v3 .dlp-qf-btn.active{background:#E6F5F6;border-color:#0E7C86;color:#0E7C86}';
+    html += 'body.dashboard-v3 .dlp-qf-count{background:#EEF0F3;color:#1A2332}body.dashboard-v3 .dlp-qf-btn.active .dlp-qf-count{background:#0E7C86;color:#fff}';
+    html += 'body.dashboard-v3 .dlp-clear-btn{border:1px solid #E2E5EA;color:#8A94A3;border-radius:6px}body.dashboard-v3 .dlp-clear-btn:hover{border-color:#e74c3c;color:#e74c3c}';
+    html += 'body.dashboard-v3 .dlp-treemap-total-val{color:#0E7C86}';
+    html += 'body.dashboard-v3 .dlp-avail-label{color:#5A6577}';
+    html += 'body.dashboard-v3 .dlp-avail-val{color:#1A2332}';
+    // V3 product cards
+    html += 'body.dashboard-v3 .product-card{border-radius:8px;border:1px solid #EEF0F3;box-shadow:none}body.dashboard-v3 .product-card:hover{box-shadow:0 1px 4px rgba(0,0,0,0.06),0 2px 12px rgba(0,0,0,0.04);border-color:#E2E5EA;transform:none}';
+    html += 'body.dashboard-v3 .product-image{background:#F4F5F7;height:200px}';
+    html += 'body.dashboard-v3 .product-info{text-align:left;padding:10px 12px 12px}';
+    html += 'body.dashboard-v3 .product-style{color:#8A94A3;font-size:11px}';
+    html += 'body.dashboard-v3 .product-name{color:#1A2332;font-size:13px;font-weight:600}';
+    html += 'body.dashboard-v3 .color-list .color-row{font-size:12px}';
+    html += 'body.dashboard-v3 .total-row{border-top:1px solid #EEF0F3;font-size:13px}';
+    html += 'body.dashboard-v3 .color-count-badge{background:#0E7C86;border-radius:10px;font-size:10.5px;padding:3px 8px}';
+    html += 'body.dashboard-v3 .pick-badge{background:#F59E0B}';
+    html += 'body.dashboard-v3 .select-badge{background:#0E7C86}body.dashboard-v3 .product-card.selected{box-shadow:0 0 0 2px #0E7C86}';
+    // V3 selection bar
+    html += 'body.dashboard-v3 .selection-bar{background:#1B2A3D}';
+    html += 'body.dashboard-v3 .selection-bar .btn-success{background:#0E7C86}body.dashboard-v3 .selection-bar .btn-success:hover{background:#0A6069}';
+    // V3 modal
+    html += 'body.dashboard-v3 .modal-content{border-radius:8px}body.dashboard-v3 .modal-details h2{color:#1A2332}body.dashboard-v3 .modal-details h3{color:#1A2332}';
+    // V3 accent color shift for highlights
+    html += 'body.dashboard-v3 .filter-btn.special.active{background:#0E7C86}body.dashboard-v3 .filter-btn.active{background:#1B2A3D}body.dashboard-v3 .tab.active{background:#0E7C86}';
+    html += 'body.dashboard-v3 .btn-success{background:#0E7C86}body.dashboard-v3 .btn-success:hover{background:#0A6069}';
+    html += 'body.dashboard-v3 .btn-primary{background:#1B2A3D}body.dashboard-v3 .btn-primary:hover{background:#2a3f56}';
+    // V3 scrollbar
+    html += 'body.dashboard-v3 .dashboard-left-panel::-webkit-scrollbar-thumb{background:#E2E5EA}body.dashboard-v3 .dashboard-left-panel::-webkit-scrollbar-thumb:hover{background:#8A94A3}';
+    // V3 empty state
+    html += 'body.dashboard-v3 .empty{color:#8A94A3}';
+    // V3 search box
+    html += 'body.dashboard-v3 .search-box input{background:#F4F5F7;border-radius:6px}body.dashboard-v3 .search-box input:focus{background:#fff}';
+    // ═══ END V3 DASHBOARD THEME CSS ═══
+
     html += '</style></head><body>';
     
     // Filter summary side panel only (badge is now inline in filters)
@@ -4385,7 +4470,7 @@ function getHTML() {
     html += '<div id="loginPage" class="login-page" style="display:none"><div class="login-box"><h1>Mark Edwards Apparel<br><span style="font-size:0.8em;font-weight:normal">Product Catalog</span></h1><form id="loginForm"><div class="form-group"><label>Select User</label><select id="loginUserSelect" required style="width:100%;padding:0.875rem 1rem;border:none;border-radius:12px;font-size:1rem;background:#f5f5f7;appearance:none;cursor:pointer"><option value="">-- Select your name --</option></select></div><input type="hidden" id="loginPin" value="0000"><button type="submit" class="btn btn-primary" style="width:100%">Sign In</button><div id="loginError" class="error hidden"></div></form></div></div>';
     
     html += '<div id="mainApp">';
-    html += '<header class="header"><h1 style="color:#1e3a5f;font-weight:700;font-size:1.5rem">Mark Edwards Apparel</h1><div class="header-right"><div class="user-menu-wrapper" style="position:relative"><button class="btn btn-secondary" id="userMenuBtn" style="display:flex;align-items:center;gap:0.5rem"><span id="userInfo">Welcome</span> ▾</button><div id="userMenu" class="user-menu hidden"><button class="user-menu-item" id="changePinBtn">Change PIN</button><button class="user-menu-item" id="logoutBtn">Sign Out</button></div></div><button class="btn btn-secondary" id="helpBtn">User Guide</button><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn">Admin</button></div></header>';
+    html += '<header class="header"><h1 style="color:#1e3a5f;font-weight:700;font-size:1.5rem">Mark Edwards Apparel</h1><div class="header-right"><div class="view-mode-toggle"><button class="view-mode-btn active" id="viewModeClassic" onclick="setViewMode(\'classic\')">Classic</button><button class="view-mode-btn" id="viewModeDashboard" onclick="setViewMode(\'dashboard\')">Dashboard</button><button class="view-mode-btn" id="viewModeV3" onclick="setViewMode(\'v3\')">v3</button></div><div class="user-menu-wrapper" style="position:relative"><button class="btn btn-secondary" id="userMenuBtn" style="display:flex;align-items:center;gap:0.5rem"><span id="userInfo">Welcome</span> ▾</button><div id="userMenu" class="user-menu hidden"><button class="user-menu-item" id="changePinBtn">Change PIN</button><button class="user-menu-item" id="logoutBtn">Sign Out</button></div></div><button class="btn btn-secondary" id="helpBtn">User Guide</button><button class="btn btn-secondary" id="historyBtn">History</button><button class="btn btn-secondary" id="adminBtn">Admin</button></div></header>';
 
     // Toggle button for treemap (fixed position)
     html += '<button class="treemap-toggle-btn" id="openTreemapShelf">📊 Merch</button>';
@@ -4400,6 +4485,40 @@ function getHTML() {
     html += '<div class="treemap-shelf-total"><span id="treemapTotal">0</span> units total<button class="treemap-clear-btn hidden" id="treemapClearFilter">✕ Clear Filter</button></div>';
     html += '<div class="treemap-shelf-content"><div class="treemap-grid" id="treemapGrid"></div></div>';
     html += '</div></div>';
+
+    // ═══ DASHBOARD LEFT PANEL ═══
+    html += '<div class="dashboard-left-panel" id="dashboardLeftPanel">';
+    // Search
+    html += '<div class="dlp-section"><input type="text" class="dlp-search" id="dlpSearch" placeholder="Search styles..."></div>';
+    // Filters
+    html += '<div class="dlp-section"><div class="dlp-title">🔽 Filters</div>';
+    html += '<div class="dlp-filter-row"><label class="dlp-label">Commodity</label><select class="dlp-select" id="dlpCommodity"><option value="">All Commodities</option></select></div>';
+    html += '<div class="dlp-filter-row"><label class="dlp-label">Color</label><select class="dlp-select" id="dlpColor"><option value="">All Colors</option></select></div>';
+    html += '<div class="dlp-filter-row"><label class="dlp-label">Customer</label><select class="dlp-select" id="dlpCustomer"><option value="">All Customers</option></select></div>';
+    html += '<div class="dlp-filter-row"><label class="dlp-label">Supplier</label><select class="dlp-select" id="dlpSupplier"><option value="">All Suppliers</option></select></div>';
+    html += '<div class="dlp-filter-row"><label class="dlp-label">Qty Range</label><div class="dlp-qty-row"><input type="number" class="dlp-qty-input" id="dlpMinQty" placeholder="Min"><span style="color:#86868b;font-size:12px">–</span><input type="number" class="dlp-qty-input" id="dlpMaxQty" placeholder="Max"></div></div>';
+    html += '</div>';
+    // Quick Filters
+    html += '<div class="dlp-section"><div class="dlp-title">⚡ Quick Filters</div>';
+    html += '<div class="dlp-quick-filters">';
+    html += '<button class="dlp-qf-btn" data-dlp-special="new" onclick="dlpToggleSpecial(this,\'new\')">New Arrivals <span class="dlp-qf-count" id="dlpCountNew">0</span></button>';
+    html += '<button class="dlp-qf-btn" data-dlp-special="picks" onclick="dlpToggleSpecial(this,\'picks\')">My Picks <span class="dlp-qf-count" id="dlpCountPicks">0</span></button>';
+    html += '<button class="dlp-qf-btn" data-dlp-special="instock" onclick="dlpToggleSpecial(this,\'instock\')">In Stock Now <span class="dlp-qf-count" id="dlpCountInstock">0</span></button>';
+    html += '<button class="dlp-qf-btn" data-dlp-special="notes" onclick="dlpToggleSpecial(this,\'notes\')">Has Notes <span class="dlp-qf-count" id="dlpCountNotes">0</span></button>';
+    html += '</div>';
+    html += '<button class="dlp-clear-btn" onclick="dlpClearAll()">✕ Clear All Filters</button>';
+    html += '</div>';
+    // Commodity Treemap
+    html += '<div class="dlp-section"><div class="dlp-title">📦 By Commodity <span style="font-weight:400;text-transform:none;letter-spacing:0">(click to filter)</span></div>';
+    html += '<div class="dlp-treemap-total"><span class="dlp-treemap-total-label">Total inventory</span><span class="dlp-treemap-total-val" id="dlpTreemapTotal">0</span></div>';
+    html += '<div class="dlp-treemap-grid" id="dlpTreemapGrid"></div>';
+    html += '</div>';
+    // Availability
+    html += '<div class="dlp-section"><div class="dlp-title">📊 Availability Breakdown</div>';
+    html += '<div id="dlpAvailBars"></div>';
+    html += '</div>';
+    html += '</div>';
+    // ═══ END DASHBOARD LEFT PANEL ═══
 
     // Main content area
     html += '<div class="main-content-area">';
@@ -4907,6 +5026,68 @@ function getHTML() {
     html += 'async function toggleSubscription(id){try{var res=await fetch("/api/catalog-subscriptions/"+id+"/toggle",{method:"POST"});var data=await res.json();if(data.success){loadSubscriptions()}}catch(err){alert("Error: "+err.message)}}';
 
     html += 'async function deleteSubscription(id){if(!confirm("Delete this subscription? This cannot be undone."))return;try{var res=await fetch("/api/catalog-subscriptions/"+id,{method:"DELETE"});var data=await res.json();if(data.success){loadSubscriptions();loadSendHistory()}}catch(err){alert("Error: "+err.message)}}';
+
+    // ═══ DASHBOARD VIEW JAVASCRIPT ═══
+    html += 'var dashboardMode=false;';
+    html += 'function setViewMode(mode){dashboardMode=mode==="dashboard"||mode==="v3";document.body.classList.remove("dashboard-mode","dashboard-v3");document.getElementById("viewModeClassic").classList.remove("active");document.getElementById("viewModeDashboard").classList.remove("active");document.getElementById("viewModeV3").classList.remove("active");if(mode==="dashboard"){document.body.classList.add("dashboard-mode");document.getElementById("viewModeDashboard").classList.add("active");renderDashboardPanel();syncDashboardFromClassic()}else if(mode==="v3"){document.body.classList.add("dashboard-mode","dashboard-v3");document.getElementById("viewModeV3").classList.add("active");renderDashboardPanel();syncDashboardFromClassic()}else{document.getElementById("viewModeClassic").classList.add("active");syncClassicFromDashboard()}localStorage.setItem("catalogViewMode",mode)}';
+
+    // Sync dashboard panel filters FROM the classic view state
+    html += 'function syncDashboardFromClassic(){var si=document.getElementById("searchInput");var ds=document.getElementById("dlpSearch");if(si&&ds)ds.value=si.value;var minQ=document.getElementById("minQty");var maxQ=document.getElementById("maxQty");if(minQ)document.getElementById("dlpMinQty").value=minQ.value;if(maxQ)document.getElementById("dlpMaxQty").value=maxQ.value;document.querySelectorAll(".dlp-qf-btn").forEach(function(b){b.classList.toggle("active",specialFilter===b.getAttribute("data-dlp-special"))})}';
+
+    // Sync classic view filters FROM the dashboard panel state
+    html += 'function syncClassicFromDashboard(){var ds=document.getElementById("dlpSearch");var si=document.getElementById("searchInput");if(ds&&si&&ds.value!==si.value){si.value=ds.value;renderProducts()}}';
+
+    // Dashboard search mirrors main search
+    html += 'document.getElementById("dlpSearch").addEventListener("input",function(e){document.getElementById("searchInput").value=e.target.value;renderProducts()});';
+
+    // Dashboard qty filters mirror main qty filters
+    html += 'document.getElementById("dlpMinQty").addEventListener("change",function(e){document.getElementById("minQty").value=e.target.value;renderProducts()});';
+    html += 'document.getElementById("dlpMaxQty").addEventListener("change",function(e){document.getElementById("maxQty").value=e.target.value;renderProducts()});';
+
+    // Dashboard commodity dropdown mirrors category filter
+    html += 'document.getElementById("dlpCommodity").addEventListener("change",function(e){var val=e.target.value;if(!val){selectedCategories=[];document.querySelectorAll("[data-cat]").forEach(function(b){b.classList.remove("active")});var allBtn=document.querySelector("[data-cat=\\"all\\"]");if(allBtn)allBtn.classList.add("active")}else{selectedCategories=[val];document.querySelectorAll("[data-cat]").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-cat")===val)});document.querySelector("[data-cat=\\"all\\"]").classList.remove("active")}renderProducts()});';
+
+    // Dashboard color dropdown mirrors color filter
+    html += 'document.getElementById("dlpColor").addEventListener("change",function(e){var val=e.target.value;colorFilter=val||null;document.getElementById("colorFilterBtn").textContent="Color: "+(val||"All")+" ▼";document.getElementById("clearColorBtn").classList.toggle("hidden",!val);renderProducts()});';
+
+    // Dashboard special filter toggle
+    html += 'function dlpToggleSpecial(btn,sp){var wasActive=btn.classList.contains("active");document.querySelectorAll(".dlp-qf-btn").forEach(function(b){b.classList.remove("active")});if(sp==="instock"){if(wasActive){document.getElementById("minQty").value="";specialFilter=null}else{btn.classList.add("active");document.getElementById("minQty").value="1";specialFilter=null}document.getElementById("dlpMinQty").value=document.getElementById("minQty").value}else{if(wasActive){specialFilter=null}else{btn.classList.add("active");specialFilter=sp}document.querySelectorAll("[data-special]").forEach(function(b){b.classList.toggle("active",specialFilter===b.getAttribute("data-special"))})}renderProducts()}';
+
+    // Dashboard clear all
+    html += 'function dlpClearAll(){document.getElementById("dlpSearch").value="";document.getElementById("searchInput").value="";document.getElementById("dlpMinQty").value="";document.getElementById("dlpMaxQty").value="";document.getElementById("minQty").value="";document.getElementById("maxQty").value="";document.getElementById("dlpCommodity").value="";document.getElementById("dlpColor").value="";document.getElementById("dlpCustomer").value="";document.getElementById("dlpSupplier").value="";selectedCategories=[];colorFilter=null;specialFilter=null;customerStyleFilter=null;document.querySelectorAll("[data-cat]").forEach(function(b){b.classList.remove("active")});var allBtn=document.querySelector("[data-cat=\\"all\\"]");if(allBtn)allBtn.classList.add("active");document.getElementById("colorFilterBtn").textContent="Color: All ▼";document.getElementById("clearColorBtn").classList.add("hidden");document.querySelectorAll("[data-special]").forEach(function(b){b.classList.remove("active")});document.querySelectorAll(".dlp-qf-btn").forEach(function(b){b.classList.remove("active")});renderProducts()}';
+
+    // Render dashboard panel (treemap, availability, filter counts, dropdowns)
+    html += 'function renderDashboardPanel(){if(!dashboardMode||!allProducts||allProducts.length===0)return;';
+    // Populate commodity dropdown
+    html += 'var cats=[];allProducts.forEach(function(p){if(p.category&&cats.indexOf(p.category)===-1)cats.push(p.category)});cats.sort();var cOpts="<option value=\\"\\">All Commodities</option>";cats.forEach(function(c){cOpts+="<option value=\\""+c+"\\">"+c+"</option>"});document.getElementById("dlpCommodity").innerHTML=cOpts;';
+    // Populate color dropdown
+    html += 'var colSet={};allProducts.forEach(function(p){(p.colors||[]).forEach(function(c){if(c.color_name)colSet[c.color_name]=true})});var colArr=Object.keys(colSet).sort();var colOpts="<option value=\\"\\">All Colors</option>";colArr.forEach(function(c){colOpts+="<option value=\\""+c+"\\">"+c+"</option>"});document.getElementById("dlpColor").innerHTML=colOpts;';
+    // Compute quick filter counts
+    html += 'var countNew=0,countPicks=0,countNotes=0,countInstock=0;allProducts.forEach(function(p){if(p.first_seen_import===lastImportId)countNew++;if(userPicks.indexOf(p.id)!==-1)countPicks++;var bs=p.style_id.split("-")[0];if(userNotes[bs])countNotes++;var tot=0;(p.colors||[]).forEach(function(c){tot+=(c.available_now||c.available_qty||0)});if(tot>0)countInstock++});document.getElementById("dlpCountNew").textContent=countNew;document.getElementById("dlpCountPicks").textContent=countPicks;document.getElementById("dlpCountNotes").textContent=countNotes;document.getElementById("dlpCountInstock").textContent=countInstock;';
+    // Render treemap
+    html += 'var tmData={};var tmTotal=0;allProducts.forEach(function(p){(p.colors||[]).forEach(function(c){var qty=qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0);if(qty<=0)return;tmTotal+=qty;var key=p.category||"Uncategorized";if(!tmData[key])tmData[key]=0;tmData[key]+=qty})});var tmSorted=Object.entries(tmData).sort(function(a,b){return b[1]-a[1]});document.getElementById("dlpTreemapTotal").textContent=(tmTotal>=1000000?(tmTotal/1000000).toFixed(1)+"M":(tmTotal>=1000?(tmTotal/1000).toFixed(0)+"K":tmTotal))+" units";';
+    // Build treemap tiles (using data attributes for click handling to avoid escaping issues)
+    html += 'var tmColors=["#2C3E50","#5B7BA5","#7EAAC8","#5FAD6E","#E8943A","#E86045","#9B6DB7","#3A7CA5","#5C8A4D","#C77D3A","#7A8B9E","#4E9A8E","#B5574A","#6B7D3E"];var tmHtml="";var cw=268;tmSorted.forEach(function(item,i){var name=item[0];var qty=item[1];var pct=tmTotal>0?(qty/tmTotal*100):0;if(pct<0.5)return;var bg=tmColors[i%tmColors.length];var w,h;if(pct>=18){w=cw;h=58}else if(pct>=10){w=cw;h=48}else if(pct>=6){w=(cw/2)-2;h=52}else if(pct>=3){w=(cw/3)-3;h=42}else{w=(cw/4)-3;h=36}var isActive=selectedCategories.indexOf(name)!==-1?"outline:2.5px solid #1e3a5f;outline-offset:-2.5px":"";';
+    html += 'tmHtml+="<div data-tm-name=\\""+name.replace(/"/g,"&quot;")+"\\" style=\\"width:"+w+"px;height:"+h+"px;background:"+bg+";border-radius:5px;padding:5px 6px;cursor:pointer;display:flex;flex-direction:column;justify-content:flex-start;overflow:hidden;transition:all 0.15s;"+isActive+"\\" title=\\""+name.replace(/"/g,"&quot;")+": "+qty.toLocaleString()+" ("+pct.toFixed(1)+"%)\\">";';
+    html += 'tmHtml+="<div style=\\"font-size:10.5px;font-weight:700;color:#fff;line-height:1.15;text-shadow:0 1px 2px rgba(0,0,0,0.2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis\\">"+name+"</div>";';
+    html += 'tmHtml+="<div style=\\"font-size:10px;font-weight:600;color:rgba(255,255,255,0.9)\\">"+(qty>=1000?(qty/1000).toFixed(qty>=10000?0:1)+"K":qty)+"</div>";';
+    html += 'if(h>38)tmHtml+="<div style=\\"font-size:9px;color:rgba(255,255,255,0.7)\\">"+pct.toFixed(1)+"%</div>";';
+    html += 'tmHtml+="</div>"});';
+    html += 'var tmGrid=document.getElementById("dlpTreemapGrid");tmGrid.innerHTML=tmHtml||"<p style=\\"color:#86868b;font-size:12px\\">No data</p>";';
+    html += 'tmGrid.querySelectorAll("[data-tm-name]").forEach(function(el){el.addEventListener("click",function(){dlpFilterCommodity(el.getAttribute("data-tm-name"))})});';
+    // Render availability bars
+    html += 'var avNow=0,avLts=0;allProducts.forEach(function(p){(p.colors||[]).forEach(function(c){avNow+=(c.available_now||c.available_qty||0);avLts+=(c.left_to_sell||0)})});var avTotal=avLts||1;var avToCome=avLts-avNow;if(avToCome<0)avToCome=0;var avOnOrder=0;var pctNow=Math.round(avNow/avTotal*100);var pctCome=Math.round(avToCome/avTotal*100);var abHtml="";abHtml+="<div class=\\"dlp-avail-row\\"><span class=\\"dlp-avail-label\\">Available</span><div class=\\"dlp-avail-track\\"><div class=\\"dlp-avail-fill\\" style=\\"width:"+pctNow+"%;background:#0E7C86\\"><span class=\\"dlp-avail-text\\">"+pctNow+"%</span></div></div><span class=\\"dlp-avail-val\\">"+(avNow>=1000?(avNow/1000).toFixed(0)+"K":avNow)+"</span></div>";abHtml+="<div class=\\"dlp-avail-row\\"><span class=\\"dlp-avail-label\\">To Come</span><div class=\\"dlp-avail-track\\"><div class=\\"dlp-avail-fill\\" style=\\"width:"+pctCome+"%;background:#5B7BA5\\"><span class=\\"dlp-avail-text\\">"+pctCome+"%</span></div></div><span class=\\"dlp-avail-val\\">"+(avToCome>=1000?(avToCome/1000).toFixed(0)+"K":avToCome)+"</span></div>";document.getElementById("dlpAvailBars").innerHTML=abHtml;';
+    html += '}'; // End renderDashboardPanel
+
+    // Treemap click filters commodity
+    html += 'function dlpFilterCommodity(name){var idx=selectedCategories.indexOf(name);if(idx!==-1){selectedCategories.splice(idx,1)}else{selectedCategories=[name]}if(selectedCategories.length===0){document.querySelector("[data-cat=\\"all\\"]").classList.add("active");document.querySelectorAll("[data-cat]").forEach(function(b){if(b.getAttribute("data-cat")!=="all")b.classList.remove("active")})}else{document.querySelector("[data-cat=\\"all\\"]").classList.remove("active");document.querySelectorAll("[data-cat]").forEach(function(b){b.classList.toggle("active",selectedCategories.indexOf(b.getAttribute("data-cat"))!==-1)})}document.getElementById("dlpCommodity").value=selectedCategories.length===1?selectedCategories[0]:"";renderProducts();renderDashboardPanel()}';
+
+    // Hook into renderProducts to also update dashboard
+    html += 'var _origRenderProducts=renderProducts;renderProducts=function(){_origRenderProducts();if(dashboardMode)renderDashboardPanel()};';
+
+    // Restore saved view mode
+    html += 'setTimeout(function(){var saved=localStorage.getItem("catalogViewMode");if(saved==="dashboard"||saved==="v3")setViewMode(saved)},100);';
+    // ═══ END DASHBOARD VIEW JAVASCRIPT ═══
 
     html += 'checkSession();fetchOpenOrders();';
     html += '</script></body></html>';

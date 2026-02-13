@@ -2043,7 +2043,7 @@ app.post('/api/order-requests', requireAuth, async function(req, res) {
 // Get distinct customers from order requests (for filter dropdown)
 app.get('/api/order-requests/customers', requireAuth, async function(req, res) {
     try {
-        var isAdmin = req.session.role === 'admin';
+        var isAdmin = req.session.role === 'admin' || !req.session.userId;
         var query = "SELECT DISTINCT customer_name FROM order_requests";
         var params = [];
         if (!isAdmin) {
@@ -2062,7 +2062,7 @@ app.get('/api/order-requests/customers', requireAuth, async function(req, res) {
 app.get('/api/order-requests', requireAuth, async function(req, res) {
     try {
         var status = req.query.status || 'all';
-        var isAdmin = req.session.role === 'admin';
+        var isAdmin = req.session.role === 'admin' || !req.session.userId;
         var query = "SELECT * FROM order_requests";
         var params = [];
         var conditions = [];
@@ -2098,7 +2098,7 @@ app.get('/api/order-requests', requireAuth, async function(req, res) {
 // Update order request (admin)
 app.put('/api/order-requests/:id', requireAuth, async function(req, res) {
     try {
-        if (req.session.role !== 'admin') return res.json({ success: false, error: 'Admin required' });
+        if (req.session.role !== 'admin' && req.session.userId) return res.json({ success: false, error: 'Admin required' });
         var b = req.body;
         var updates = ["updated_at = CURRENT_TIMESTAMP"];
         var params = [];

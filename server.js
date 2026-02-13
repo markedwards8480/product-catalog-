@@ -219,6 +219,8 @@ async function initDB() {
         try { await pool.query('ALTER TABLE order_requests ADD COLUMN IF NOT EXISTS product_count INTEGER DEFAULT 0'); } catch(e) {}
         try { await pool.query('ALTER TABLE order_requests ADD COLUMN IF NOT EXISTS cancel_date DATE'); } catch(e) {}
         try { await pool.query("UPDATE order_requests SET detail_id = 'ord_' || substr(md5(random()::text), 1, 12) WHERE detail_id IS NULL"); } catch(e) {}
+        try { await pool.query('ALTER TABLE order_requests ALTER COLUMN size_breakdown DROP NOT NULL'); } catch(e) {}
+        try { await pool.query("ALTER TABLE order_requests ALTER COLUMN size_breakdown SET DEFAULT ''"); } catch(e) {}
 
         // Migrate existing users: set PIN if not set, set display_name from username
         await pool.query("UPDATE users SET pin = LPAD(FLOOR(RANDOM() * 10000)::TEXT, 4, '0') WHERE pin IS NULL");

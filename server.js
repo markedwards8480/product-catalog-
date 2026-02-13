@@ -213,6 +213,12 @@ async function initDB() {
         )`);
         try { await pool.query('CREATE INDEX IF NOT EXISTS idx_order_requests_status ON order_requests(status)'); } catch(e) {}
         try { await pool.query('CREATE INDEX IF NOT EXISTS idx_order_requests_detail_id ON order_requests(detail_id)'); } catch(e) {}
+        // Migrate order_requests: add columns that may be missing from earlier version
+        try { await pool.query('ALTER TABLE order_requests ADD COLUMN IF NOT EXISTS detail_id VARCHAR(50)'); } catch(e) {}
+        try { await pool.query('ALTER TABLE order_requests ADD COLUMN IF NOT EXISTS product_ids TEXT'); } catch(e) {}
+        try { await pool.query('ALTER TABLE order_requests ADD COLUMN IF NOT EXISTS product_count INTEGER DEFAULT 0'); } catch(e) {}
+        try { await pool.query('ALTER TABLE order_requests ADD COLUMN IF NOT EXISTS cancel_date DATE'); } catch(e) {}
+        try { await pool.query("UPDATE order_requests SET detail_id = 'ord_' || substr(md5(random()::text), 1, 12) WHERE detail_id IS NULL"); } catch(e) {}
 
         // Migrate existing users: set PIN if not set, set display_name from username
         await pool.query("UPDATE users SET pin = LPAD(FLOOR(RANDOM() * 10000)::TEXT, 4, '0') WHERE pin IS NULL");

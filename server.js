@@ -4686,12 +4686,12 @@ function getHTML() {
     html += '.treemap-shelf-total{padding:0.75rem 1.25rem;background:#f0f4f8;font-size:0.9375rem;color:#1e3a5f;font-weight:600;border-bottom:1px solid #e0e0e0}';
     html += '.treemap-shelf-content{flex:1;overflow-y:auto;padding:1rem}';
     html += '.treemap-grid{display:flex;flex-wrap:wrap;gap:5px}';
-    html += '.treemap-tile{border-radius:8px;padding:0.625rem;cursor:pointer;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,0.3);display:flex;flex-direction:column;justify-content:center;transition:transform 0.1s,box-shadow 0.1s;box-sizing:border-box}';
-    html += '.treemap-tile:hover{transform:scale(1.03);box-shadow:0 4px 12px rgba(0,0,0,0.25);z-index:1}';
+    html += '.treemap-tile{border-radius:4px;padding:0.625rem;cursor:pointer;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,0.5);display:flex;flex-direction:column;justify-content:center;transition:transform 0.1s,box-shadow 0.1s;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,sans-serif}';
+    html += '.treemap-tile:hover{transform:scale(1.03);box-shadow:0 4px 12px rgba(0,0,0,0.3);z-index:1}';
     html += '.treemap-tile.active{outline:3px solid #fff;outline-offset:-3px}';
-    html += '.treemap-tile-name{font-weight:600;font-size:0.8125rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}';
-    html += '.treemap-tile-qty{font-size:1.0625rem;font-weight:700}';
-    html += '.treemap-tile-pct{font-size:0.6875rem;opacity:0.9}';
+    html += '.treemap-tile-name{font-weight:700;font-size:0.8125rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:0.01em}';
+    html += '.treemap-tile-qty{font-size:1.125rem;font-weight:800}';
+    html += '.treemap-tile-pct{font-size:0.6875rem;opacity:0.85;font-weight:600}';
     html += '.treemap-toggle-btn{position:fixed;left:0;top:50%;transform:translateY(-50%);background:#1e3a5f;color:#fff;border:none;padding:0.75rem 0.5rem;border-radius:0 8px 8px 0;cursor:pointer;font-size:0.75rem;font-weight:600;writing-mode:vertical-rl;text-orientation:mixed;box-shadow:2px 0 8px rgba(0,0,0,0.15);z-index:999;transition:opacity 0.3s ease}';
     html += '.treemap-toggle-btn:hover{background:#2d4a6f}';
     html += '.treemap-toggle-btn.shelf-open{opacity:0;pointer-events:none}';
@@ -4701,6 +4701,20 @@ function getHTML() {
     html += '.treemap-clear-btn.hidden{display:none}';
     html += '.treemap-shelf-total{display:flex;align-items:center;gap:0.75rem}';
     html += '@media(max-width:900px){.treemap-shelf.open{width:260px}.treemap-shelf-inner{width:260px}}';
+    // Stacked bar chart styles
+    html += '.stacked-bar-container{padding:0.5rem 0}';
+    html += '.stacked-bar{display:flex;width:100%;height:36px;border-radius:4px;overflow:hidden;cursor:pointer}';
+    html += '.stacked-bar-segment{height:100%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:0.6875rem;font-weight:700;text-shadow:0 1px 2px rgba(0,0,0,0.5);overflow:hidden;white-space:nowrap;transition:opacity 0.15s;position:relative}';
+    html += '.stacked-bar-segment:hover{opacity:0.85}';
+    html += '.stacked-bar-segment.active{outline:2px solid #fff;outline-offset:-2px}';
+    html += '.stacked-bar-legend{display:flex;flex-direction:column;gap:4px;margin-top:0.75rem}';
+    html += '.stacked-bar-legend-item{display:flex;align-items:center;gap:0.5rem;padding:0.375rem 0.5rem;border-radius:4px;cursor:pointer;transition:background 0.15s;font-size:0.8125rem}';
+    html += '.stacked-bar-legend-item:hover{background:#f0f4f8}';
+    html += '.stacked-bar-legend-item.active{background:#e8f0fe}';
+    html += '.stacked-bar-legend-swatch{width:14px;height:14px;border-radius:3px;flex-shrink:0}';
+    html += '.stacked-bar-legend-name{flex:1;font-weight:600;color:#1e3a5f}';
+    html += '.stacked-bar-legend-qty{font-weight:700;color:#1e3a5f;font-size:0.8125rem}';
+    html += '.stacked-bar-legend-pct{color:#86868b;font-size:0.75rem;min-width:40px;text-align:right}';
 
     html += '</style></head><body>';
     
@@ -4723,6 +4737,7 @@ function getHTML() {
     html += '<div class="treemap-shelf" id="treemapShelf"><div class="treemap-shelf-inner">';
     html += '<div class="treemap-shelf-header"><span class="treemap-shelf-title">📊 <span id="treemapTitle">By Commodity</span></span><button class="treemap-shelf-close" id="closeTreemapShelf">×</button></div>';
     html += '<div class="treemap-shelf-controls"><button class="treemap-mode-btn active" id="treemapModeCommodity" data-mode="commodity">Commodity</button><button class="treemap-mode-btn" id="treemapModeColor" data-mode="color">Color</button></div>';
+    html += '<div class="treemap-shelf-controls" style="padding-top:0;border-bottom:1px solid #e0e0e0"><button class="treemap-mode-btn active" id="treemapViewTiles" data-view="tiles" style="flex:1">▦ Tiles</button><button class="treemap-mode-btn" id="treemapViewBar" data-view="bar" style="flex:1">▬ Bar</button></div>';
     html += '<div class="treemap-shelf-total"><span id="treemapTotal">0</span> units total<button class="treemap-clear-btn hidden" id="treemapClearFilter">✕ Clear Filter</button></div>';
     html += '<div class="treemap-shelf-content"><div class="treemap-grid" id="treemapGrid"></div></div>';
     html += '</div></div>';
@@ -4935,7 +4950,7 @@ function getHTML() {
 
     // Merchandising tab functions
     html += 'var merchData=null;var merchBubbleMetric="openOrders";';
-    html += 'var merchColors=["#0088c2","#34c759","#ff9500","#ff3b30","#af52de","#5ac8fa","#ffcc00","#ff2d55","#8e8e93","#5856d6","#ff6961","#77dd77","#aec6cf","#fdfd96","#c7d1d9"];';
+    html += 'var merchColors=["#1a5276","#0e6655","#7d3c98","#c0392b","#d4ac0d","#2471a3","#148f77","#a04000","#1f618d","#7b241c","#196f3d","#6c3483","#b9770e","#117864","#884ea0"];';
 
     html += 'async function loadMerchandisingTab(){try{var resp=await fetch("/api/merchandising/category-mix");var data=await resp.json();if(data.success){merchData=data;renderMerchDonutChart();renderMerchLegend();renderMerchBubbleChart()}populateScorecardCustomers()}catch(err){console.error("Error loading merchandising data:",err)}}';
 
@@ -4953,7 +4968,7 @@ function getHTML() {
     html += 'document.getElementById("scorecardCustomer").addEventListener("change",function(){loadCustomerScorecard(this.value)});';
 
     // Treemap Shelf Functions
-    html += 'var treemapMode="commodity";var treemapFilters=[];'; // Array for multi-select
+    html += 'var treemapMode="commodity";var treemapFilters=[];var treemapView="tiles";'; // Array for multi-select
 
     html += 'function openTreemapShelf(){document.getElementById("treemapShelf").classList.add("open");document.getElementById("openTreemapShelf").classList.add("shelf-open");renderTreemap()}';
     html += 'function closeTreemapShelf(){document.getElementById("treemapShelf").classList.remove("open");document.getElementById("openTreemapShelf").classList.remove("shelf-open")}';
@@ -4961,19 +4976,26 @@ function getHTML() {
     html += 'document.getElementById("openTreemapShelf").addEventListener("click",openTreemapShelf);';
     html += 'document.getElementById("closeTreemapShelf").addEventListener("click",closeTreemapShelf);';
 
+    // View toggle (Tiles vs Bar)
+    html += 'document.getElementById("treemapViewTiles").addEventListener("click",function(){treemapView="tiles";document.getElementById("treemapViewTiles").classList.add("active");document.getElementById("treemapViewBar").classList.remove("active");renderTreemap()});';
+    html += 'document.getElementById("treemapViewBar").addEventListener("click",function(){treemapView="bar";document.getElementById("treemapViewBar").classList.add("active");document.getElementById("treemapViewTiles").classList.remove("active");renderTreemap()});';
+
     // Mode switching
     html += 'document.getElementById("treemapModeCommodity").addEventListener("click",function(){treemapMode="commodity";document.getElementById("treemapModeCommodity").classList.add("active");document.getElementById("treemapModeColor").classList.remove("active");document.getElementById("treemapTitle").textContent="By Commodity";treemapFilters=[];clearTreemapFilter();renderTreemap()});';
     html += 'document.getElementById("treemapModeColor").addEventListener("click",function(){treemapMode="color";document.getElementById("treemapModeColor").classList.add("active");document.getElementById("treemapModeCommodity").classList.remove("active");document.getElementById("treemapTitle").textContent="By Color";treemapFilters=[];clearTreemapFilter();renderTreemap()});';
     html += 'document.getElementById("treemapClearFilter").addEventListener("click",function(){treemapFilters=[];clearTreemapFilter();renderTreemap()});';
 
     // Render treemap based on current mode and qtyMode
-    html += 'function renderTreemap(){var data={};var total=0;allProducts.forEach(function(p){(p.colors||[]).forEach(function(c){var qty=qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0);if(qty<=0)return;total+=qty;var key=treemapMode==="commodity"?(p.category||"Uncategorized"):(c.color_name||"Unknown");if(!data[key])data[key]=0;data[key]+=qty})});var sorted=Object.entries(data).sort(function(a,b){return b[1]-a[1]});document.getElementById("treemapTotal").textContent=total.toLocaleString();renderTreemapTiles(sorted,total)}';
+    html += 'function renderTreemap(){var data={};var total=0;allProducts.forEach(function(p){(p.colors||[]).forEach(function(c){var qty=qtyMode==="left_to_sell"?(c.left_to_sell||0):(c.available_now||c.available_qty||0);if(qty<=0)return;total+=qty;var key=treemapMode==="commodity"?(p.category||"Uncategorized"):(c.color_name||"Unknown");if(!data[key])data[key]=0;data[key]+=qty})});var sorted=Object.entries(data).sort(function(a,b){return b[1]-a[1]});document.getElementById("treemapTotal").textContent=total.toLocaleString();if(treemapView==="bar"){renderStackedBar(sorted,total)}else{renderTreemapTiles(sorted,total)}}';
 
     // Render the actual tiles - bigger, more comfortable sizing
     html += 'function renderTreemapTiles(sorted,total){var grid=document.getElementById("treemapGrid");var html="";var containerWidth=295;sorted.forEach(function(item,i){var name=item[0];var qty=item[1];var pct=total>0?(qty/total*100):0;if(pct<0.3)return;var color=getTreemapColor(name,i);var width,height;if(pct>=20){width=containerWidth;height=75}else if(pct>=12){width=containerWidth;height=65}else if(pct>=8){width=(containerWidth/2)-3;height=70}else if(pct>=5){width=(containerWidth/2)-3;height=60}else if(pct>=3){width=(containerWidth/2)-3;height=50}else if(pct>=1.5){width=(containerWidth/3)-4;height=45}else{width=(containerWidth/4)-4;height=40}var isActive=treemapFilters.indexOf(name)!==-1?"active":"";html+="<div class=\\"treemap-tile "+isActive+"\\" style=\\"width:"+width+"px;height:"+height+"px;background:"+color+"\\" onclick=\\"filterByTreemap(\'"+name.replace(/\'/g,"\\\\\'")+"\')\\" title=\\""+name+": "+qty.toLocaleString()+" units ("+pct.toFixed(1)+"%)\\">";html+="<div class=\\"treemap-tile-name\\">"+name+"</div>";html+="<div class=\\"treemap-tile-qty\\">"+(qty>=1000?(qty/1000).toFixed(1)+"K":qty)+"</div>";html+="<div class=\\"treemap-tile-pct\\">"+pct.toFixed(1)+"%</div>";html+="</div>"});grid.innerHTML=html||"<p style=\\"padding:1rem;color:#86868b\\">No data</p>";document.getElementById("treemapClearFilter").classList.toggle("hidden",treemapFilters.length===0)}';
 
     // Get color for treemap tile
     html += 'function getTreemapColor(name,index){var colorMap={"Navy":"#1a365d","Black":"#1a1a1a","White":"#9ca3af","Grey":"#6b7280","Gray":"#6b7280","Red":"#dc2626","Blue":"#2563eb","Green":"#16a34a","Yellow":"#ca8a04","Orange":"#ea580c","Pink":"#ec4899","Purple":"#9333ea","Brown":"#78350f","Tan":"#a8896c","Cream":"#d4c5a9","Charcoal":"#374151","Burgundy":"#7f1d1d","Olive":"#4d7c0f","Teal":"#0d9488","Coral":"#f97316","Wine":"#7f1d1d","Ivory":"#f5f5dc","Khaki":"#c3b091","Oatmeal":"#c9b99a","Heather":"#9ca3af"};if(treemapMode==="color"){var lower=name.toLowerCase();for(var key in colorMap){if(lower.indexOf(key.toLowerCase())!==-1)return colorMap[key]}};return merchColors[index%merchColors.length]}';
+
+    // Stacked bar chart rendering
+    html += 'function renderStackedBar(sorted,total){var grid=document.getElementById("treemapGrid");var html="<div class=\\"stacked-bar-container\\"><div class=\\"stacked-bar\\">";sorted.forEach(function(item,i){var name=item[0];var qty=item[1];var pct=total>0?(qty/total*100):0;if(pct<0.5)return;var color=getTreemapColor(name,i);var isActive=treemapFilters.indexOf(name)!==-1?"active":"";html+="<div class=\\"stacked-bar-segment "+isActive+"\\" style=\\"width:"+pct+"%;background:"+color+"\\" onclick=\\"filterByTreemap(\'"+name.replace(/\'/g,"\\\\\'")+"\')\\" title=\\""+name+": "+qty.toLocaleString()+" units ("+pct.toFixed(1)+"%)\\">"+(pct>=6?name.substring(0,6):"")+"</div>"});html+="</div><div class=\\"stacked-bar-legend\\">";sorted.forEach(function(item,i){var name=item[0];var qty=item[1];var pct=total>0?(qty/total*100):0;if(pct<0.3)return;var color=getTreemapColor(name,i);var isActive=treemapFilters.indexOf(name)!==-1?"active":"";html+="<div class=\\"stacked-bar-legend-item "+isActive+"\\" onclick=\\"filterByTreemap(\'"+name.replace(/\'/g,"\\\\\'")+"\')\\">";html+="<div class=\\"stacked-bar-legend-swatch\\" style=\\"background:"+color+"\\"></div>";html+="<div class=\\"stacked-bar-legend-name\\">"+name+"</div>";html+="<div class=\\"stacked-bar-legend-qty\\">"+(qty>=1000?(qty/1000).toFixed(1)+"K":qty)+"</div>";html+="<div class=\\"stacked-bar-legend-pct\\">"+pct.toFixed(1)+"%</div>";html+="</div>"});html+="</div></div>";grid.innerHTML=html;document.getElementById("treemapClearFilter").classList.toggle("hidden",treemapFilters.length===0)}';
 
     // Filter by treemap tile click - multi-select
     html += 'function filterByTreemap(name){var idx=treemapFilters.indexOf(name);if(idx!==-1){treemapFilters.splice(idx,1)}else{treemapFilters.push(name)}applyTreemapFilters();renderTreemap()}';

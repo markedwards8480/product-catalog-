@@ -5015,7 +5015,7 @@ function getHTML() {
     html += 'function dlpFilterCommodity(name){var idx=selectedCategories.indexOf(name);if(idx!==-1){selectedCategories.splice(idx,1)}else{selectedCategories=[name]}if(selectedCategories.length===0){document.querySelector("[data-cat=\\\"all\\\"]").classList.add("active");document.querySelectorAll("[data-cat]").forEach(function(b){if(b.getAttribute("data-cat")!=="all")b.classList.remove("active")})}else{document.querySelector("[data-cat=\\\"all\\\"]").classList.remove("active");document.querySelectorAll("[data-cat]").forEach(function(b){b.classList.toggle("active",selectedCategories.indexOf(b.getAttribute("data-cat"))!==-1)})}document.getElementById("dlpCommodity").value=selectedCategories.length===1?selectedCategories[0]:"";renderProducts();renderShelfDashboard()};';
 
     // Update openTreemapShelf to also render dashboard
-    html += 'var _origOpenShelf=openTreemapShelf;openTreemapShelf=function(){_origOpenShelf();renderShelfDashboard()}';
+    html += 'var _origOpenShelf=openTreemapShelf;openTreemapShelf=function(){_origOpenShelf();renderShelfDashboard()};';
     // ═══ END MERCH SHELF JAVASCRIPT ═══
 
     html += 'checkSession();fetchOpenOrders();';

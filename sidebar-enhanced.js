@@ -22,8 +22,19 @@
   }
 
   waitForReady(function() {
+    loadCSS();
     initEnhancedSidebar();
   });
+
+  function loadCSS() {
+    // Dynamically load the CSS since the link tag may not be in the HTML
+    if (!document.querySelector('link[href*="sidebar-enhanced"]')) {
+      var link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = '/sidebar-enhanced.css';
+      document.head.appendChild(link);
+    }
+  }
 
   function initEnhancedSidebar() {
     var shelf = document.getElementById('treemapShelf');

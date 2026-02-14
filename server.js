@@ -2001,6 +2001,17 @@ app.get('/order-requests.js', function(req, res) {
     res.send(orderRequestsJS);
 });
 
+// ═══ ENHANCED SIDEBAR FILES ═══
+app.get('/sidebar-enhanced.css', function(req, res) {
+    res.setHeader('Content-Type', 'text/css');
+    res.sendFile(require('path').join(__dirname, 'sidebar-enhanced.css'));
+});
+
+app.get('/sidebar-enhanced.js', function(req, res) {
+    res.setHeader('Content-Type', 'application/javascript');
+    res.sendFile(require('path').join(__dirname, 'sidebar-enhanced.js'));
+});
+
 async function getNextRequestNumber() {
     var result = await pool.query("SELECT request_number FROM order_requests ORDER BY id DESC LIMIT 1");
     if (result.rows.length === 0) return 'OR-0001';
@@ -2216,7 +2227,7 @@ function getOrderDetailHTML(order, products) {
     html += '.p-card-colors{font-size:0.75rem;color:#666}';
     html += '.p-card-qty{font-size:0.85rem;font-weight:700;color:#1e3a5f;margin-top:0.5rem}';
     html += '.footer{text-align:center;padding:1.5rem;color:#999;font-size:0.8rem}';
-    html += '@media(max-width:600px){.product-grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}</style></head><body>';
+    html += '@media(max-width:600px){.product-grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}</style><link rel="stylesheet" href="/sidebar-enhanced.css"></head><body>';
 
     html += '<div class="container">';
     html += '<div class="header"><h1>Order Request</h1>';
@@ -5260,7 +5271,7 @@ function getHTML() {
     html += 'async function deleteSubscription(id){if(!confirm("Delete this subscription? This cannot be undone."))return;try{var res=await fetch("/api/catalog-subscriptions/"+id,{method:"DELETE"});var data=await res.json();if(data.success){loadSubscriptions();loadSendHistory()}}catch(err){alert("Error: "+err.message)}}';
 
     html += 'checkSession();fetchOpenOrders();';
-    html += '</script><script src="/order-requests.js"></script><script>';
+    html += '</script><script src="/order-requests.js"></script><script src="/sidebar-enhanced.js"></script><script>';
     html += '</script></body></html>';
     return html;
 }

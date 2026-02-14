@@ -1,7 +1,24 @@
-/* ═══════════════════════════════════════════
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    ENHANCED SIDEBAR - Filters & Dashboard
    Served as separate file to avoid inline escaping
-   ═══════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+
+/* --- Make sidebar scroll independently --- */
+.treemap-shelf.open {
+  max-height: 100vh !important;
+  overflow-y: auto !important;
+  position: fixed !important;
+  top: 0;
+  left: 0;
+  z-index: 1000;
+  height: 100vh !important;
+}
+
+.treemap-shelf.open .treemap-shelf-inner {
+  overflow-y: auto;
+  max-height: 100vh;
+  padding-bottom: 20px;
+}
 
 /* --- Sidebar Filter Sections --- */
 .shelf-filters-section {

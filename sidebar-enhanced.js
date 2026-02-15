@@ -43,20 +43,18 @@
     var inner = shelf.querySelector('.treemap-shelf-inner');
     if (!inner) return;
 
-    // Update the shelf header title
-    var headerEl = inner.querySelector('.treemap-shelf-header');
-    if (headerEl) {
-      // Change "By Commodity" to "Filters"
-      var titleSpan = headerEl.childNodes;
-      for (var i = 0; i < titleSpan.length; i++) {
-        if (titleSpan[i].nodeType === 3 && titleSpan[i].textContent.indexOf('By Commodity') !== -1) {
-          titleSpan[i].textContent = titleSpan[i].textContent.replace('By Commodity', 'Filters');
-        }
-      }
-      // Also check innerHTML for the icon + text pattern
-      if (headerEl.innerHTML.indexOf('By Commodity') !== -1) {
-        headerEl.innerHTML = headerEl.innerHTML.replace('By Commodity', 'Filters');
-      }
+    // Update the shelf header title (carefully - don't break close button)
+    var titleSpan = inner.querySelector('#treemapTitle');
+    if (titleSpan) {
+      titleSpan.textContent = 'Filters';
+    }
+
+    // Re-attach close button listener (in case innerHTML replace killed it)
+    var closeBtn = document.getElementById('closeTreemapShelf');
+    if (closeBtn && typeof closeTreemapShelf === 'function') {
+      closeBtn.addEventListener('click', function() {
+        closeTreemapShelf();
+      });
     }
 
     // Build the filters HTML

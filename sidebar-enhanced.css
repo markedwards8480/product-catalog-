@@ -40,8 +40,8 @@ body.shelf-open .treemap-shelf-header {
   margin-bottom: 0;
 }
 
-/* --- STEP 1: Hide category pills at top when sidebar is open --- */
-body.shelf-open #categoryFilters {
+/* --- STEP 1: Hide entire filter row at top when sidebar is open --- */
+body.shelf-open .filters {
   display: none !important;
 }
 

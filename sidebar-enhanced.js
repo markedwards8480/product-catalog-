@@ -43,6 +43,22 @@
     var inner = shelf.querySelector('.treemap-shelf-inner');
     if (!inner) return;
 
+    // Update the shelf header title
+    var headerEl = inner.querySelector('.treemap-shelf-header');
+    if (headerEl) {
+      // Change "By Commodity" to "Filters"
+      var titleSpan = headerEl.childNodes;
+      for (var i = 0; i < titleSpan.length; i++) {
+        if (titleSpan[i].nodeType === 3 && titleSpan[i].textContent.indexOf('By Commodity') !== -1) {
+          titleSpan[i].textContent = titleSpan[i].textContent.replace('By Commodity', 'Filters');
+        }
+      }
+      // Also check innerHTML for the icon + text pattern
+      if (headerEl.innerHTML.indexOf('By Commodity') !== -1) {
+        headerEl.innerHTML = headerEl.innerHTML.replace('By Commodity', 'Filters');
+      }
+    }
+
     // Build the filters HTML
     var filtersHTML = buildFiltersHTML();
 

@@ -24,6 +24,27 @@
   waitForReady(function() {
     loadCSS();
     initEnhancedSidebar();
+    
+    // Default: open sidebar on page load
+    setTimeout(function() {
+      var shelf = document.getElementById('treemapShelf');
+      if (shelf && !shelf.classList.contains('open')) {
+        if (typeof openTreemapShelf === 'function') {
+          openTreemapShelf();
+        }
+      }
+    }, 200);
+    
+    // Default: set view to Small
+    setTimeout(function() {
+      var smallBtn = document.querySelector('.size-btn');
+      var btns = document.querySelectorAll('.size-btn');
+      btns.forEach(function(b) {
+        if (b.textContent.trim() === 'Small' && !b.classList.contains('active')) {
+          b.click();
+        }
+      });
+    }, 500);
   });
 
   function loadCSS() {

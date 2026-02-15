@@ -175,7 +175,38 @@ body.shelf-open .filters {
   background: rgba(255,255,255,0.25);
 }
 
-/* --- Commodity Filter List --- */
+/* --- Commodity/Color Toggle Row --- */
+.shelf-toggle-row {
+  display: flex;
+  gap: 0;
+  margin-bottom: 8px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #e0e4ea;
+}
+
+.shelf-toggle-btn {
+  flex: 1;
+  padding: 5px 0;
+  border: none;
+  background: #f8f9fa;
+  color: #64748b;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.shelf-toggle-btn.active {
+  background: #1e3a5f;
+  color: white;
+}
+
+.shelf-toggle-btn:hover:not(.active) {
+  background: #e2e8f0;
+}
+
+/* --- Commodity List with color bars --- */
 .shelf-commodity-list {
   display: flex;
   flex-direction: column;
@@ -194,6 +225,8 @@ body.shelf-open .filters {
   font-size: 0.8125rem;
   color: #334155;
   transition: all 0.12s;
+  position: relative;
+  overflow: hidden;
 }
 
 .shelf-commodity-item:hover {
@@ -205,14 +238,39 @@ body.shelf-open .filters {
   color: white;
 }
 
+/* Color bar background */
+.commodity-bar-bg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  z-index: 0;
+}
+
+.commodity-bar {
+  height: 100%;
+  opacity: 0.15;
+  border-radius: 6px;
+  transition: width 0.3s ease;
+}
+
+.shelf-commodity-item.active .commodity-bar {
+  opacity: 0.3;
+}
+
 .shelf-commodity-item .commodity-name {
   font-weight: 500;
+  position: relative;
+  z-index: 1;
 }
 
 .shelf-commodity-item .commodity-count {
   font-size: 0.6875rem;
   color: #94a3b8;
   font-weight: 600;
+  position: relative;
+  z-index: 1;
 }
 
 .shelf-commodity-item.active .commodity-count {

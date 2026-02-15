@@ -356,6 +356,17 @@ body.shelf-open #categoryFilters {
   opacity: 0;
 }
 
+/* --- STEP 1: Push main content right when sidebar open --- */
+body.shelf-open #mainApp {
+  margin-left: 320px !important;
+  transition: margin-left 0.3s ease;
+}
+
+body:not(.shelf-open) #mainApp {
+  margin-left: 0;
+  transition: margin-left 0.3s ease;
+}
+
 /* --- Scrollbar styling --- */
 .shelf-commodity-list::-webkit-scrollbar,
 .treemap-shelf.open::-webkit-scrollbar {

@@ -7,6 +7,8 @@ const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
 require('dotenv').config();
+var sharp;
+try { sharp = require('sharp'); } catch(e) { console.log('sharp not installed - PDF images will not be optimized'); }
 
 // =============================================
 // ADMIN PANEL INTEGRATION
@@ -4071,6 +4073,73 @@ app.get('/api/image/:fileId', async function(req, res) {
     fetchImage();
 });
 
+// PDF-optimized image endpoint - serves smaller, compressed images for PDF/email
+app.get('/api/image-pdf/:fileId', async function(req, res) {
+    var fileId = req.params.fileId;
+    var cachePath = path.join(IMAGE_CACHE_DIR, fileId);
+    var pdfCachePath = cachePath + '.pdf.jpg';
+    
+    // Check if PDF-optimized version already cached
+    try {
+        if (fs.existsSync(pdfCachePath)) {
+            res.setHeader('Content-Type', 'image/jpeg');
+            res.setHeader('Cache-Control', 'public, max-age=86400');
+            res.setHeader('X-Image-Source', 'pdf-cache');
+            return res.send(fs.readFileSync(pdfCachePath));
+        }
+    } catch (e) {}
+    
+    // Get the original image (from cache or Zoho)
+    var imageBuffer = null;
+    try {
+        if (fs.existsSync(cachePath)) {
+            imageBuffer = fs.readFileSync(cachePath);
+        } else {
+            // Fetch from Zoho
+            if (!zohoAccessToken) { await refreshZohoToken(); }
+            var imageUrl = 'https://workdrive.zoho.com/api/v1/download/' + fileId;
+            var response = await fetch(imageUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+            if (response.status === 401) { await refreshZohoToken(); response = await fetch(imageUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } }); }
+            if (!response.ok) { return res.status(404).send('Image not found'); }
+            imageBuffer = Buffer.from(await response.arrayBuffer());
+        }
+    } catch (err) {
+        return res.status(500).send('Error fetching image');
+    }
+    
+    // Resize and compress for PDF
+    try {
+        if (sharp && imageBuffer) {
+            var optimized = await sharp(imageBuffer)
+                .resize(400, 400, { fit: 'inside', withoutEnlargement: true })
+                .jpeg({ quality: 55, mozjpeg: true })
+                .toBuffer();
+            
+            // Cache the optimized version
+            try {
+                if (fs.existsSync(IMAGE_CACHE_DIR)) {
+                    fs.writeFileSync(pdfCachePath, optimized);
+                }
+            } catch (e) {}
+            
+            res.setHeader('Content-Type', 'image/jpeg');
+            res.setHeader('Cache-Control', 'public, max-age=86400');
+            res.setHeader('X-Image-Source', 'pdf-optimized');
+            return res.send(optimized);
+        }
+    } catch (sharpErr) {
+        console.log('Sharp optimization error:', sharpErr.message);
+    }
+    
+    // Fallback: serve original if sharp not available
+    if (imageBuffer) {
+        res.setHeader('Content-Type', 'image/jpeg');
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        return res.send(imageBuffer);
+    }
+    res.status(500).send('Error');
+});
+
 // Share page (public - no auth)
 app.get('/share/:shareId', async function(req, res) { res.send(getShareHTML(req.params.shareId)); });
 
@@ -4756,7 +4825,7 @@ function getPDFHTML(selection, products, options) {
     options = options || {};
     var hideQuantities = options.hideQuantities || false;
     var notes = options.notes || {};
-    var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>' + (selection.name || 'Product Selection') + ' - Mark Edwards Apparel</title><style>@media print{@page{margin:0.5in;size:letter}body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}*{margin:0;padding:0;box-sizing:border-box}body{font-family:Arial,sans-serif;padding:20px;background:white}.header{text-align:center;margin-bottom:20px;padding-bottom:20px;border-bottom:2px solid #1e3a5f}.header h1{font-size:24px;margin-bottom:5px;color:#1e3a5f}.header p{color:#666}.legend{display:flex;justify-content:center;gap:30px;margin-bottom:25px;padding:10px;background:#f8f9fa;border-radius:6px}.legend-item{display:flex;align-items:center;gap:6px;font-size:11px}.legend-dot{width:8px;height:8px;border-radius:50%}.legend-dot.dc{background:#059669}.legend-dot.coming{background:#0088c2}.product-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:20px;max-width:1200px;margin:0 auto}.product-card{border:1px solid #ddd;border-radius:8px;overflow:hidden;page-break-inside:avoid;background:white}.product-image{height:240px;background:#f5f5f5;display:flex;align-items:center;justify-content:center;padding:10px}.product-image img{max-width:100%;max-height:100%;object-fit:contain}.product-info{padding:12px}.product-name{font-size:13px;font-weight:bold;margin-bottom:2px;color:#1e3a5f}.product-style{font-size:10px;color:#666;margin-bottom:6px}.qty-header{display:grid;grid-template-columns:1fr 45px 60px;font-size:8px;color:#666;padding:2px 0;border-bottom:1px solid #eee;margin-bottom:2px}.qty-header .dc{color:#059669;text-align:right}.qty-header .coming{color:#0088c2;text-align:right}.color-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 8px}.color-grid.single-col{grid-template-columns:1fr}.qty-row{display:grid;grid-template-columns:1fr 45px 60px;font-size:9px;padding:2px 0;border-bottom:1px solid #f5f5f5}.qty-row:last-child{border-bottom:none}.qty-row .color-name{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.qty-row .dc{color:#059669;font-weight:600;text-align:right}.qty-row .coming{color:#0088c2;font-weight:600;text-align:right}.total-row{display:grid;grid-template-columns:1fr 45px 60px;font-size:10px;padding:4px 0 0;border-top:2px solid #1e3a5f;margin-top:4px;font-weight:700}.total-row .label{color:#1e3a5f}.total-row .dc{color:#059669;text-align:right}.total-row .coming{color:#0088c2;text-align:right}.note-box{margin-top:6px;padding:6px;background:#f0f7ff;border-radius:4px;border-left:2px solid #0088c2;font-size:9px;color:#333}.note-label{font-weight:bold;color:#0088c2;margin-bottom:2px}.footer{margin-top:30px;text-align:center;color:#666;font-size:12px}.print-btn{position:fixed;top:20px;right:20px;padding:10px 20px;background:#1e3a5f;color:white;border:none;border-radius:4px;cursor:pointer;font-size:14px}@media print{.print-btn{display:none}}</style></head><body>';
+    var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>' + (selection.name || 'Product Selection') + ' - Mark Edwards Apparel</title><style>@media print{@page{margin:0.4in;size:letter}body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}*{margin:0;padding:0;box-sizing:border-box}body{font-family:Arial,sans-serif;padding:15px;background:white}.header{text-align:center;margin-bottom:15px;padding-bottom:12px;border-bottom:2px solid #1e3a5f}.header h1{font-size:20px;margin-bottom:3px;color:#1e3a5f}.header p{color:#666;font-size:11px}.legend{display:flex;justify-content:center;gap:30px;margin-bottom:15px;padding:8px;background:#f8f9fa;border-radius:6px}.legend-item{display:flex;align-items:center;gap:6px;font-size:10px}.legend-dot{width:8px;height:8px;border-radius:50%}.legend-dot.dc{background:#059669}.legend-dot.coming{background:#0088c2}.product-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;max-width:1100px;margin:0 auto}.product-card{border:1px solid #ddd;border-radius:6px;overflow:hidden;page-break-inside:avoid;background:white}.product-image{height:160px;background:#f5f5f5;display:flex;align-items:center;justify-content:center;padding:6px}.product-image img{max-width:100%;max-height:100%;object-fit:contain}.product-info{padding:8px}.product-name{font-size:11px;font-weight:bold;margin-bottom:1px;color:#1e3a5f}.product-style{font-size:9px;color:#666;margin-bottom:4px}.qty-header{display:grid;grid-template-columns:1fr 40px 50px;font-size:7px;color:#666;padding:1px 0;border-bottom:1px solid #eee;margin-bottom:1px}.qty-header .dc{color:#059669;text-align:right}.qty-header .coming{color:#0088c2;text-align:right}.color-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 6px}.color-grid.single-col{grid-template-columns:1fr}.qty-row{display:grid;grid-template-columns:1fr 40px 50px;font-size:8px;padding:1px 0;border-bottom:1px solid #f5f5f5}.qty-row:last-child{border-bottom:none}.qty-row .color-name{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.qty-row .dc{color:#059669;font-weight:600;text-align:right}.qty-row .coming{color:#0088c2;font-weight:600;text-align:right}.total-row{display:grid;grid-template-columns:1fr 40px 50px;font-size:9px;padding:3px 0 0;border-top:2px solid #1e3a5f;margin-top:3px;font-weight:700}.total-row .label{color:#1e3a5f}.total-row .dc{color:#059669;text-align:right}.total-row .coming{color:#0088c2;text-align:right}.note-box{margin-top:4px;padding:4px;background:#f0f7ff;border-radius:3px;border-left:2px solid #0088c2;font-size:8px;color:#333}.note-label{font-weight:bold;color:#0088c2;margin-bottom:1px}.footer{margin-top:20px;text-align:center;color:#666;font-size:10px}.print-btn{position:fixed;top:20px;right:20px;padding:10px 20px;background:#1e3a5f;color:white;border:none;border-radius:4px;cursor:pointer;font-size:14px}@media print{.print-btn{display:none}}</style></head><body>';
     html += '<button class="print-btn" onclick="window.print()">Print / Save PDF</button>';
     html += '<div class="header"><h1>' + (selection.name || 'Product Selection') + '</h1><p>Mark Edwards Apparel • Generated ' + new Date().toLocaleDateString() + ' • ' + products.length + ' items</p></div>';
     if (!hideQuantities) {
@@ -4795,7 +4864,9 @@ function getPDFHTML(selection, products, options) {
         var imgUrl = p.image_url;
         if (imgUrl && imgUrl.indexOf('download-accl.zoho.com') !== -1) {
             var parts = imgUrl.split('/');
-            imgUrl = '/api/image/' + parts[parts.length - 1];
+            imgUrl = '/api/image-pdf/' + parts[parts.length - 1];
+        } else if (imgUrl && imgUrl.indexOf('/api/image/') !== -1) {
+            imgUrl = imgUrl.replace('/api/image/', '/api/image-pdf/');
         }
         var imgHtml = imgUrl ? '<img src="' + imgUrl + '" onerror="this.parentElement.innerHTML=\'No Image\'">' : 'No Image';
         var noteHtml = '';

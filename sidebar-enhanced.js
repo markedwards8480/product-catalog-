@@ -480,7 +480,8 @@
     'C': 'Boys & Unisex Kids',
     'U': 'Men',
     'Y': 'Ext Juniors',
-    'K': 'Ext Kids'
+    'K': 'Ext Kids',
+    'X': 'Plus Size'
   };
 
   function getDeptFromStyle(styleId) {

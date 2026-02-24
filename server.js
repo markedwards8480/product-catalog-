@@ -5938,3 +5938,4 @@ initDB().then(function() {
     }, { timezone: 'America/New_York' });
     console.log('Scheduled daily export trigger at 2am EST');
 });
+

@@ -3973,10 +3973,11 @@ app.post('/api/selections', requireAuth, async function(req, res) {
         var name = req.body.name || 'Selection';
         var shareType = req.body.shareType || 'link';
         var hideQuantities = req.body.hideQuantities || false;
+        var includeSizes = req.body.includeSizes || false;
         var notes = req.body.notes || {}; // Object with productId -> note text
         if (!productIds || productIds.length === 0) return res.json({ success: false, error: 'No products selected' });
         var shareId = Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
-        var options = JSON.stringify({ hideQuantities: hideQuantities, notes: notes });
+        var options = JSON.stringify({ hideQuantities: hideQuantities, includeSizes: includeSizes, notes: notes });
         await pool.query('INSERT INTO selections (share_id, name, product_ids, created_by, share_type, options, expires_at) VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL \'60 days\')', [shareId, name, productIds, req.session.username || 'anonymous', shareType, options]);
         res.json({ success: true, shareId: shareId, url: '/share/' + shareId });
     } catch (err) { res.status(500).json({ error: err.message }); }
@@ -4007,6 +4008,32 @@ app.get('/api/selections/:shareId', async function(req, res) {
         }
         var products = productsResult.rows.map(function(p) { p.eta = etaMap[p.base_style] || null; return p; });
         res.json({ selection: selection, products: products });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Get size breakdowns for a shared selection (public - no auth)
+app.get('/api/selections/:shareId/sizes', async function(req, res) {
+    try {
+        var result = await pool.query('SELECT * FROM selections WHERE share_id = $1', [req.params.shareId]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Selection not found' });
+        var selection = result.rows[0];
+        if (selection.expires_at && new Date(selection.expires_at) < new Date()) return res.status(410).json({ error: 'This link has expired' });
+        var options = {};
+        try { options = JSON.parse(selection.options || '{}'); } catch(e) {}
+        if (!options.includeSizes) return res.json({ sizes: {} });
+        // Get all style_ids for the selected products
+        var productsResult = await pool.query('SELECT style_id FROM products WHERE id = ANY($1)', [selection.product_ids]);
+        var styleIds = productsResult.rows.map(function(p) { return p.style_id; });
+        if (styleIds.length === 0) return res.json({ sizes: {} });
+        // Get size data for all these styles
+        var sizesResult = await pool.query('SELECT style_id, color_name, size, size_rank, available_now, left_to_sell FROM product_sizes WHERE style_id = ANY($1) ORDER BY style_id, color_name, size_rank', [styleIds]);
+        // Group by style_id
+        var sizesByStyle = {};
+        sizesResult.rows.forEach(function(r) {
+            if (!sizesByStyle[r.style_id]) sizesByStyle[r.style_id] = [];
+            sizesByStyle[r.style_id].push(r);
+        });
+        res.json({ sizes: sizesByStyle });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -4160,6 +4187,19 @@ app.get('/api/selections/:shareId/pdf', async function(req, res) {
             etaResult.rows.forEach(function(r) { etaMap[r.base_style] = r.earliest_eta; });
         }
         var products = productsResult.rows.map(function(p) { p.eta = etaMap[p.base_style] || null; return p; });
+        // Fetch size data if includeSizes is enabled
+        var sizesByStyle = {};
+        if (options.includeSizes) {
+            var styleIds = products.map(function(p) { return p.style_id; });
+            if (styleIds.length > 0) {
+                var sizesResult = await pool.query('SELECT style_id, color_name, size, size_rank, available_now, left_to_sell FROM product_sizes WHERE style_id = ANY($1) ORDER BY style_id, color_name, size_rank', [styleIds]);
+                sizesResult.rows.forEach(function(r) {
+                    if (!sizesByStyle[r.style_id]) sizesByStyle[r.style_id] = [];
+                    sizesByStyle[r.style_id].push(r);
+                });
+            }
+            options.sizesByStyle = sizesByStyle;
+        }
         res.send(getPDFHTML(selection, products, options));
     } catch (err) { res.status(500).send('Error generating PDF view'); }
 });
@@ -4768,7 +4808,6 @@ function getShareHTML(shareId) {
     css += '.product-info{padding:0.75rem 1rem 1rem}';
     css += '.product-name{font-size:1rem;font-weight:700;color:#1e3a5f;margin-bottom:0.125rem}';
     css += '.product-style{font-size:0.7rem;color:#86868b;margin-bottom:0.6rem;letter-spacing:0.02em}';
-    // Merch table styles - proper table layout
     css += '.merch-table{width:100%;border-collapse:collapse;font-size:0.78rem}';
     css += '.merch-table thead th{padding:0.35rem 0.5rem;text-align:right;font-weight:600;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.04em;border-bottom:2px solid #e5e5e7;background:#f8f9fa}';
     css += '.merch-table thead th:first-child{text-align:left;width:auto}';
@@ -4790,6 +4829,20 @@ function getShareHTML(shareId) {
     css += '.btn-primary{background:#1e3a5f;color:white}.btn-primary:hover{background:#2a4a6f}';
     css += '.loading{text-align:center;padding:3rem;color:#86868b}';
     css += '.footer{text-align:center;padding:1rem;color:#86868b;font-size:0.75rem;border-top:1px solid #e5e5e7;margin-top:1rem}';
+    // Size breakdown styles
+    css += '.size-toggle-btn{display:inline-block;margin-top:0.5rem;padding:0.3rem 0.75rem;font-size:0.72rem;color:#0088c2;background:#f0f7ff;border:1px solid #d0e7f7;border-radius:6px;cursor:pointer;font-weight:500;transition:all 0.15s}';
+    css += '.size-toggle-btn:hover{background:#e0f0ff;border-color:#0088c2}';
+    css += '.size-breakdown{display:none;margin-top:0.5rem;border-top:1px solid #e5e5e7;padding-top:0.5rem}';
+    css += '.size-breakdown.open{display:block}';
+    css += '.size-color-section{margin-bottom:0.5rem}';
+    css += '.size-color-label{font-size:0.7rem;font-weight:600;color:#333;margin-bottom:0.2rem;padding:0.15rem 0.4rem;background:#f5f5f7;border-radius:4px;display:inline-block}';
+    css += '.size-grid-table{width:100%;border-collapse:collapse;font-size:0.65rem;margin-top:0.2rem;margin-bottom:0.4rem}';
+    css += '.size-grid-table th{padding:0.15rem 0.25rem;font-weight:600;color:#555;background:#fafafa;border:1px solid #eee;text-align:center;min-width:30px}';
+    css += '.size-grid-table td{padding:0.15rem 0.25rem;text-align:center;border:1px solid #eee;font-variant-numeric:tabular-nums}';
+    css += '.size-grid-table td.sz-dc{color:#059669;font-weight:600}';
+    css += '.size-grid-table td.sz-coming{color:#0088c2;font-weight:500}';
+    css += '.size-grid-table .row-label{text-align:left;font-weight:600;font-size:0.62rem;white-space:nowrap;width:50px}';
+    css += '.size-grid-table .row-label.dc{color:#059669}.size-grid-table .row-label.coming{color:#0088c2}';
 
     var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Product Selection - Mark Edwards Apparel</title>';
     html += '<style>' + css + '</style></head><body>';
@@ -4800,23 +4853,51 @@ function getShareHTML(shareId) {
     html += '<div class="actions"><a class="btn btn-primary" id="pdfBtn" href="/api/selections/' + shareId + '/pdf" target="_blank">Download / Print PDF</a></div>';
     html += '<div class="footer">Mark Edwards Apparel &bull; Product availability subject to change</div>';
     html += '<script>';
+    html += 'var sizeData={};var includeSizes=false;';
     html += 'fetch("/api/selections/' + shareId + '").then(function(r){return r.json()}).then(function(d){';
     html += 'if(d.error){document.getElementById("productGrid").innerHTML=d.error.indexOf("expired")!==-1?"<p style=\\"text-align:center;padding:2rem;color:#666;font-size:1.1rem\\">This selection link has expired. Please request a new link from your sales representative.</p>":"<p>Selection not found</p>";document.getElementById("pdfBtn").style.display="none";return}';
+    html += 'var opts={};try{opts=JSON.parse(d.selection.options||"{}")}catch(e){}';
+    html += 'includeSizes=opts.includeSizes||false;';
     html += 'document.getElementById("selectionName").textContent=d.selection.name||"Product Selection";';
     html += 'document.getElementById("selectionInfo").textContent="Created "+new Date(d.selection.created_at).toLocaleDateString()+" \\u2022 "+d.products.length+" items";';
-    html += 'var h="";for(var i=0;i<d.products.length;i++){var p=d.products[i];var cols=p.colors||[];var totDC=0;var totCS=0;';
+    html += 'renderShareProducts(d.products);';
+    html += 'if(includeSizes){fetch("/api/selections/' + shareId + '/sizes").then(function(r){return r.json()}).then(function(sd){sizeData=sd.sizes||{};addSizeBreakdowns(d.products)}).catch(function(){})}';
+    html += '}).catch(function(e){document.getElementById("productGrid").innerHTML="<p>Error loading selection</p>"});';
+    // renderShareProducts function
+    html += 'function renderShareProducts(products){var h="";for(var i=0;i<products.length;i++){var p=products[i];var cols=p.colors||[];var totDC=0;var totCS=0;';
     html += 'var rows="";for(var j=0;j<cols.length;j++){var inDC=cols[j].available_now||cols[j].available_qty||0;var comingSoon=cols[j].left_to_sell||0;totDC+=inDC;totCS+=comingSoon;';
     html += 'rows+="<tr><td>"+cols[j].color_name+"</td><td class=\\"val-dc\\">"+inDC.toLocaleString()+"</td><td class=\\"val-coming\\">"+comingSoon.toLocaleString()+"</td></tr>"}';
     html += 'var imgUrl=p.image_url;if(imgUrl&&imgUrl.indexOf("download-accl.zoho.com")!==-1){var parts=imgUrl.split("/");imgUrl="/api/image/"+parts[parts.length-1]}';
     html += 'var im=imgUrl?"<img src=\\""+imgUrl+"\\" onerror=\\"this.parentElement.innerHTML=\'No Image\'\\">":"No Image";';
     html += 'var etaHtml=p.eta?"<div class=\\"eta-line\\">Expected "+new Date(p.eta).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})+"</div>":"";';
-    html += 'h+="<div class=\\"product-card\\"><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-name\\">"+p.name+"</div><div class=\\"product-style\\">"+p.style_id+"</div>";';
+    html += 'h+="<div class=\\"product-card\\" id=\\"card-"+p.style_id+"\\"><div class=\\"product-image\\">"+im+"</div><div class=\\"product-info\\"><div class=\\"product-name\\">"+p.name+"</div><div class=\\"product-style\\">"+p.style_id+"</div>";';
     html += 'h+="<table class=\\"merch-table\\"><thead><tr><th>Color</th><th class=\\"col-dc\\">In DC</th><th class=\\"col-coming\\">Coming</th></tr></thead>";';
     html += 'h+="<tbody>"+rows+"</tbody>";';
     html += 'h+="<tfoot><tr><td>TOTAL</td><td class=\\"val-dc\\">"+totDC.toLocaleString()+"</td><td class=\\"val-coming\\">"+totCS.toLocaleString()+"</td></tr></tfoot></table>";';
+    html += 'h+="<div class=\\"size-breakdown-container\\" id=\\"sizes-"+p.style_id+"\\"></div>";';
     html += 'h+=etaHtml+"</div></div>"}';
-    html += 'document.getElementById("productGrid").innerHTML=h';
-    html += '}).catch(function(e){document.getElementById("productGrid").innerHTML="<p>Error loading selection</p>"});';
+    html += 'document.getElementById("productGrid").innerHTML=h}';
+    // addSizeBreakdowns - adds toggle button + compact size table per color
+    html += 'function addSizeBreakdowns(products){for(var i=0;i<products.length;i++){var p=products[i];var styleId=p.style_id;var sizes=sizeData[styleId];if(!sizes||sizes.length===0)continue;';
+    html += 'var container=document.getElementById("sizes-"+styleId);if(!container)continue;';
+    html += 'var byColor={};sizes.forEach(function(s){if(!byColor[s.color_name])byColor[s.color_name]=[];byColor[s.color_name].push(s)});';
+    html += 'var sh="<button class=\\"size-toggle-btn\\" onclick=\\"toggleSizes(this)\\">▶ Show Size Breakdown</button>";';
+    html += 'sh+="<div class=\\"size-breakdown\\">";';
+    html += 'var colorNames=Object.keys(byColor);';
+    html += 'for(var c=0;c<colorNames.length;c++){var cn=colorNames[c];var colorSizes=byColor[cn];';
+    html += 'var szNames=colorSizes.map(function(s){return s.size});';
+    html += 'sh+="<div class=\\"size-color-section\\"><span class=\\"size-color-label\\">"+cn+"</span>";';
+    html += 'sh+="<table class=\\"size-grid-table\\"><thead><tr><th></th>";';
+    html += 'for(var s=0;s<szNames.length;s++){sh+="<th>"+szNames[s]+"</th>"}';
+    html += 'sh+="</tr></thead><tbody>";';
+    html += 'sh+="<tr><td class=\\"row-label dc\\">In DC</td>";';
+    html += 'for(var s=0;s<colorSizes.length;s++){var v=colorSizes[s].available_now||0;sh+="<td class=\\"sz-dc\\">"+(v||"-")+"</td>"}';
+    html += 'sh+="</tr><tr><td class=\\"row-label coming\\">Coming</td>";';
+    html += 'for(var s=0;s<colorSizes.length;s++){var v=colorSizes[s].left_to_sell||0;sh+="<td class=\\"sz-coming\\">"+(v||"-")+"</td>"}';
+    html += 'sh+="</tr></tbody></table></div>"}';
+    html += 'sh+="</div>";';
+    html += 'container.innerHTML=sh}}';
+    html += 'function toggleSizes(btn){var bd=btn.nextElementSibling;if(bd.classList.contains("open")){bd.classList.remove("open");btn.textContent="▶ Show Size Breakdown"}else{bd.classList.add("open");btn.textContent="▼ Hide Size Breakdown"}}';
     html += '</script></body></html>';
     return html;
 }
@@ -4871,15 +4952,53 @@ function getPDFHTML(selection, products, options) {
         var imgHtml = imgUrl ? '<img src="' + imgUrl + '" onerror="this.parentElement.innerHTML=\'No Image\'">' : 'No Image';
         var noteHtml = '';
         var etaHtml = '';
+        var sizeHtml = '';
         if (p.eta && !hideQuantities) {
             var etaDate = new Date(p.eta);
             etaHtml = '<div style="margin-top:4px;font-size:9px;color:#1565c0;font-weight:500">ETA: ' + etaDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + '</div>';
+        }
+        // Size breakdowns for PDF
+        if (options.includeSizes && options.sizesByStyle && options.sizesByStyle[p.style_id]) {
+            var sizes = options.sizesByStyle[p.style_id];
+            var byColor = {};
+            sizes.forEach(function(s) {
+                if (!byColor[s.color_name]) byColor[s.color_name] = [];
+                byColor[s.color_name].push(s);
+            });
+            sizeHtml += '<div style="margin-top:4px;border-top:1px solid #ddd;padding-top:3px">';
+            sizeHtml += '<div style="font-size:7px;font-weight:bold;color:#1e3a5f;margin-bottom:2px;text-transform:uppercase;letter-spacing:0.04em">Size Breakdown</div>';
+            var colorNames = Object.keys(byColor);
+            for (var ci = 0; ci < colorNames.length; ci++) {
+                var cn = colorNames[ci];
+                var colorSizes = byColor[cn];
+                var hasAny = colorSizes.some(function(s) { return (s.available_now || 0) > 0 || (s.left_to_sell || 0) > 0; });
+                if (!hasAny) continue;
+                sizeHtml += '<div style="margin-bottom:3px">';
+                sizeHtml += '<div style="font-size:7px;font-weight:600;color:#333;background:#f5f5f7;padding:1px 3px;border-radius:2px;display:inline-block;margin-bottom:1px">' + cn + '</div>';
+                sizeHtml += '<table style="width:100%;border-collapse:collapse;font-size:6.5px;margin-top:1px"><thead><tr><th style="width:32px"></th>';
+                for (var si = 0; si < colorSizes.length; si++) {
+                    sizeHtml += '<th style="text-align:center;padding:0 2px;font-weight:600;color:#555;min-width:22px">' + colorSizes[si].size + '</th>';
+                }
+                sizeHtml += '</tr></thead><tbody>';
+                sizeHtml += '<tr><td style="font-weight:600;color:#059669;font-size:6px;white-space:nowrap">In DC</td>';
+                for (var si = 0; si < colorSizes.length; si++) {
+                    var v = colorSizes[si].available_now || 0;
+                    sizeHtml += '<td style="text-align:center;color:#059669;font-weight:600;padding:0 1px">' + (v || '-') + '</td>';
+                }
+                sizeHtml += '</tr><tr><td style="font-weight:600;color:#0088c2;font-size:6px;white-space:nowrap">Coming</td>';
+                for (var si = 0; si < colorSizes.length; si++) {
+                    var v = colorSizes[si].left_to_sell || 0;
+                    sizeHtml += '<td style="text-align:center;color:#0088c2;font-weight:500;padding:0 1px">' + (v || '-') + '</td>';
+                }
+                sizeHtml += '</tr></tbody></table></div>';
+            }
+            sizeHtml += '</div>';
         }
         var productNote = notes[p.id] || notes[String(p.id)];
         if (productNote && productNote.trim()) {
             noteHtml = '<div class="note-box"><div class="note-label">Notes:</div>' + productNote.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>') + '</div>';
         }
-        html += '<div class="product-card"><div class="product-image">' + imgHtml + '</div><div class="product-info"><div class="product-name">' + p.name + '</div><div class="product-style">' + p.style_id + '</div>' + colHtml + etaHtml + noteHtml + '</div></div>';
+        html += '<div class="product-card"><div class="product-image">' + imgHtml + '</div><div class="product-info"><div class="product-name">' + p.name + '</div><div class="product-style">' + p.style_id + '</div>' + colHtml + sizeHtml + etaHtml + noteHtml + '</div></div>';
     }
     html += '</div><div class="footer">Mark Edwards Apparel • Product availability subject to change</div></body></html>';
     return html;
@@ -5271,7 +5390,7 @@ function getHTML() {
     html += '<div class="chat-panel" id="chatPanel"><div class="chat-header"><h3>Product Assistant</h3><button class="chat-close" id="chatClose">&times;</button></div><div class="chat-messages" id="chatMessages"><div class="chat-message assistant">Hi! I can help you find products and search orders. Try asking me:<br><br><strong>Products:</strong><br>• "Show me navy sweaters"<br>• "Joggers with more than 1,000 units"<br><br><strong>Orders & Sales:</strong><br>• "What did Amazon order?"<br>• "Show me all POs"<br>• "What stores bought style 71169?"</div></div><div class="chat-input-area"><textarea class="chat-input" id="chatInput" placeholder="Ask about products or orders..." rows="1"></textarea><button class="chat-send" id="chatSend">Send</button></div></div>';
     
     // Share modal
-    html += '<div class="share-modal" id="shareModal"><div class="share-modal-content"><h3>Share Selection</h3><div id="shareForm"><input type="text" id="selectionName" placeholder="Name this selection (e.g. Spring Collection for Acme Co)"><div style="margin:1rem 0"><label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.875rem;color:#4a5568"><input type="checkbox" id="hideQuantities" style="width:18px;height:18px;accent-color:#0088c2"> Hide quantities (Available Now & Left to Sell)</label></div><div class="share-modal-actions"><button class="btn btn-secondary" id="cancelShareBtn">Cancel</button><button class="btn btn-primary" id="createShareBtn">Create Link</button></div></div><div class="share-result hidden" id="shareResult"><p style="margin-bottom:1rem;color:#666" id="shareNameDisplay"></p><div class="share-buttons"><button class="share-action-btn" id="emailLinkBtn">Email Link</button><button class="share-action-btn" id="textLinkBtn">Text Link</button><button class="share-action-btn" id="copyLinkBtn">Copy Link</button><a class="share-action-btn" id="pdfLink" href="" target="_blank">Download PDF</a></div><div style="margin-top:1.5rem;text-align:center"><button class="btn btn-secondary" id="closeShareModalBtn">Done</button></div></div></div></div>';
+    html += '<div class="share-modal" id="shareModal"><div class="share-modal-content"><h3>Share Selection</h3><div id="shareForm"><input type="text" id="selectionName" placeholder="Name this selection (e.g. Spring Collection for Acme Co)"><div style="margin:1rem 0;display:flex;flex-direction:column;gap:0.5rem"><label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.875rem;color:#4a5568"><input type="checkbox" id="hideQuantities" style="width:18px;height:18px;accent-color:#0088c2"> Hide quantities (Available Now & Left to Sell)</label><label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.875rem;color:#4a5568"><input type="checkbox" id="includeSizes" style="width:18px;height:18px;accent-color:#0088c2"> Include size breakdowns</label></div><div class="share-modal-actions"><button class="btn btn-secondary" id="cancelShareBtn">Cancel</button><button class="btn btn-primary" id="createShareBtn">Create Link</button></div></div><div class="share-result hidden" id="shareResult"><p style="margin-bottom:1rem;color:#666" id="shareNameDisplay"></p><div class="share-buttons"><button class="share-action-btn" id="emailLinkBtn">Email Link</button><button class="share-action-btn" id="textLinkBtn">Text Link</button><button class="share-action-btn" id="copyLinkBtn">Copy Link</button><a class="share-action-btn" id="pdfLink" href="" target="_blank">Download PDF</a></div><div style="margin-top:1.5rem;text-align:center"><button class="btn btn-secondary" id="closeShareModalBtn">Done</button></div></div></div></div>';
     
     // Product modal
     html += '<div class="modal" id="modal"><div class="modal-content"><button class="modal-close" id="modalClose">&times;</button><div class="modal-body"><div class="modal-image"><img id="modalImage" src="" alt=""></div><div class="modal-details"><div style="margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid #e0e0e0"><div class="product-style" id="modalStyle" style="color:#0088c2;font-size:0.875rem;font-weight:600;margin-bottom:0.25rem"></div><h2 id="modalName" style="margin:0;padding:0;font-size:1.75rem;font-weight:600;color:#1e3a5f;background:none"></h2><p id="modalCategory" style="color:#6e6e73;margin:0.25rem 0 0;font-size:0.875rem"></p></div><div id="modalColors"></div><div class="total-row"><span>Total Available</span><span id="modalTotal"></span></div><div class="modal-actions"><button class="btn btn-secondary btn-sm" id="modalPickBtn">♡ Add to My Picks</button></div><div id="sizeGridContainer" style="margin-top:0.75rem"></div><div class="sales-history-section"><h3 style="margin:1.5rem 0 0.5rem;font-size:1rem;display:flex;align-items:center;gap:0.5rem;color:#1e3a5f;background:none">Sales & Import PO History <span id="salesHistoryLoading" style="font-size:0.75rem;color:#666;font-weight:normal">(loading...)</span></h3><p style="margin:0 0 0.75rem;font-size:0.75rem;color:#999;font-style:italic">(Showing trailing 12 months)</p><div id="salesHistorySummary" style="display:flex;gap:0.5rem;margin-bottom:0.75rem"></div><div id="salesHistoryFilter" style="margin-bottom:0.5rem;font-size:0.8rem;color:#666"></div><div id="salesHistoryList" style="max-height:200px;overflow-y:auto;font-size:0.875rem"></div></div><div class="note-section"><label><strong>Notes:</strong></label><textarea id="modalNote" placeholder="Add notes about this product..."></textarea><button class="btn btn-sm btn-primary" id="saveNoteBtn">Save Note</button></div></div></div></div></div>';
@@ -5587,12 +5706,12 @@ function getHTML() {
     html += 'document.getElementById("togglePreviewBtn").addEventListener("click",function(){var preview=document.getElementById("selectionPreview");preview.classList.toggle("visible")});';
     html += 'document.getElementById("closePreviewBtn").addEventListener("click",function(){document.getElementById("selectionPreview").classList.remove("visible")});';
     
-    html += 'document.getElementById("shareSelectionBtn").addEventListener("click",function(){document.getElementById("shareModal").classList.add("active");document.getElementById("shareResult").classList.add("hidden");document.getElementById("shareForm").classList.remove("hidden");document.getElementById("selectionName").value="";document.getElementById("hideQuantities").checked=false});';
+    html += 'document.getElementById("shareSelectionBtn").addEventListener("click",function(){document.getElementById("shareModal").classList.add("active");document.getElementById("shareResult").classList.add("hidden");document.getElementById("shareForm").classList.remove("hidden");document.getElementById("selectionName").value="";document.getElementById("hideQuantities").checked=false;document.getElementById("includeSizes").checked=false});';
     html += 'document.getElementById("cancelShareBtn").addEventListener("click",function(){document.getElementById("shareModal").classList.remove("active")});';
     html += 'document.getElementById("closeShareModalBtn").addEventListener("click",function(){document.getElementById("shareModal").classList.remove("active")});';
     
     html += 'var currentShareUrl="";';
-    html += 'document.getElementById("createShareBtn").addEventListener("click",function(){var name=document.getElementById("selectionName").value||"Product Selection";var hideQuantities=document.getElementById("hideQuantities").checked;fetch("/api/selections",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({productIds:selectedProducts,name:name,shareType:"link",hideQuantities:hideQuantities})}).then(function(r){return r.json()}).then(function(d){if(d.success){currentShareId=d.shareId;currentShareUrl=window.location.origin+"/share/"+d.shareId;document.getElementById("shareNameDisplay").textContent=name+" • "+selectedProducts.length+" items";document.getElementById("pdfLink").href="/api/selections/"+d.shareId+"/pdf";document.getElementById("shareForm").classList.add("hidden");document.getElementById("shareResult").classList.remove("hidden");loadShares()}else{alert(d.error)}})});';
+    html += 'document.getElementById("createShareBtn").addEventListener("click",function(){var name=document.getElementById("selectionName").value||"Product Selection";var hideQuantities=document.getElementById("hideQuantities").checked;var includeSizes=document.getElementById("includeSizes").checked;fetch("/api/selections",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({productIds:selectedProducts,name:name,shareType:"link",hideQuantities:hideQuantities,includeSizes:includeSizes})}).then(function(r){return r.json()}).then(function(d){if(d.success){currentShareId=d.shareId;currentShareUrl=window.location.origin+"/share/"+d.shareId;document.getElementById("shareNameDisplay").textContent=name+" • "+selectedProducts.length+" items";document.getElementById("pdfLink").href="/api/selections/"+d.shareId+"/pdf";document.getElementById("shareForm").classList.add("hidden");document.getElementById("shareResult").classList.remove("hidden");loadShares()}else{alert(d.error)}})});';
     
     html += 'document.getElementById("copyLinkBtn").addEventListener("click",function(){navigator.clipboard.writeText(currentShareUrl).then(function(){var btn=document.getElementById("copyLinkBtn");btn.textContent="✓ Copied!";setTimeout(function(){btn.textContent="Copy Link"},2000)})});';
     

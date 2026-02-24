@@ -5939,3 +5939,4 @@ initDB().then(function() {
     console.log('Scheduled daily export trigger at 2am EST');
 });
 
+// deploy trigger

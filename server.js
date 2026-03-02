@@ -801,7 +801,10 @@ async function processInventoryCSV(csvContent, filename) {
             await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [productId, normalizedColor, totalAvailableNow, totalLeftToSell, totalOnHand, totalOpenOrder, totalToCome, totalAvailableNow]);
         } else {
             var cr = await pool.query('SELECT id, available_now FROM product_colors WHERE product_id=$1 AND LOWER(TRIM(color_name))=LOWER($2)', [productId, normalizedColor]);
-            if (cr.rows.length > 0) { var newAN = (cr.rows[0].available_now || 0) + totalAvailableNow; await pool.query('UPDATE product_colors SET available_now=$1, available_qty=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3', [newAN, newAN, cr.rows[0].id]);
+            if (cr.rows.length > 0) {
+                // REPLACE the available_now value (not add) since sizes file has authoritative data
+                // The non-size Avail Now file already set this value; the sizes file should overwrite it
+                await pool.query('UPDATE product_colors SET available_now=$1, available_qty=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$3', [totalAvailableNow, totalAvailableNow, cr.rows[0].id]);
             } else { await pool.query('INSERT INTO product_colors (product_id, color_name, available_now, left_to_sell, on_hand, open_order, to_come, available_qty) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [productId, normalizedColor, totalAvailableNow, totalLeftToSell, totalOnHand, totalOpenOrder, totalToCome, totalAvailableNow]); }
         }
         for (var s = 0; s < sizeAccum.length; s++) {
@@ -812,8 +815,9 @@ async function processInventoryCSV(csvContent, filename) {
                 sizeBatchValues.push('($'+(off+1)+',$'+(off+2)+',$'+(off+3)+',$'+(off+4)+',$'+(off+5)+',$'+(off+6)+',$'+(off+7)+',$'+(off+8)+',$'+(off+9)+')');
                 if (sizeBatchCount >= 200) { await pool.query('INSERT INTO product_sizes (style_id, color_name, size, size_rank, available_now, left_to_sell, on_hand, to_come, open_order) VALUES ' + sizeBatchValues.join(','), sizeBatchParams); sizeBatchValues = []; sizeBatchParams = []; sizeBatchCount = 0; }
             } else {
-                var sr = await pool.query('SELECT id, available_now FROM product_sizes WHERE style_id=$1 AND LOWER(TRIM(color_name))=LOWER($2) AND size=$3', [accumStyleId, normalizedColor, sz.size]);
-                if (sr.rows.length > 0) { await pool.query('UPDATE product_sizes SET available_now=$1, updated_at=CURRENT_TIMESTAMP WHERE id=$2', [(sr.rows[0].available_now||0)+sz.availableNow, sr.rows[0].id]);
+                // REPLACE the available_now value (not add) since this is authoritative size data
+                var sr = await pool.query('SELECT id FROM product_sizes WHERE style_id=$1 AND LOWER(TRIM(color_name))=LOWER($2) AND size=$3', [accumStyleId, normalizedColor, sz.size]);
+                if (sr.rows.length > 0) { await pool.query('UPDATE product_sizes SET available_now=$1, updated_at=CURRENT_TIMESTAMP WHERE id=$2', [sz.availableNow, sr.rows[0].id]);
                 } else { await pool.query('INSERT INTO product_sizes (style_id, color_name, size, size_rank, available_now, left_to_sell, on_hand, to_come, open_order) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)', [accumStyleId, normalizedColor, sz.size, sz.sizeRank, sz.availableNow, sz.leftToSell, sz.onHand, sz.toCome, sz.openOrder]); }
             }
         }

@@ -2433,6 +2433,42 @@ app.put('/api/order-requests/:id', requireAuth, async function(req, res) {
 // ZOHO SALES ORDER CREATION APIs
 // ============================================
 
+// Diagnostic: test Zoho token and scopes
+app.get('/api/zoho/test-token', async function(req, res) {
+    try {
+        var orgId = process.env.ZOHO_BOOKS_ORG_ID || '677681121';
+        await refreshZohoToken();
+        var results = {};
+
+        // Test contacts API
+        try {
+            var cResp = await fetch('https://www.zohoapis.com/books/v3/contacts?organization_id=' + orgId + '&per_page=1', { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+            var cData = await cResp.json();
+            results.contacts = { status: cResp.status, code: cData.code, message: cData.message, count: cData.contacts ? cData.contacts.length : 0 };
+        } catch(e) { results.contacts = { error: e.message }; }
+
+        // Test items API
+        try {
+            var iResp = await fetch('https://www.zohoapis.com/books/v3/items?organization_id=' + orgId + '&per_page=1', { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+            var iData = await iResp.json();
+            results.items = { status: iResp.status, code: iData.code, message: iData.message, count: iData.items ? iData.items.length : 0 };
+        } catch(e) { results.items = { error: e.message }; }
+
+        // Test PO API (should work already)
+        try {
+            var pResp = await fetch('https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&per_page=1', { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+            var pData = await pResp.json();
+            results.purchaseorders = { status: pResp.status, code: pData.code, message: pData.message, count: pData.purchaseorders ? pData.purchaseorders.length : 0 };
+        } catch(e) { results.purchaseorders = { error: e.message }; }
+
+        results.token_first_chars = zohoAccessToken ? zohoAccessToken.substring(0, 20) + '...' : 'NO TOKEN';
+        results.refresh_token_first_chars = (process.env.ZOHO_REFRESH_TOKEN || '').substring(0, 20) + '...';
+        res.json({ success: true, results: results });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
 // Search Zoho Books customers by name
 app.get('/api/zoho/search-customers', async function(req, res) {
     try {

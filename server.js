@@ -2429,6 +2429,206 @@ app.put('/api/order-requests/:id', requireAuth, async function(req, res) {
 });
 
 // Order detail page (public - accessed via link from email)
+// ============================================
+// ZOHO SALES ORDER CREATION APIs
+// ============================================
+
+// Search Zoho Books customers by name
+app.get('/api/zoho/search-customers', async function(req, res) {
+    try {
+        var searchName = req.query.name || '';
+        if (!searchName) return res.json({ success: false, error: 'Name required' });
+        var orgId = process.env.ZOHO_BOOKS_ORG_ID || '677681121';
+        if (!zohoAccessToken) await refreshZohoToken();
+        var url = 'https://www.zohoapis.com/books/v3/contacts?organization_id=' + orgId + '&contact_type=customer&contact_name_contains=' + encodeURIComponent(searchName);
+        var response = await fetch(url, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+        if (response.status === 401) {
+            await refreshZohoToken();
+            response = await fetch(url, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+        }
+        if (!response.ok) return res.json({ success: false, error: 'Zoho API error: ' + response.status });
+        var data = await response.json();
+        var customers = (data.contacts || []).map(function(c) {
+            return { contact_id: c.contact_id, contact_name: c.contact_name, company_name: c.company_name || '', email: c.email || '' };
+        });
+        res.json({ success: true, customers: customers });
+    } catch (err) {
+        console.error('Zoho customer search error:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Get size curve from Import PO via Zoho Books API
+app.get('/api/zoho/po-size-curve/:poNumber', async function(req, res) {
+    try {
+        var poNumber = req.params.poNumber;
+        var orgId = process.env.ZOHO_BOOKS_ORG_ID || '677681121';
+        if (!zohoAccessToken) await refreshZohoToken();
+
+        // First search for the PO by number
+        var searchUrl = 'https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&purchaseorder_number=' + encodeURIComponent(poNumber);
+        var searchResp = await fetch(searchUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+        if (searchResp.status === 401) {
+            await refreshZohoToken();
+            searchResp = await fetch(searchUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+        }
+        if (!searchResp.ok) return res.json({ success: false, error: 'Zoho search error: ' + searchResp.status });
+        var searchData = await searchResp.json();
+        if (!searchData.purchaseorders || searchData.purchaseorders.length === 0) {
+            // Fallback: try from local sales_data
+            var localResult = await pool.query(
+                "SELECT line_item_sku, quantity FROM sales_data WHERE document_number = $1 AND document_type IN ('Purchase Order', 'PO') ORDER BY line_item_sku",
+                [poNumber]
+            );
+            if (localResult.rows.length === 0) return res.json({ success: false, error: 'PO not found in Zoho or local data' });
+            // Build size curve from local data
+            var localCurve = {};
+            localResult.rows.forEach(function(row) {
+                var sku = row.line_item_sku || '';
+                var parts = sku.split('-');
+                var size = parts.length >= 3 ? parts[parts.length - 1] : 'OS';
+                var color = parts.length >= 3 ? parts.slice(1, -1).join('-') : (parts[1] || 'Default');
+                var baseStyle = parts[0] || sku;
+                var key = baseStyle + '|' + color;
+                if (!localCurve[key]) localCurve[key] = { base_style: baseStyle, color: color, sizes: {} };
+                localCurve[key].sizes[size] = (localCurve[key].sizes[size] || 0) + parseFloat(row.quantity || 0);
+            });
+            // Convert to ratio per color group
+            var curveData = Object.values(localCurve).map(function(item) {
+                var totalQty = Object.values(item.sizes).reduce(function(a, b) { return a + b; }, 0);
+                var ratios = {};
+                Object.keys(item.sizes).forEach(function(s) { ratios[s] = totalQty > 0 ? item.sizes[s] / totalQty : 0; });
+                return { base_style: item.base_style, color: item.color, sizes: item.sizes, ratios: ratios, total_qty: totalQty };
+            });
+            return res.json({ success: true, source: 'local', curve: curveData });
+        }
+
+        // Get PO detail with line items from Zoho
+        var poId = searchData.purchaseorders[0].purchaseorder_id;
+        var detailUrl = 'https://www.zohoapis.com/books/v3/purchaseorders/' + poId + '?organization_id=' + orgId;
+        var detailResp = await fetch(detailUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+        if (!detailResp.ok) return res.json({ success: false, error: 'Zoho detail error: ' + detailResp.status });
+        var detailData = await detailResp.json();
+        var lineItems = (detailData.purchaseorder && detailData.purchaseorder.line_items) || [];
+
+        // Parse line items to extract size curve
+        // SKU format is typically: BASESTYLE-COLOR-SIZE (e.g. 62914Y-AC-S, 62914Y-AC-M)
+        var curve = {};
+        lineItems.forEach(function(li) {
+            var sku = li.sku || li.name || '';
+            var parts = sku.split('-');
+            var size = parts.length >= 3 ? parts[parts.length - 1] : 'OS';
+            var color = parts.length >= 3 ? parts.slice(1, -1).join('-') : (parts[1] || 'Default');
+            var baseStyle = parts[0] || sku;
+            var key = baseStyle + '|' + color;
+            if (!curve[key]) curve[key] = { base_style: baseStyle, color: color, sizes: {}, item_ids: {} };
+            curve[key].sizes[size] = (curve[key].sizes[size] || 0) + (li.quantity || 0);
+            if (li.item_id) curve[key].item_ids[size] = li.item_id;
+        });
+
+        // Convert to ratio per color group
+        var curveData = Object.values(curve).map(function(item) {
+            var totalQty = Object.values(item.sizes).reduce(function(a, b) { return a + b; }, 0);
+            var ratios = {};
+            Object.keys(item.sizes).forEach(function(s) { ratios[s] = totalQty > 0 ? item.sizes[s] / totalQty : 0; });
+            return { base_style: item.base_style, color: item.color, sizes: item.sizes, ratios: ratios, total_qty: totalQty, item_ids: item.item_ids };
+        });
+        res.json({ success: true, source: 'zoho', curve: curveData });
+    } catch (err) {
+        console.error('PO size curve error:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Search Zoho Books items by name/sku (to get item_id for line items)
+app.get('/api/zoho/search-items', async function(req, res) {
+    try {
+        var search = req.query.search || '';
+        if (!search) return res.json({ success: false, error: 'Search term required' });
+        var orgId = process.env.ZOHO_BOOKS_ORG_ID || '677681121';
+        if (!zohoAccessToken) await refreshZohoToken();
+        var url = 'https://www.zohoapis.com/books/v3/items?organization_id=' + orgId + '&search_text=' + encodeURIComponent(search);
+        var response = await fetch(url, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+        if (response.status === 401) {
+            await refreshZohoToken();
+            response = await fetch(url, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+        }
+        if (!response.ok) return res.json({ success: false, error: 'Zoho items API error: ' + response.status });
+        var data = await response.json();
+        var items = (data.items || []).map(function(it) {
+            return { item_id: it.item_id, name: it.name, sku: it.sku || '', rate: it.rate || 0, unit: it.unit || '' };
+        });
+        res.json({ success: true, items: items });
+    } catch (err) {
+        console.error('Zoho items search error:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
+// Create Zoho Books Sales Order (draft)
+app.post('/api/zoho/create-salesorder', async function(req, res) {
+    try {
+        var b = req.body;
+        if (!b.customer_id) return res.json({ success: false, error: 'Zoho customer_id required' });
+        if (!b.line_items || b.line_items.length === 0) return res.json({ success: false, error: 'At least one line item required' });
+
+        var orgId = process.env.ZOHO_BOOKS_ORG_ID || '677681121';
+        if (!zohoAccessToken) await refreshZohoToken();
+
+        // Build Zoho SO payload
+        var soPayload = {
+            customer_id: b.customer_id,
+            date: b.date || new Date().toISOString().split('T')[0],
+            notes: b.notes || '',
+            reference_number: b.reference_number || '',
+            line_items: b.line_items.map(function(li) {
+                var item = { quantity: li.quantity || 1, rate: li.rate || 0, description: li.description || '' };
+                if (li.item_id) item.item_id = li.item_id;
+                else item.name = li.name || 'Item';
+                return item;
+            })
+        };
+        if (b.shipment_date) soPayload.shipment_date = b.shipment_date;
+
+        console.log('Creating Zoho SO for customer:', b.customer_id, 'with', soPayload.line_items.length, 'line items');
+
+        var url = 'https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId;
+        var response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken, 'Content-Type': 'application/json' },
+            body: JSON.stringify(soPayload)
+        });
+        if (response.status === 401) {
+            await refreshZohoToken();
+            response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken, 'Content-Type': 'application/json' },
+                body: JSON.stringify(soPayload)
+            });
+        }
+        var data = await response.json();
+        if (data.code !== 0) {
+            console.error('Zoho SO creation failed:', data);
+            return res.json({ success: false, error: data.message || 'Zoho API error', zoho_code: data.code });
+        }
+        var so = data.salesorder;
+        console.log('Zoho SO created:', so.salesorder_number, so.salesorder_id);
+
+        // Update order_request if detail_id was provided
+        if (b.order_detail_id) {
+            await pool.query(
+                "UPDATE order_requests SET zoho_so_number = $1, status = 'processing' WHERE detail_id = $2",
+                [so.salesorder_number, b.order_detail_id]
+            );
+        }
+
+        res.json({ success: true, salesorder: { salesorder_id: so.salesorder_id, salesorder_number: so.salesorder_number, status: so.status, total: so.total } });
+    } catch (err) {
+        console.error('Zoho SO creation error:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
 app.get('/order/:detailId', async function(req, res) {
     try {
         var result = await pool.query("SELECT * FROM order_requests WHERE detail_id = $1", [req.params.detailId]);
@@ -2668,7 +2868,334 @@ function getOrderDetailHTML(order, products) {
     });
     html += '</div></div>';
 
+    // ===== ZOHO SALES ORDER CREATION SECTION =====
+    html += '<div class="products-section" style="margin-top:0;border-top:none;border-radius:0" id="zohoSOSection">';
+    html += '<h2 style="color:#1e3a5f;margin-bottom:1rem;display:flex;align-items:center;gap:0.5rem">';
+    html += '<span style="font-size:1.3rem">📋</span> Create Zoho Sales Order</h2>';
+
+    // If already has a SO number, show it
+    if (order.zoho_so_number) {
+        html += '<div style="background:#e8f5e9;border:1px solid #c8e6c9;border-radius:12px;padding:1.5rem;text-align:center">';
+        html += '<div style="font-size:1.5rem;margin-bottom:0.5rem">✅</div>';
+        html += '<div style="font-weight:700;color:#2e7d32;font-size:1.1rem">Zoho SO: ' + order.zoho_so_number + '</div>';
+        html += '<p style="color:#666;font-size:0.85rem;margin-top:0.5rem">This order request has already been converted to a Zoho Sales Order.</p>';
+        html += '</div>';
+    } else {
+        // Step 1: Customer matching
+        html += '<div id="soStep1" style="margin-bottom:1.5rem">';
+        html += '<div style="background:#1e3a5f;color:white;padding:0.5rem 1rem;border-radius:8px 8px 0 0;font-weight:700;font-size:0.85rem">Step 1: Match Customer in Zoho</div>';
+        html += '<div style="border:1px solid #e0e0e0;border-top:none;padding:1rem;border-radius:0 0 8px 8px">';
+        html += '<p style="font-size:0.85rem;color:#666;margin-bottom:0.75rem">Account on order: <strong>' + (order.customer_name || '').replace(/"/g, '&quot;') + '</strong></p>';
+        html += '<div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">';
+        html += '<input type="text" id="zohoCustomerSearch" value="' + (order.customer_name || '').replace(/"/g, '&quot;') + '" placeholder="Search Zoho customers..." style="flex:1;min-width:200px;padding:0.6rem 0.85rem;border:1.5px solid #e0e0e0;border-radius:10px;font-size:0.875rem">';
+        html += '<button onclick="searchZohoCustomers()" style="background:#0088c2;color:white;border:none;padding:0.6rem 1.25rem;border-radius:10px;font-weight:600;cursor:pointer;font-size:0.85rem">Search</button>';
+        html += '</div>';
+        html += '<div id="zohoCustomerResults" style="margin-top:0.75rem"></div>';
+        html += '<input type="hidden" id="selectedZohoCustomerId" value="">';
+        html += '<input type="hidden" id="selectedZohoCustomerName" value="">';
+        html += '</div></div>';
+
+        // Step 2: Load size curve & enter qty/price
+        html += '<div id="soStep2" style="margin-bottom:1.5rem;display:none">';
+        html += '<div style="background:#1e3a5f;color:white;padding:0.5rem 1rem;border-radius:8px 8px 0 0;font-weight:700;font-size:0.85rem">Step 2: Enter Quantities & Pricing</div>';
+        html += '<div style="border:1px solid #e0e0e0;border-top:none;padding:1rem;border-radius:0 0 8px 8px">';
+        html += '<div id="soCurveStatus" style="margin-bottom:0.75rem;font-size:0.85rem;color:#666">Loading size curve from Import PO...</div>';
+        html += '<div id="soLineItemsContainer"></div>';
+        html += '<div style="margin-top:1rem;display:flex;justify-content:flex-end;gap:0.75rem">';
+        html += '<button onclick="previewZohoSO()" style="background:#34a853;color:white;border:none;padding:0.7rem 2rem;border-radius:10px;font-weight:700;cursor:pointer;font-size:0.95rem" id="soPreviewBtn">Preview & Create Draft SO</button>';
+        html += '</div></div></div>';
+
+        // Step 3: Result
+        html += '<div id="soStep3" style="display:none"></div>';
+    }
+    html += '</div>';
+
     html += '<div class="footer"><p>Mark Edwards Apparel • Order Request System</p></div>';
+
+    // Add the JavaScript for the interactive Zoho SO creation
+    html += '<script>';
+    html += 'var orderData = ' + JSON.stringify({
+        detail_id: order.detail_id,
+        customer_name: order.customer_name,
+        import_po_numbers: order.import_po_numbers || '',
+        customer_price: parseFloat(order.customer_price) || 0,
+        cxl_date: order.cxl_date || order.cancel_date || '',
+        notes: order.notes || '',
+        request_number: order.request_number,
+        products: products.map(function(p) {
+            return {
+                style_id: p.style_id,
+                base_style: p.base_style,
+                name: p.name,
+                colors: (p.colors || []).map(function(c) { return c.color_name; }).filter(Boolean)
+            };
+        })
+    }) + ';';
+
+    html += 'var sizeCurveData = null;';
+    html += 'var selectedCustomerId = "";';
+    html += 'var selectedCustomerName = "";';
+
+    // Customer search function
+    html += 'function searchZohoCustomers() {';
+    html += '  var q = document.getElementById("zohoCustomerSearch").value.trim();';
+    html += '  if (!q) { alert("Enter a customer name to search"); return; }';
+    html += '  var resultsDiv = document.getElementById("zohoCustomerResults");';
+    html += '  resultsDiv.innerHTML = "<p style=\\"color:#0088c2;font-size:0.85rem\\">Searching Zoho...</p>";';
+    html += '  fetch("/api/zoho/search-customers?name=" + encodeURIComponent(q))';
+    html += '    .then(function(r) { return r.json(); })';
+    html += '    .then(function(d) {';
+    html += '      if (!d.success || !d.customers || d.customers.length === 0) {';
+    html += '        resultsDiv.innerHTML = "<p style=\\"color:#c62828;font-size:0.85rem\\">No customers found. Try a different search.</p>";';
+    html += '        return;';
+    html += '      }';
+    html += '      var h = "";';
+    html += '      d.customers.forEach(function(c, ci) {';
+    html += '        h += "<div class=\\"zc-row\\" data-idx=\\"" + ci + "\\" style=\\"display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.75rem;border:1px solid #e8e8e8;border-radius:8px;margin-bottom:0.35rem;cursor:pointer;transition:background 0.15s\\">";';
+    html += '        h += "<div><div style=\\"font-weight:600;color:#1e3a5f;font-size:0.9rem\\">" + (c.contact_name||"").replace(/</g,"&lt;") + "</div>";';
+    html += '        if (c.company_name && c.company_name !== c.contact_name) h += "<div style=\\"font-size:0.75rem;color:#999\\">" + (c.company_name||"").replace(/</g,"&lt;") + "</div>";';
+    html += '        h += "</div><div style=\\"font-size:0.7rem;color:#0088c2;font-weight:600\\">SELECT</div></div>";';
+    html += '      });';
+    html += '      resultsDiv.innerHTML = "<p style=\\"font-size:0.8rem;color:#666;margin-bottom:0.5rem\\">" + d.customers.length + " customer(s) found — click to select:</p>" + h;';
+    html += '      resultsDiv.querySelectorAll(".zc-row").forEach(function(el) {';
+    html += '        var idx = parseInt(el.dataset.idx);';
+    html += '        var cust = d.customers[idx];';
+    html += '        el.onmouseover = function(){ this.style.background="#f0f7ff"; };';
+    html += '        el.onmouseout = function(){ this.style.background=""; };';
+    html += '        el.onclick = function(){ selectZohoCustomer(cust.contact_id, cust.contact_name); };';
+    html += '      });';';';
+    html += '    }).catch(function(e) { resultsDiv.innerHTML = "<p style=\\"color:#c62828;font-size:0.85rem\\">Error: " + e.message + "</p>"; });';
+    html += '}';
+
+    // Select customer
+    html += 'function selectZohoCustomer(id, name) {';
+    html += '  selectedCustomerId = id;';
+    html += '  selectedCustomerName = name;';
+    html += '  document.getElementById("selectedZohoCustomerId").value = id;';
+    html += '  document.getElementById("selectedZohoCustomerName").value = name;';
+    html += '  document.getElementById("zohoCustomerResults").innerHTML = "<div style=\\"background:#e8f5e9;border-radius:8px;padding:0.75rem;display:flex;justify-content:space-between;align-items:center\\"><div><span style=\\"color:#2e7d32;font-weight:700\\">✓ Selected:</span> <strong>" + name + "</strong></div><button onclick=\\"clearCustomerSelection()\\" style=\\"background:none;border:1px solid #999;border-radius:6px;padding:2px 10px;font-size:0.75rem;cursor:pointer;color:#666\\">Change</button></div>";';
+    html += '  document.getElementById("soStep2").style.display = "";';
+    html += '  loadSizeCurve();';
+    html += '}';
+
+    html += 'function clearCustomerSelection() {';
+    html += '  selectedCustomerId = "";';
+    html += '  selectedCustomerName = "";';
+    html += '  document.getElementById("zohoCustomerResults").innerHTML = "";';
+    html += '  document.getElementById("soStep2").style.display = "none";';
+    html += '}';
+
+    // Load size curve from Import PO
+    html += 'function loadSizeCurve() {';
+    html += '  var po = orderData.import_po_numbers;';
+    html += '  var statusDiv = document.getElementById("soCurveStatus");';
+    html += '  var container = document.getElementById("soLineItemsContainer");';
+    html += '  if (!po) {';
+    html += '    statusDiv.innerHTML = "<span style=\\"color:#e65100\\">⚠ No Import PO on this order. Sizes will need to be entered manually.</span>";';
+    html += '    buildLineItemsTable(null);';
+    html += '    return;';
+    html += '  }';
+    html += '  statusDiv.innerHTML = "<span style=\\"color:#0088c2\\">Loading size curve from PO: " + po + "...</span>";';
+    html += '  fetch("/api/zoho/po-size-curve/" + encodeURIComponent(po))';
+    html += '    .then(function(r) { return r.json(); })';
+    html += '    .then(function(d) {';
+    html += '      if (d.success && d.curve && d.curve.length > 0) {';
+    html += '        sizeCurveData = d.curve;';
+    html += '        statusDiv.innerHTML = "<span style=\\"color:#2e7d32\\">✓ Size curve loaded from " + (d.source === "zoho" ? "Zoho PO" : "local data") + " — " + d.curve.length + " color group(s) found. Enter total qty per color and sizes will auto-distribute.</span>";';
+    html += '      } else {';
+    html += '        statusDiv.innerHTML = "<span style=\\"color:#e65100\\">⚠ Could not load size curve from PO. Enter quantities manually below.</span>";';
+    html += '      }';
+    html += '      buildLineItemsTable(sizeCurveData);';
+    html += '    }).catch(function(e) {';
+    html += '      statusDiv.innerHTML = "<span style=\\"color:#c62828\\">Error loading PO: " + e.message + "</span>";';
+    html += '      buildLineItemsTable(null);';
+    html += '    });';
+    html += '}';
+
+    // Build line items table
+    html += 'function buildLineItemsTable(curve) {';
+    html += '  var container = document.getElementById("soLineItemsContainer");';
+    html += '  var defPrice = orderData.customer_price || 0;';
+    html += '  var h = "";';
+
+    // Table with each product/color as a row
+    html += '  var rows = [];';
+    html += '  orderData.products.forEach(function(p) {';
+    html += '    if (p.colors && p.colors.length > 0) {';
+    html += '      p.colors.forEach(function(c) {';
+    html += '        var curveMatch = null;';
+    html += '        if (curve) {';
+    html += '          curveMatch = curve.find(function(cv) {';
+    html += '            return cv.base_style === p.base_style && cv.color.toLowerCase() === c.toLowerCase();';
+    html += '          });';
+    html += '          if (!curveMatch) curveMatch = curve.find(function(cv) { return cv.base_style === p.base_style; });';
+    html += '        }';
+    html += '        rows.push({ style_id: p.style_id, base_style: p.base_style, name: p.name, color: c, curve: curveMatch });';
+    html += '      });';
+    html += '    } else {';
+    html += '      var curveMatch = curve ? curve.find(function(cv) { return cv.base_style === p.base_style; }) : null;';
+    html += '      rows.push({ style_id: p.style_id, base_style: p.base_style, name: p.name, color: "Default", curve: curveMatch });';
+    html += '    }';
+    html += '  });';
+
+    // Build size columns from curve data
+    html += '  var allSizes = [];';
+    html += '  if (curve) { curve.forEach(function(cv) { Object.keys(cv.ratios).forEach(function(s) { if (allSizes.indexOf(s) === -1) allSizes.push(s); }); }); }';
+    html += '  if (allSizes.length === 0) allSizes = ["OS"];';
+    // Sort sizes
+    html += '  var sizeOrder = {"XXS":0,"XS":1,"S":2,"M":3,"L":4,"XL":5,"XXL":6,"2XL":6,"3XL":7,"4XL":8,"5XL":9,"1X":5,"2X":6,"3X":7,"0T":0,"2T":1,"3T":2,"4T":3,"5":4,"6":5,"6X":6,"7":7,"8":8,"10":9,"12":10,"14":11,"16":12};';
+    html += '  allSizes.sort(function(a, b) { var ra = sizeOrder[a] !== undefined ? sizeOrder[a] : 50; var rb = sizeOrder[b] !== undefined ? sizeOrder[b] : 50; return ra - rb; });';
+
+    html += '  h += "<table style=\\"width:100%;border-collapse:collapse;font-size:0.82rem\\">";';
+    html += '  h += "<thead><tr style=\\"background:#f5f5f7\\">";';
+    html += '  h += "<th style=\\"text-align:left;padding:0.5rem;border-bottom:2px solid #ddd;min-width:120px\\">Style / Color</th>";';
+    html += '  h += "<th style=\\"text-align:center;padding:0.5rem;border-bottom:2px solid #ddd;width:70px\\">Total Qty</th>";';
+    html += '  h += "<th style=\\"text-align:center;padding:0.5rem;border-bottom:2px solid #ddd;width:80px\\">Price</th>";';
+    html += '  allSizes.forEach(function(s) { h += "<th style=\\"text-align:center;padding:0.5rem;border-bottom:2px solid #ddd;width:45px;font-size:0.75rem\\">" + s + "</th>"; });';
+    html += '  h += "</tr></thead><tbody>";';
+
+    html += '  rows.forEach(function(row, idx) {';
+    html += '    var bgColor = idx % 2 === 0 ? "#fff" : "#fafbfc";';
+    html += '    h += "<tr style=\\"background:" + bgColor + "\\">";';
+    html += '    h += "<td style=\\"padding:0.5rem;border-bottom:1px solid #eee\\"><div style=\\"font-weight:600;color:#0088c2;font-size:0.78rem\\">" + row.style_id + "</div><div style=\\"color:#666;font-size:0.75rem\\">" + row.color + "</div></td>";';
+    html += '    h += "<td style=\\"padding:0.4rem;border-bottom:1px solid #eee;text-align:center\\"><input type=\\"number\\" id=\\"soQty_" + idx + "\\" value=\\"0\\" min=\\"0\\" style=\\"width:60px;text-align:center;padding:0.3rem;border:1.5px solid #ddd;border-radius:6px;font-size:0.82rem\\" onchange=\\"recalcSizes(" + idx + ")\\" onkeyup=\\"recalcSizes(" + idx + ")\\"></td>";';
+    html += '    h += "<td style=\\"padding:0.4rem;border-bottom:1px solid #eee;text-align:center\\"><input type=\\"number\\" id=\\"soPrice_" + idx + "\\" value=\\"" + defPrice.toFixed(2) + "\\" min=\\"0\\" step=\\"0.01\\" style=\\"width:70px;text-align:center;padding:0.3rem;border:1.5px solid #ddd;border-radius:6px;font-size:0.82rem\\" onchange=\\"if(" + idx + "===0)copyPriceDown()\\"></td>";';
+    // Size columns (read-only, auto-calculated)
+    html += '    allSizes.forEach(function(s) {';
+    html += '      var ratio = (row.curve && row.curve.ratios && row.curve.ratios[s]) ? row.curve.ratios[s] : 0;';
+    html += '      h += "<td style=\\"padding:0.4rem;border-bottom:1px solid #eee;text-align:center\\"><input type=\\"number\\" id=\\"soSize_" + idx + "_" + s + "\\" value=\\"0\\" min=\\"0\\" data-ratio=\\"" + ratio + "\\" style=\\"width:40px;text-align:center;padding:0.2rem;border:1px solid #e0e0e0;border-radius:4px;font-size:0.78rem;background:" + (ratio > 0 ? "#f0f7ff" : "#fff") + "\\" title=\\"Ratio: " + (ratio * 100).toFixed(1) + "%\\"></td>";';
+    html += '    });';
+    html += '    h += "</tr>";';
+    html += '  });';
+    html += '  h += "</tbody></table>";';
+
+    // Store metadata
+    html += '  h += "<input type=\\"hidden\\" id=\\"soRowCount\\" value=\\"" + rows.length + "\\">";';
+    html += '  rows.forEach(function(row, idx) {';
+    html += '    h += "<input type=\\"hidden\\" id=\\"soRowMeta_" + idx + "\\" data-style=\\"" + row.style_id + "\\" data-color=\\"" + row.color + "\\" data-base=\\"" + row.base_style + "\\" data-name=\\"" + row.name + "\\">";';
+    html += '  });';
+    html += '  h += "<input type=\\"hidden\\" id=\\"soSizeList\\" value=\\"" + allSizes.join(",") + "\\">";';
+
+    html += '  container.innerHTML = h;';
+    html += '}';
+
+    // Recalculate sizes based on qty and ratio
+    html += 'function recalcSizes(rowIdx) {';
+    html += '  var totalQty = parseInt(document.getElementById("soQty_" + rowIdx).value) || 0;';
+    html += '  var sizes = (document.getElementById("soSizeList") || {value:""}).value.split(",").filter(Boolean);';
+    html += '  if (totalQty === 0) { sizes.forEach(function(s) { var el = document.getElementById("soSize_" + rowIdx + "_" + s); if (el) el.value = 0; }); return; }';
+    html += '  var totalRatio = 0;';
+    html += '  sizes.forEach(function(s) { var el = document.getElementById("soSize_" + rowIdx + "_" + s); if (el) totalRatio += parseFloat(el.dataset.ratio || 0); });';
+    html += '  if (totalRatio === 0) {';
+    // No curve data — just put total in first size
+    html += '    sizes.forEach(function(s, i) { var el = document.getElementById("soSize_" + rowIdx + "_" + s); if (el) el.value = (i === 0 ? totalQty : 0); });';
+    html += '    return;';
+    html += '  }';
+    // Distribute by ratio using largest remainder method
+    html += '  var allocated = 0;';
+    html += '  var items = [];';
+    html += '  sizes.forEach(function(s) {';
+    html += '    var el = document.getElementById("soSize_" + rowIdx + "_" + s);';
+    html += '    if (!el) return;';
+    html += '    var ratio = parseFloat(el.dataset.ratio || 0);';
+    html += '    var exact = totalQty * (ratio / totalRatio);';
+    html += '    var floor = Math.floor(exact);';
+    html += '    items.push({ size: s, floor: floor, remainder: exact - floor, el: el });';
+    html += '    allocated += floor;';
+    html += '  });';
+    html += '  var remaining = totalQty - allocated;';
+    html += '  items.sort(function(a, b) { return b.remainder - a.remainder; });';
+    html += '  items.forEach(function(it, i) { it.el.value = it.floor + (i < remaining ? 1 : 0); });';
+    html += '}';
+
+    // Copy price from first row to all others
+    html += 'function copyPriceDown() {';
+    html += '  var firstPrice = document.getElementById("soPrice_0");';
+    html += '  if (!firstPrice) return;';
+    html += '  var val = firstPrice.value;';
+    html += '  var count = parseInt((document.getElementById("soRowCount") || {value:"0"}).value);';
+    html += '  for (var i = 1; i < count; i++) {';
+    html += '    var el = document.getElementById("soPrice_" + i);';
+    html += '    if (el) el.value = val;';
+    html += '  }';
+    html += '}';
+
+    // Preview and create SO
+    html += 'function previewZohoSO() {';
+    html += '  if (!selectedCustomerId) { alert("Please select a Zoho customer first"); return; }';
+    html += '  var rowCount = parseInt((document.getElementById("soRowCount") || {value:"0"}).value);';
+    html += '  var sizes = (document.getElementById("soSizeList") || {value:""}).value.split(",").filter(Boolean);';
+    html += '  var lineItems = [];';
+    html += '  var totalUnits = 0;';
+    html += '  for (var i = 0; i < rowCount; i++) {';
+    html += '    var qty = parseInt((document.getElementById("soQty_" + i) || {value:"0"}).value) || 0;';
+    html += '    if (qty === 0) continue;';
+    html += '    var price = parseFloat((document.getElementById("soPrice_" + i) || {value:"0"}).value) || 0;';
+    html += '    var meta = document.getElementById("soRowMeta_" + i);';
+    html += '    var styleId = meta ? meta.dataset.style : "";';
+    html += '    var color = meta ? meta.dataset.color : "";';
+    html += '    var baseName = meta ? meta.dataset.name : "";';
+    // Build individual line items per size with qty > 0
+    html += '    sizes.forEach(function(s) {';
+    html += '      var sizeQty = parseInt((document.getElementById("soSize_" + i + "_" + s) || {value:"0"}).value) || 0;';
+    html += '      if (sizeQty > 0) {';
+    html += '        lineItems.push({ name: styleId + "-" + s, description: baseName + " - " + color + " - " + s, quantity: sizeQty, rate: price });';
+    html += '        totalUnits += sizeQty;';
+    html += '      }';
+    html += '    });';
+    html += '  }';
+    html += '  if (lineItems.length === 0) { alert("Please enter quantities for at least one product/color"); return; }';
+
+    // Show confirmation
+    html += '  var msg = "Create Draft Sales Order in Zoho Books?\\n\\n";';
+    html += '  msg += "Customer: " + selectedCustomerName + "\\n";';
+    html += '  msg += "Line items: " + lineItems.length + "\\n";';
+    html += '  msg += "Total units: " + totalUnits + "\\n";';
+    html += '  msg += "\\nThis will create a DRAFT SO (not approved).";';
+    html += '  if (!confirm(msg)) return;';
+
+    // Build notes from order data
+    html += '  var soNotes = "Stock Order Request: " + orderData.request_number + "\\n";';
+    html += '  if (orderData.notes) soNotes += "Notes: " + orderData.notes + "\\n";';
+
+    html += '  var payload = {';
+    html += '    customer_id: selectedCustomerId,';
+    html += '    line_items: lineItems,';
+    html += '    date: new Date().toISOString().split("T")[0],';
+    html += '    reference_number: orderData.request_number,';
+    html += '    notes: soNotes,';
+    html += '    order_detail_id: orderData.detail_id';
+    html += '  };';
+    html += '  if (orderData.cxl_date) payload.shipment_date = orderData.cxl_date;';
+
+    html += '  var btn = document.getElementById("soPreviewBtn");';
+    html += '  btn.disabled = true; btn.textContent = "Creating SO in Zoho...";';
+
+    html += '  fetch("/api/zoho/create-salesorder", {';
+    html += '    method: "POST",';
+    html += '    headers: {"Content-Type": "application/json"},';
+    html += '    body: JSON.stringify(payload)';
+    html += '  }).then(function(r) { return r.json(); }).then(function(d) {';
+    html += '    btn.disabled = false; btn.textContent = "Preview & Create Draft SO";';
+    html += '    if (d.success) {';
+    html += '      document.getElementById("soStep3").style.display = "";';
+    html += '      document.getElementById("soStep3").innerHTML = "<div style=\\"background:#e8f5e9;border:1px solid #c8e6c9;border-radius:12px;padding:1.5rem;text-align:center;margin-top:1rem\\"><div style=\\"font-size:2rem;margin-bottom:0.5rem\\">✅</div><div style=\\"font-weight:700;color:#2e7d32;font-size:1.15rem\\">Zoho Sales Order Created!</div><div style=\\"font-size:1.3rem;font-weight:700;color:#1e3a5f;margin:0.5rem 0\\">" + d.salesorder.salesorder_number + "</div><p style=\\"color:#666;font-size:0.85rem\\">Status: Draft • Total: $" + (d.salesorder.total || 0).toFixed(2) + "</p><p style=\\"color:#666;font-size:0.8rem;margin-top:0.5rem\\">Open Zoho Books to review and approve the sales order.</p></div>";';
+    html += '      document.getElementById("soStep2").style.display = "none";';
+    html += '      document.getElementById("soStep1").style.display = "none";';
+    html += '    } else {';
+    html += '      alert("Error creating SO: " + (d.error || "Unknown error") + (d.zoho_code ? " (code " + d.zoho_code + ")" : ""));';
+    html += '    }';
+    html += '  }).catch(function(e) {';
+    html += '    btn.disabled = false; btn.textContent = "Preview & Create Draft SO";';
+    html += '    alert("Error: " + e.message);';
+    html += '  });';
+    html += '}';
+
+    // Auto-search customer on load
+    html += 'if (orderData.customer_name && !' + (order.zoho_so_number ? 'true' : 'false') + ') { setTimeout(function() { searchZohoCustomers(); }, 500); }';
+
+    html += '</script>';
+
     html += '</div></body></html>';
     return html;
 }

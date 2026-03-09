@@ -2469,7 +2469,7 @@ app.get('/api/zoho/test-token', async function(req, res) {
     }
 });
 
-// Search Zoho Books customers by name
+// Search Zoho Books customers by name — uses salesorders API to find customer_id (works with existing scopes)
 app.get('/api/zoho/search-customers', async function(req, res) {
     try {
         var searchName = req.query.name || '';
@@ -2477,40 +2477,89 @@ app.get('/api/zoho/search-customers', async function(req, res) {
         var orgId = process.env.ZOHO_BOOKS_ORG_ID || '677681121';
         if (!zohoAccessToken) await refreshZohoToken();
 
-        // Use search_text for broad search, also try contact_name for exact match
-        var url = 'https://www.zohoapis.com/books/v3/contacts?organization_id=' + orgId + '&contact_type=customer&search_text=' + encodeURIComponent(searchName);
-        console.log('Zoho customer search URL:', url);
-        var response = await fetch(url, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
-        if (response.status === 401) {
-            await refreshZohoToken();
-            response = await fetch(url, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
-        }
-        var data = await response.json();
-        console.log('Zoho customer search result: code=' + data.code + ', contacts=' + (data.contacts ? data.contacts.length : 0));
+        // Strategy 1: Try Contacts API first (may work with fullaccess scope)
+        try {
+            var contactUrl = 'https://www.zohoapis.com/books/v3/contacts?organization_id=' + orgId + '&contact_type=customer&search_text=' + encodeURIComponent(searchName);
+            var cResp = await fetch(contactUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+            if (cResp.status === 401) { await refreshZohoToken(); cResp = await fetch(contactUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } }); }
+            var cData = await cResp.json();
+            if (cData.code === 0 && cData.contacts && cData.contacts.length > 0) {
+                console.log('Zoho contacts API worked, found ' + cData.contacts.length + ' customers');
+                return res.json({
+                    success: true,
+                    customers: cData.contacts.map(function(c) {
+                        return { contact_id: c.contact_id, contact_name: c.contact_name, company_name: c.company_name || '', email: c.email || '' };
+                    })
+                });
+            }
+        } catch(e) { console.log('Contacts API unavailable, falling back to SO search'); }
 
-        if (data.code && data.code !== 0) {
-            console.error('Zoho contacts API error:', JSON.stringify(data));
-            return res.json({ success: false, error: 'Zoho error: ' + (data.message || 'code ' + data.code) });
-        }
+        // Strategy 2: Search via Sales Orders to find customer_id from existing orders
+        console.log('Using Sales Orders API to find customer for: ' + searchName);
+        var customers = {};
 
-        var customers = (data.contacts || []).map(function(c) {
-            return { contact_id: c.contact_id, contact_name: c.contact_name, company_name: c.company_name || '', email: c.email || '' };
-        });
-
-        // If no results with full search, try with just the first word
-        if (customers.length === 0 && searchName.indexOf(' ') > 0) {
-            var firstWord = searchName.split(' ')[0];
-            console.log('No results for "' + searchName + '", retrying with first word: "' + firstWord + '"');
-            var url2 = 'https://www.zohoapis.com/books/v3/contacts?organization_id=' + orgId + '&contact_type=customer&search_text=' + encodeURIComponent(firstWord);
-            var response2 = await fetch(url2, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
-            var data2 = await response2.json();
-            customers = (data2.contacts || []).map(function(c) {
-                return { contact_id: c.contact_id, contact_name: c.contact_name, company_name: c.company_name || '', email: c.email || '' };
+        // Search sales orders by customer name
+        var soUrl = 'https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId + '&customer_name=' + encodeURIComponent(searchName) + '&per_page=10';
+        var soResp = await fetch(soUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+        if (soResp.status === 401) { await refreshZohoToken(); soResp = await fetch(soUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } }); }
+        var soData = await soResp.json();
+        if (soData.salesorders) {
+            soData.salesorders.forEach(function(so) {
+                if (so.customer_id && !customers[so.customer_id]) {
+                    customers[so.customer_id] = { contact_id: so.customer_id, contact_name: so.customer_name, company_name: '', email: '' };
+                }
             });
-            console.log('Retry found ' + customers.length + ' customers');
         }
 
-        res.json({ success: true, customers: customers });
+        // Also search invoices for the customer
+        try {
+            var invUrl = 'https://www.zohoapis.com/books/v3/invoices?organization_id=' + orgId + '&customer_name=' + encodeURIComponent(searchName) + '&per_page=10';
+            var invResp = await fetch(invUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+            var invData = await invResp.json();
+            if (invData.invoices) {
+                invData.invoices.forEach(function(inv) {
+                    if (inv.customer_id && !customers[inv.customer_id]) {
+                        customers[inv.customer_id] = { contact_id: inv.customer_id, contact_name: inv.customer_name, company_name: '', email: '' };
+                    }
+                });
+            }
+        } catch(e) { /* invoices search optional */ }
+
+        // Also try POs (vendor side)
+        try {
+            var poUrl = 'https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&search_text=' + encodeURIComponent(searchName) + '&per_page=10';
+            var poResp = await fetch(poUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+            var poData = await poResp.json();
+            if (poData.purchaseorders) {
+                poData.purchaseorders.forEach(function(po) {
+                    if (po.vendor_id && !customers[po.vendor_id]) {
+                        customers[po.vendor_id] = { contact_id: po.vendor_id, contact_name: po.vendor_name, company_name: '', email: '' };
+                    }
+                });
+            }
+        } catch(e) { /* PO search optional */ }
+
+        var result = Object.values(customers);
+        console.log('Found ' + result.length + ' customers via SO/Invoice/PO search');
+
+        // If still no results and multi-word search, retry with first word
+        if (result.length === 0 && searchName.indexOf(' ') > 0) {
+            var firstWord = searchName.split(' ')[0];
+            console.log('Retrying with first word: ' + firstWord);
+            var retryUrl = 'https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId + '&customer_name=' + encodeURIComponent(firstWord) + '&per_page=25';
+            var retryResp = await fetch(retryUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+            var retryData = await retryResp.json();
+            if (retryData.salesorders) {
+                retryData.salesorders.forEach(function(so) {
+                    if (so.customer_id && !customers[so.customer_id]) {
+                        customers[so.customer_id] = { contact_id: so.customer_id, contact_name: so.customer_name, company_name: '', email: '' };
+                    }
+                });
+            }
+            result = Object.values(customers);
+        }
+
+        res.json({ success: true, customers: result });
     } catch (err) {
         console.error('Zoho customer search error:', err);
         res.json({ success: false, error: err.message });

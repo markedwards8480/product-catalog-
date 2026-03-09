@@ -2440,17 +2440,40 @@ app.get('/api/zoho/search-customers', async function(req, res) {
         if (!searchName) return res.json({ success: false, error: 'Name required' });
         var orgId = process.env.ZOHO_BOOKS_ORG_ID || '677681121';
         if (!zohoAccessToken) await refreshZohoToken();
-        var url = 'https://www.zohoapis.com/books/v3/contacts?organization_id=' + orgId + '&contact_type=customer&contact_name_contains=' + encodeURIComponent(searchName);
+
+        // Use search_text for broad search, also try contact_name for exact match
+        var url = 'https://www.zohoapis.com/books/v3/contacts?organization_id=' + orgId + '&contact_type=customer&search_text=' + encodeURIComponent(searchName);
+        console.log('Zoho customer search URL:', url);
         var response = await fetch(url, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
         if (response.status === 401) {
             await refreshZohoToken();
             response = await fetch(url, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
         }
-        if (!response.ok) return res.json({ success: false, error: 'Zoho API error: ' + response.status });
         var data = await response.json();
+        console.log('Zoho customer search result: code=' + data.code + ', contacts=' + (data.contacts ? data.contacts.length : 0));
+
+        if (data.code && data.code !== 0) {
+            console.error('Zoho contacts API error:', JSON.stringify(data));
+            return res.json({ success: false, error: 'Zoho error: ' + (data.message || 'code ' + data.code) });
+        }
+
         var customers = (data.contacts || []).map(function(c) {
             return { contact_id: c.contact_id, contact_name: c.contact_name, company_name: c.company_name || '', email: c.email || '' };
         });
+
+        // If no results with full search, try with just the first word
+        if (customers.length === 0 && searchName.indexOf(' ') > 0) {
+            var firstWord = searchName.split(' ')[0];
+            console.log('No results for "' + searchName + '", retrying with first word: "' + firstWord + '"');
+            var url2 = 'https://www.zohoapis.com/books/v3/contacts?organization_id=' + orgId + '&contact_type=customer&search_text=' + encodeURIComponent(firstWord);
+            var response2 = await fetch(url2, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+            var data2 = await response2.json();
+            customers = (data2.contacts || []).map(function(c) {
+                return { contact_id: c.contact_id, contact_name: c.contact_name, company_name: c.company_name || '', email: c.email || '' };
+            });
+            console.log('Retry found ' + customers.length + ' customers');
+        }
+
         res.json({ success: true, customers: customers });
     } catch (err) {
         console.error('Zoho customer search error:', err);
@@ -2945,8 +2968,12 @@ function getOrderDetailHTML(order, products) {
     html += '  fetch("/api/zoho/search-customers?name=" + encodeURIComponent(q))';
     html += '    .then(function(r) { return r.json(); })';
     html += '    .then(function(d) {';
-    html += '      if (!d.success || !d.customers || d.customers.length === 0) {';
-    html += '        resultsDiv.innerHTML = "<p style=\\"color:#c62828;font-size:0.85rem\\">No customers found. Try a different search.</p>";';
+    html += '      if (!d.success) {';
+    html += '        resultsDiv.innerHTML = "<p style=\\"color:#c62828;font-size:0.85rem\\">Error: " + (d.error || "Unknown error") + "</p>";';
+    html += '        return;';
+    html += '      }';
+    html += '      if (!d.customers || d.customers.length === 0) {';
+    html += '        resultsDiv.innerHTML = "<p style=\\"color:#e65100;font-size:0.85rem\\">No customers found matching \\"" + q + "\\". Try a shorter or different search term (e.g. just the first word).</p>";';
     html += '        return;';
     html += '      }';
     html += '      var h = "";';

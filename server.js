@@ -5930,6 +5930,7 @@ function getHTML() {
     html += 'async function deleteSubscription(id){if(!confirm("Delete this subscription? This cannot be undone."))return;try{var res=await fetch("/api/catalog-subscriptions/"+id,{method:"DELETE"});var data=await res.json();if(data.success){loadSubscriptions();loadSendHistory()}}catch(err){alert("Error: "+err.message)}}';
 
     html += 'checkSession();fetchOpenOrders();';
+    html += '(function(){var params=new URLSearchParams(window.location.search);var s=params.get("search");if(s){setTimeout(function(){var inp=document.getElementById("searchInput");if(inp){inp.value=s;renderProducts();setTimeout(function(){var cards=document.querySelectorAll(".product-card");if(cards.length>0)cards[0].click()},1500)}},2000)}})();';
     html += '</script><script src="/order-requests-v2.js"></script><script src="/sidebar-enhanced.js"></script><script src="/size-grid.js"></script><script>';
     html += '</script></body></html>';
     return html;

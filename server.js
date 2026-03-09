@@ -2498,11 +2498,12 @@ app.get('/api/zoho/search-customers', async function(req, res) {
         console.log('Using Sales Orders API to find customer for: ' + searchName);
         var customers = {};
 
-        // Search sales orders by customer name
-        var soUrl = 'https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId + '&customer_name=' + encodeURIComponent(searchName) + '&per_page=10';
+        // Search sales orders by search_text (broader than customer_name filter)
+        var soUrl = 'https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId + '&search_text=' + encodeURIComponent(searchName) + '&per_page=25';
         var soResp = await fetch(soUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
         if (soResp.status === 401) { await refreshZohoToken(); soResp = await fetch(soUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } }); }
         var soData = await soResp.json();
+        console.log('SO search result: code=' + soData.code + ', count=' + (soData.salesorders ? soData.salesorders.length : 0));
         if (soData.salesorders) {
             soData.salesorders.forEach(function(so) {
                 if (so.customer_id && !customers[so.customer_id]) {
@@ -2513,7 +2514,7 @@ app.get('/api/zoho/search-customers', async function(req, res) {
 
         // Also search invoices for the customer
         try {
-            var invUrl = 'https://www.zohoapis.com/books/v3/invoices?organization_id=' + orgId + '&customer_name=' + encodeURIComponent(searchName) + '&per_page=10';
+            var invUrl = 'https://www.zohoapis.com/books/v3/invoices?organization_id=' + orgId + '&search_text=' + encodeURIComponent(searchName) + '&per_page=10';
             var invResp = await fetch(invUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
             var invData = await invResp.json();
             if (invData.invoices) {
@@ -2546,7 +2547,7 @@ app.get('/api/zoho/search-customers', async function(req, res) {
         if (result.length === 0 && searchName.indexOf(' ') > 0) {
             var firstWord = searchName.split(' ')[0];
             console.log('Retrying with first word: ' + firstWord);
-            var retryUrl = 'https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId + '&customer_name=' + encodeURIComponent(firstWord) + '&per_page=25';
+            var retryUrl = 'https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId + '&search_text=' + encodeURIComponent(firstWord) + '&per_page=25';
             var retryResp = await fetch(retryUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
             var retryData = await retryResp.json();
             if (retryData.salesorders) {

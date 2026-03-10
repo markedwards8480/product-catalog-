@@ -2439,26 +2439,41 @@ app.get('/api/zoho/test-token', async function(req, res) {
         var orgId = process.env.ZOHO_BOOKS_ORG_ID || '677681121';
         await refreshZohoToken();
         var results = {};
+        var searchName = req.query.name || 'MARK EDWARDS';
 
         // Test contacts API
         try {
             var cResp = await fetch('https://www.zohoapis.com/books/v3/contacts?organization_id=' + orgId + '&per_page=1', { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
             var cData = await cResp.json();
-            results.contacts = { status: cResp.status, code: cData.code, message: cData.message, count: cData.contacts ? cData.contacts.length : 0 };
+            results.contacts = { status: cResp.status, code: cData.code, message: cData.message };
         } catch(e) { results.contacts = { error: e.message }; }
 
-        // Test items API
+        // Test SO search_text
         try {
-            var iResp = await fetch('https://www.zohoapis.com/books/v3/items?organization_id=' + orgId + '&per_page=1', { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
-            var iData = await iResp.json();
-            results.items = { status: iResp.status, code: iData.code, message: iData.message, count: iData.items ? iData.items.length : 0 };
-        } catch(e) { results.items = { error: e.message }; }
+            var s1Resp = await fetch('https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId + '&search_text=' + encodeURIComponent(searchName) + '&per_page=5', { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+            var s1Data = await s1Resp.json();
+            results.so_search_text = { status: s1Resp.status, code: s1Data.code, count: s1Data.salesorders ? s1Data.salesorders.length : 0, first: s1Data.salesorders && s1Data.salesorders[0] ? { customer_name: s1Data.salesorders[0].customer_name, customer_id: s1Data.salesorders[0].customer_id, so_number: s1Data.salesorders[0].salesorder_number } : null };
+        } catch(e) { results.so_search_text = { error: e.message }; }
 
-        // Test PO API (should work already)
+        // Test SO customer_name filter
+        try {
+            var s2Resp = await fetch('https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId + '&customer_name=' + encodeURIComponent(searchName + ' STOCK') + '&per_page=5', { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+            var s2Data = await s2Resp.json();
+            results.so_customer_name = { status: s2Resp.status, code: s2Data.code, count: s2Data.salesorders ? s2Data.salesorders.length : 0, first: s2Data.salesorders && s2Data.salesorders[0] ? { customer_name: s2Data.salesorders[0].customer_name, customer_id: s2Data.salesorders[0].customer_id } : null };
+        } catch(e) { results.so_customer_name = { error: e.message }; }
+
+        // Test SO with just listing recent ones
+        try {
+            var s3Resp = await fetch('https://www.zohoapis.com/books/v3/salesorders?organization_id=' + orgId + '&per_page=3&sort_column=date&sort_order=D', { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+            var s3Data = await s3Resp.json();
+            results.so_recent = { status: s3Resp.status, code: s3Data.code, count: s3Data.salesorders ? s3Data.salesorders.length : 0, customers: s3Data.salesorders ? s3Data.salesorders.map(function(so) { return { name: so.customer_name, id: so.customer_id }; }) : [] };
+        } catch(e) { results.so_recent = { error: e.message }; }
+
+        // Test PO API
         try {
             var pResp = await fetch('https://www.zohoapis.com/books/v3/purchaseorders?organization_id=' + orgId + '&per_page=1', { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
             var pData = await pResp.json();
-            results.purchaseorders = { status: pResp.status, code: pData.code, message: pData.message, count: pData.purchaseorders ? pData.purchaseorders.length : 0 };
+            results.purchaseorders = { status: pResp.status, code: pData.code, count: pData.purchaseorders ? pData.purchaseorders.length : 0 };
         } catch(e) { results.purchaseorders = { error: e.message }; }
 
         results.token_first_chars = zohoAccessToken ? zohoAccessToken.substring(0, 20) + '...' : 'NO TOKEN';

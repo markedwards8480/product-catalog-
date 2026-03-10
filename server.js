@@ -3023,6 +3023,12 @@ function getOrderDetailHTML(order, products) {
         html += '<div id="soStep2" style="margin-bottom:1.5rem;display:none">';
         html += '<div style="background:#1e3a5f;color:white;padding:0.5rem 1rem;border-radius:8px 8px 0 0;font-weight:700;font-size:0.85rem">Step 2: Enter Quantities & Pricing</div>';
         html += '<div style="border:1px solid #e0e0e0;border-top:none;padding:1rem;border-radius:0 0 8px 8px">';
+        if (order.import_po_numbers) {
+            html += '<div style="margin-bottom:0.75rem;padding:0.6rem 0.85rem;background:#e3f2fd;border-radius:8px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem">';
+            html += '<span style="font-size:0.85rem;color:#1e3a5f"><strong>Import PO:</strong> ' + order.import_po_numbers + '</span>';
+            html += '<a href="https://inventory.zoho.com/app/677681121#/purchaseorders?filter_by=Status.All&search=' + encodeURIComponent(order.import_po_numbers) + '" target="_blank" style="font-size:0.78rem;color:#0088c2;font-weight:600;text-decoration:none">Open in Zoho ↗</a>';
+            html += '</div>';
+        }
         html += '<div id="soCurveStatus" style="margin-bottom:0.75rem;font-size:0.85rem;color:#666">Loading size curve from Import PO...</div>';
         html += '<div id="soLineItemsContainer"></div>';
         html += '<div style="margin-top:1rem;display:flex;justify-content:flex-end;gap:0.75rem">';
@@ -3194,7 +3200,7 @@ function getOrderDetailHTML(order, products) {
     html += '  h += "<thead><tr style=\\"background:#1e3a5f;color:white\\">";';
     html += '  h += "<th style=\\"text-align:left;padding:0.6rem 0.75rem;font-weight:600;font-size:0.8rem;min-width:100px\\">STYLE</th>";';
     html += '  h += "<th style=\\"text-align:left;padding:0.6rem 0.5rem;font-weight:600;font-size:0.8rem;min-width:80px\\">COLOR</th>";';
-    html += '  allSizes.forEach(function(s) { h += "<th style=\\"text-align:center;padding:0.6rem 0.25rem;font-weight:600;font-size:0.75rem;min-width:50px\\">" + s + "</th>"; });';
+    html += '  allSizes.forEach(function(s) { h += "<th style=\\"text-align:center;padding:0.6rem 0.25rem;font-weight:600;font-size:0.75rem;min-width:58px\\">" + s + "</th>"; });';
     html += '  h += "<th style=\\"text-align:center;padding:0.6rem 0.5rem;font-weight:700;font-size:0.8rem;min-width:65px;background:#163350\\">TOTAL</th>";';
     html += '  h += "<th style=\\"text-align:center;padding:0.6rem 0.5rem;font-weight:600;font-size:0.8rem;min-width:75px\\">PRICE</th>";';
     html += '  h += "<th style=\\"text-align:center;padding:0.6rem 0.5rem;font-weight:600;font-size:0.8rem;min-width:85px\\">AMOUNT</th>";';
@@ -3211,7 +3217,7 @@ function getOrderDetailHTML(order, products) {
     // Size input columns
     html += '    allSizes.forEach(function(s) {';
     html += '      var ratio = (row.curve && row.curve.ratios && row.curve.ratios[s]) ? row.curve.ratios[s] : 0;';
-    html += '      h += "<td style=\\"padding:0.3rem 0.15rem;text-align:center\\"><input type=\\"number\\" id=\\"soSize_" + idx + "_" + s + "\\" value=\\"\\" min=\\"0\\" data-ratio=\\"" + ratio + "\\" data-row=\\"" + idx + "\\" style=\\"width:44px;text-align:center;padding:0.25rem;border:1px solid #d0d0d0;border-radius:4px;font-size:0.8rem;background:" + (ratio > 0 ? "#f0f7ff" : "#fff") + "\\" onchange=\\"recalcRow(" + idx + ")\\" onkeyup=\\"recalcRow(" + idx + ")\\"></td>";';
+    html += '      h += "<td style=\\"padding:0.3rem 0.15rem;text-align:center\\"><input type=\\"number\\" id=\\"soSize_" + idx + "_" + s + "\\" value=\\"\\" min=\\"0\\" data-ratio=\\"" + ratio + "\\" data-row=\\"" + idx + "\\" style=\\"width:55px;text-align:center;padding:0.25rem;border:1px solid #d0d0d0;border-radius:4px;font-size:0.8rem;background:" + (ratio > 0 ? "#f0f7ff" : "#fff") + "\\" onchange=\\"recalcRow(" + idx + ")\\" onkeyup=\\"recalcRow(" + idx + ")\\"></td>";';
     html += '    });';
     // Total column (auto-calc)
     html += '    h += "<td style=\\"padding:0.5rem 0.5rem;text-align:center;font-weight:700;color:#1e3a5f;font-size:0.9rem;background:#f0f4f8\\" id=\\"soTotal_" + idx + "\\">0</td>";';
@@ -3389,7 +3395,7 @@ function getOrderDetailHTML(order, products) {
     html += '    notes: soNotes,';
     html += '    order_detail_id: orderData.detail_id';
     html += '  };';
-    html += '  if (orderData.cxl_date) payload.shipment_date = orderData.cxl_date;';
+    html += '  if (orderData.cxl_date && orderData.cxl_date.match(/^\\d{4}-\\d{2}-\\d{2}$/)) payload.shipment_date = orderData.cxl_date;';
 
     html += '  var btn = document.getElementById("soPreviewBtn");';
     html += '  btn.disabled = true; btn.textContent = "Creating SO in Zoho...";';

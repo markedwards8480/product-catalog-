@@ -3091,7 +3091,7 @@ function getOrderDetailHTML(order, products) {
     html += '        el.onmouseover = function(){ this.style.background="#f0f7ff"; };';
     html += '        el.onmouseout = function(){ this.style.background=""; };';
     html += '        el.onclick = function(){ selectZohoCustomer(cust.contact_id, cust.contact_name); };';
-    html += '      });';';';
+    html += '      });';
     html += '    }).catch(function(e) { resultsDiv.innerHTML = "<p style=\\"color:#c62828;font-size:0.85rem\\">Error: " + e.message + "</p>"; });';
     html += '}';
 

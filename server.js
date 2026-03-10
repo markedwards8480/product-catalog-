@@ -3287,7 +3287,7 @@ function getOrderDetailHTML(order, products) {
     html += '      h += "<td style=\\"padding:0.3rem 0.15rem;text-align:center\\"><input type=\\"number\\" id=\\"soSize_" + idx + "_" + s + "\\" value=\\"\\" min=\\"0\\" data-ratio=\\"" + ratio + "\\" data-row=\\"" + idx + "\\" style=\\"width:55px;text-align:center;padding:0.25rem;border:1px solid #d0d0d0;border-radius:4px;font-size:0.8rem;background:" + (ratio > 0 ? "#f0f7ff" : "#fff") + "\\" onchange=\\"recalcRow(" + idx + ")\\" onkeyup=\\"recalcRow(" + idx + ")\\"></td>";';
     html += '    });';
     // Total column (auto-calc)
-    html += '    h += "<td style=\\"padding:0.5rem 0.5rem;text-align:center;font-weight:700;color:#1e3a5f;font-size:0.9rem;background:#f0f4f8\\" id=\\"soTotal_" + idx + "\\">0</td>";';
+    html += '    h += "<td style=\\"padding:0.3rem 0.15rem;text-align:center;background:#f0f4f8\\"><input type=\\"number\\" id=\\"soTotal_" + idx + "\\" value=\\"\\" min=\\"0\\" style=\\"width:65px;text-align:center;padding:0.3rem;border:1.5px solid #b0bec5;border-radius:4px;font-size:0.85rem;font-weight:700;color:#1e3a5f;background:#f0f4f8\\" onchange=\\"autoDistribute(" + idx + ", parseInt(this.value)||0)\\" onkeyup=\\"autoDistribute(" + idx + ", parseInt(this.value)||0)\\"></td>";';
     // Price column
     html += '    h += "<td style=\\"padding:0.3rem 0.15rem;text-align:center\\"><input type=\\"number\\" id=\\"soPrice_" + idx + "\\" value=\\"" + defPrice.toFixed(2) + "\\" min=\\"0\\" step=\\"0.01\\" style=\\"width:68px;text-align:center;padding:0.25rem;border:1px solid #d0d0d0;border-radius:4px;font-size:0.8rem\\" onchange=\\"if(" + idx + "===0)copyPriceDown();recalcRow(" + idx + ")\\" onkeyup=\\"recalcRow(" + idx + ")\\"></td>";';
     // Amount column (auto-calc)
@@ -3300,7 +3300,7 @@ function getOrderDetailHTML(order, products) {
     html += '  h += "<td style=\\"padding:0.6rem 0.75rem;font-size:0.85rem\\">TOTALS</td>";';
     html += '  h += "<td></td>";';
     html += '  allSizes.forEach(function(s) { h += "<td style=\\"text-align:center;padding:0.6rem 0.25rem;font-size:0.8rem\\" id=\\"soSizeTotal_" + s + "\\">0</td>"; });';
-    html += '  h += "<td style=\\"text-align:center;padding:0.6rem 0.5rem;font-size:0.95rem;color:#1e3a5f;background:#dce3eb\\" id=\\"soGrandTotal\\">0</td>";';
+    html += '  h += "<td style=\\"text-align:center;padding:0.6rem 0.5rem;font-size:0.95rem;color:#1e3a5f;background:#dce3eb;font-weight:700\\" id=\\"soGrandTotal\\">0</td>";';
     html += '  h += "<td></td>";';
     html += '  h += "<td style=\\"text-align:right;padding:0.6rem 0.5rem;font-size:0.9rem;color:#1e3a5f\\" id=\\"soGrandAmount\\">$0.00</td>";';
     html += '  h += "</tr>";';
@@ -3324,25 +3324,6 @@ function getOrderDetailHTML(order, products) {
     html += '  h += "<input type=\\"hidden\\" id=\\"soSizeList\\" value=\\"" + allSizes.join(",") + "\\">";';
 
     html += '  container.innerHTML = h;';
-
-    // Make total cells clickable for auto-distribute
-    html += '  for (var ri = 0; ri < rows.length; ri++) {';
-    html += '    (function(idx) {';
-    html += '      var totalCell = document.getElementById("soTotal_" + idx);';
-    html += '      if (totalCell) {';
-    html += '        totalCell.style.cursor = "pointer";';
-    html += '        totalCell.title = "Click to enter total and auto-distribute by size ratio";';
-    html += '        totalCell.onclick = function() {';
-    html += '          var current = parseInt(this.textContent) || 0;';
-    html += '          var val = prompt("Enter total quantity for this row (will auto-distribute by size ratio):", current);';
-    html += '          if (val === null) return;';
-    html += '          var totalQty = parseInt(val) || 0;';
-    html += '          autoDistribute(idx, totalQty);';
-    html += '        };';
-    html += '      }';
-    html += '    })(ri);';
-    html += '  }';
-
     html += '}';
 
     // Auto-distribute total qty across sizes by ratio
@@ -3380,7 +3361,7 @@ function getOrderDetailHTML(order, products) {
     html += '  var rowTotal = 0;';
     html += '  sizes.forEach(function(s) { var el = document.getElementById("soSize_" + rowIdx + "_" + s); if (el && el.value) rowTotal += parseInt(el.value) || 0; });';
     html += '  var totalEl = document.getElementById("soTotal_" + rowIdx);';
-    html += '  if (totalEl) totalEl.textContent = rowTotal.toLocaleString();';
+    html += '  if (totalEl) totalEl.value = rowTotal;';
     html += '  var price = parseFloat((document.getElementById("soPrice_" + rowIdx) || {value:"0"}).value) || 0;';
     html += '  var amountEl = document.getElementById("soAmount_" + rowIdx);';
     html += '  if (amountEl) amountEl.textContent = "$" + (rowTotal * price).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});';

@@ -2356,10 +2356,6 @@ app.get('/api/order-requests/customers', requireAuth, async function(req, res) {
         var isAdmin = req.session.role === 'admin';
         var query = "SELECT DISTINCT customer_name FROM order_requests";
         var params = [];
-        if (!isAdmin) {
-            query += " WHERE user_id = $1";
-            params.push(req.session.userId);
-        }
         query += " ORDER BY customer_name";
         var result = await pool.query(query, params);
         res.json({ success: true, customers: result.rows.map(function(r) { return r.customer_name; }) });
@@ -2371,16 +2367,11 @@ app.get('/api/order-requests/customers', requireAuth, async function(req, res) {
 // Get order requests
 app.get('/api/order-requests', requireAuth, async function(req, res) {
     try {
-        var status = req.query.status || 'all';
         var isAdmin = req.session.role === 'admin';
+        var status = req.query.status || 'all';
         var query = "SELECT * FROM order_requests";
         var params = [];
         var conditions = [];
-
-        if (!isAdmin) {
-            conditions.push("user_id = $" + (params.length + 1));
-            params.push(req.session.userId);
-        }
         if (status !== 'all') {
             conditions.push("status = $" + (params.length + 1));
             params.push(status);

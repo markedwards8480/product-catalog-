@@ -2702,6 +2702,61 @@ app.get('/api/zoho/search-items', async function(req, res) {
     }
 });
 
+// Batch lookup Zoho item_ids by SKU names
+app.post('/api/zoho/batch-item-lookup', async function(req, res) {
+    try {
+        var skus = req.body.skus || [];
+        if (skus.length === 0) return res.json({ success: true, items: {} });
+
+        var orgId = process.env.ZOHO_BOOKS_ORG_ID || '677681121';
+        if (!zohoAccessToken) await refreshZohoToken();
+
+        var results = {};
+        // Group SKUs by base style to reduce API calls
+        // e.g., 87947J-AJ-XS, 87947J-AJ-S, 87947J-AJ-M all share base "87947J"
+        var baseGroups = {};
+        skus.forEach(function(sku) {
+            var parts = sku.split('-');
+            var base = parts[0] || sku;
+            if (!baseGroups[base]) baseGroups[base] = [];
+            baseGroups[base].push(sku);
+        });
+
+        // Search once per base style, then match specific SKUs from results
+        var bases = Object.keys(baseGroups);
+        for (var i = 0; i < bases.length; i++) {
+            var base = bases[i];
+            try {
+                var url = 'https://www.zohoapis.com/books/v3/items?organization_id=' + orgId + '&search_text=' + encodeURIComponent(base) + '&per_page=200';
+                var response = await fetch(url, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+                if (response.status === 401) {
+                    await refreshZohoToken();
+                    response = await fetch(url, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
+                }
+                if (response.ok) {
+                    var data = await response.json();
+                    var zohoItems = data.items || [];
+                    // Match each SKU we need to a Zoho item by name or sku
+                    baseGroups[base].forEach(function(sku) {
+                        var match = zohoItems.find(function(it) {
+                            return it.name === sku || it.sku === sku;
+                        });
+                        if (match) results[sku] = match.item_id;
+                    });
+                }
+            } catch (err) {
+                console.error('Batch item lookup error for base ' + base + ':', err.message);
+            }
+        }
+
+        console.log('Batch item lookup:', skus.length, 'SKUs requested,', Object.keys(results).length, 'matched');
+        res.json({ success: true, items: results, matched: Object.keys(results).length, total: skus.length });
+    } catch (err) {
+        console.error('Batch item lookup error:', err);
+        res.json({ success: false, error: err.message, items: {} });
+    }
+});
+
 // Create Zoho Books Sales Order (draft)
 app.post('/api/zoho/create-salesorder', async function(req, res) {
     try {
@@ -3310,7 +3365,8 @@ function getOrderDetailHTML(order, products) {
     // Store metadata
     html += '  h += "<input type=\\"hidden\\" id=\\"soRowCount\\" value=\\"" + rows.length + "\\">";';
     html += '  rows.forEach(function(row, idx) {';
-    html += '    h += "<input type=\\"hidden\\" id=\\"soRowMeta_" + idx + "\\" data-style=\\"" + row.style_id + "\\" data-color=\\"" + row.color + "\\" data-base=\\"" + row.base_style + "\\" data-name=\\"" + row.name + "\\">";';
+    html += '    var itemIdsJson = (row.curve && row.curve.item_ids) ? JSON.stringify(row.curve.item_ids).replace(/"/g, "&quot;") : "{}";';
+    html += '    h += "<input type=\\"hidden\\" id=\\"soRowMeta_" + idx + "\\" data-style=\\"" + row.style_id + "\\" data-color=\\"" + row.color + "\\" data-base=\\"" + row.base_style + "\\" data-name=\\"" + row.name + "\\" data-itemids=\\"" + itemIdsJson + "\\">";';
     html += '  });';
     html += '  h += "<input type=\\"hidden\\" id=\\"soSizeList\\" value=\\"" + allSizes.join(",") + "\\">";';
 
@@ -3392,7 +3448,7 @@ function getOrderDetailHTML(order, products) {
     html += '}';
 
     // Preview and create SO
-    html += 'function previewZohoSO() {';
+    html += 'async function previewZohoSO() {';
     html += '  if (!selectedCustomerId) { alert("Please select a Zoho customer first"); return; }';
     html += '  var rowCount = parseInt((document.getElementById("soRowCount") || {value:"0"}).value);';
     html += '  var sizes = (document.getElementById("soSizeList") || {value:""}).value.split(",").filter(Boolean);';
@@ -3404,15 +3460,47 @@ function getOrderDetailHTML(order, products) {
     html += '    var styleId = meta ? meta.dataset.style : "";';
     html += '    var color = meta ? meta.dataset.color : "";';
     html += '    var baseName = meta ? meta.dataset.name : "";';
+    html += '    var itemIds = {};';
+    html += '    try { itemIds = JSON.parse((meta ? meta.dataset.itemids : "{}") || "{}"); } catch(e) {}';
     html += '    sizes.forEach(function(s) {';
     html += '      var sizeQty = parseInt((document.getElementById("soSize_" + i + "_" + s) || {value:"0"}).value) || 0;';
     html += '      if (sizeQty > 0) {';
-    html += '        lineItems.push({ name: styleId + "-" + s, description: baseName + " - " + color + " - " + s, quantity: sizeQty, rate: price });';
+    html += '        var li = { name: styleId + "-" + s, description: baseName + " - " + color + " - " + s, quantity: sizeQty, rate: price };';
+    html += '        if (itemIds[s]) li.item_id = itemIds[s];';
+    html += '        lineItems.push(li);';
     html += '        totalUnits += sizeQty;';
     html += '      }';
     html += '    });';
     html += '  }';
     html += '  if (lineItems.length === 0) { alert("Please enter quantities for at least one product/color"); return; }';
+    // Batch lookup item_ids for any line items missing them
+    html += '  var missingItems = lineItems.filter(function(li) { return !li.item_id; });';
+    html += '  if (missingItems.length > 0) {';
+    html += '    var btn = document.getElementById("soPreviewBtn");';
+    html += '    if (btn) { btn.disabled = true; btn.textContent = "Looking up Zoho items (" + missingItems.length + ")..."; }';
+    html += '    try {';
+    html += '      var skus = missingItems.map(function(li) { return li.name; });';
+    html += '      var lookupResp = await fetch("/api/zoho/batch-item-lookup", {';
+    html += '        method: "POST",';
+    html += '        headers: {"Content-Type": "application/json"},';
+    html += '        body: JSON.stringify({ skus: skus })';
+    html += '      });';
+    html += '      var lookupData = await lookupResp.json();';
+    html += '      if (lookupData.success && lookupData.items) {';
+    html += '        lineItems.forEach(function(li) {';
+    html += '          if (!li.item_id && lookupData.items[li.name]) {';
+    html += '            li.item_id = lookupData.items[li.name];';
+    html += '          }';
+    html += '        });';
+    html += '        var stillMissing = lineItems.filter(function(li) { return !li.item_id; }).length;';
+    html += '        if (stillMissing > 0) console.warn(stillMissing + " items could not be matched to Zoho item_ids");';
+    html += '      }';
+    html += '      if (btn) { btn.disabled = false; btn.textContent = "Preview & Create Draft SO"; }';
+    html += '    } catch(e) {';
+    html += '      console.error("Item lookup error:", e);';
+    html += '      if (btn) { btn.disabled = false; btn.textContent = "Preview & Create Draft SO"; }';
+    html += '    }';
+    html += '  }';
 
     html += '  var totalAmount = lineItems.reduce(function(sum, li) { return sum + (li.quantity * li.rate); }, 0);';
     html += '  var msg = "Create Draft Sales Order in Zoho Books?\\n\\n";';

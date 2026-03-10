@@ -2494,7 +2494,7 @@ app.get('/api/zoho/search-customers', async function(req, res) {
 
         // Strategy 1: Try Contacts API first (may work with fullaccess scope)
         try {
-            var contactUrl = 'https://www.zohoapis.com/books/v3/contacts?organization_id=' + orgId + '&contact_type=customer&search_text=' + encodeURIComponent(searchName);
+            var contactUrl = 'https://www.zohoapis.com/books/v3/contacts?organization_id=' + orgId + '&contact_type=customer&per_page=200&sort_column=contact_name&sort_order=A';
             var cResp = await fetch(contactUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } });
             if (cResp.status === 401) { await refreshZohoToken(); cResp = await fetch(contactUrl, { headers: { 'Authorization': 'Zoho-oauthtoken ' + zohoAccessToken } }); }
             var cData = await cResp.json();
@@ -3005,16 +3005,16 @@ function getOrderDetailHTML(order, products) {
         html += '<p style="color:#666;font-size:0.85rem;margin-top:0.5rem">This order request has already been converted to a Zoho Sales Order.</p>';
         html += '</div>';
     } else {
-        // Step 1: Customer matching
+        // Step 1: Customer matching - searchable dropdown
         html += '<div id="soStep1" style="margin-bottom:1.5rem">';
-        html += '<div style="background:#1e3a5f;color:white;padding:0.5rem 1rem;border-radius:8px 8px 0 0;font-weight:700;font-size:0.85rem">Step 1: Match Customer in Zoho</div>';
+        html += '<div style="background:#1e3a5f;color:white;padding:0.5rem 1rem;border-radius:8px 8px 0 0;font-weight:700;font-size:0.85rem">Step 1: Select Customer in Zoho</div>';
         html += '<div style="border:1px solid #e0e0e0;border-top:none;padding:1rem;border-radius:0 0 8px 8px">';
         html += '<p style="font-size:0.85rem;color:#666;margin-bottom:0.75rem">Account on order: <strong>' + (order.customer_name || '').replace(/"/g, '&quot;') + '</strong></p>';
-        html += '<div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">';
-        html += '<input type="text" id="zohoCustomerSearch" value="' + (order.customer_name || '').replace(/"/g, '&quot;') + '" placeholder="Search Zoho customers..." style="flex:1;min-width:200px;padding:0.6rem 0.85rem;border:1.5px solid #e0e0e0;border-radius:10px;font-size:0.875rem">';
-        html += '<button onclick="searchZohoCustomers()" style="background:#0088c2;color:white;border:none;padding:0.6rem 1.25rem;border-radius:10px;font-weight:600;cursor:pointer;font-size:0.85rem">Search</button>';
+        html += '<div style="position:relative">';
+        html += '<input type="text" id="zohoCustomerFilter" placeholder="Type to search customers..." autocomplete="off" style="width:100%;padding:0.7rem 0.85rem;border:1.5px solid #e0e0e0;border-radius:10px;font-size:0.9rem;box-sizing:border-box">';
+        html += '<div id="zohoCustomerDropdown" style="display:none;position:absolute;top:100%;left:0;right:0;max-height:280px;overflow-y:auto;background:white;border:1.5px solid #0088c2;border-top:none;border-radius:0 0 10px 10px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,0.12)"></div>';
         html += '</div>';
-        html += '<div id="zohoCustomerResults" style="margin-top:0.75rem"></div>';
+        html += '<div id="zohoCustomerStatus" style="margin-top:0.5rem;font-size:0.8rem;color:#999">Loading Zoho customers...</div>';
         html += '<input type="hidden" id="selectedZohoCustomerId" value="">';
         html += '<input type="hidden" id="selectedZohoCustomerName" value="">';
         html += '</div></div>';
@@ -3067,39 +3067,67 @@ function getOrderDetailHTML(order, products) {
     html += 'var selectedCustomerName = "";';
 
     // Customer search function
-    html += 'function searchZohoCustomers() {';
-    html += '  var q = document.getElementById("zohoCustomerSearch").value.trim();';
-    html += '  if (!q) { alert("Enter a customer name to search"); return; }';
-    html += '  var resultsDiv = document.getElementById("zohoCustomerResults");';
-    html += '  resultsDiv.innerHTML = "<p style=\\"color:#0088c2;font-size:0.85rem\\">Searching Zoho...</p>";';
-    html += '  fetch("/api/zoho/search-customers?name=" + encodeURIComponent(q))';
-    html += '    .then(function(r) { return r.json(); })';
-    html += '    .then(function(d) {';
-    html += '      if (!d.success) {';
-    html += '        resultsDiv.innerHTML = "<p style=\\"color:#c62828;font-size:0.85rem\\">Error: " + (d.error || "Unknown error") + "</p>";';
-    html += '        return;';
-    html += '      }';
-    html += '      if (!d.customers || d.customers.length === 0) {';
-    html += '        resultsDiv.innerHTML = "<p style=\\"color:#e65100;font-size:0.85rem\\">No customers found matching \\"" + q + "\\". Try a shorter or different search term (e.g. just the first word).</p>";';
-    html += '        return;';
-    html += '      }';
-    html += '      var h = "";';
-    html += '      d.customers.forEach(function(c, ci) {';
-    html += '        h += "<div class=\\"zc-row\\" data-idx=\\"" + ci + "\\" style=\\"display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.75rem;border:1px solid #e8e8e8;border-radius:8px;margin-bottom:0.35rem;cursor:pointer;transition:background 0.15s\\">";';
-    html += '        h += "<div><div style=\\"font-weight:600;color:#1e3a5f;font-size:0.9rem\\">" + (c.contact_name||"").replace(/</g,"&lt;") + "</div>";';
-    html += '        if (c.company_name && c.company_name !== c.contact_name) h += "<div style=\\"font-size:0.75rem;color:#999\\">" + (c.company_name||"").replace(/</g,"&lt;") + "</div>";';
-    html += '        h += "</div><div style=\\"font-size:0.7rem;color:#0088c2;font-weight:600\\">SELECT</div></div>";';
-    html += '      });';
-    html += '      resultsDiv.innerHTML = "<p style=\\"font-size:0.8rem;color:#666;margin-bottom:0.5rem\\">" + d.customers.length + " customer(s) found — click to select:</p>" + h;';
-    html += '      resultsDiv.querySelectorAll(".zc-row").forEach(function(el) {';
-    html += '        var idx = parseInt(el.dataset.idx);';
-    html += '        var cust = d.customers[idx];';
-    html += '        el.onmouseover = function(){ this.style.background="#f0f7ff"; };';
-    html += '        el.onmouseout = function(){ this.style.background=""; };';
-    html += '        el.onclick = function(){ selectZohoCustomer(cust.contact_id, cust.contact_name); };';
-    html += '      });';
-    html += '    }).catch(function(e) { resultsDiv.innerHTML = "<p style=\\"color:#c62828;font-size:0.85rem\\">Error: " + e.message + "</p>"; });';
+    // Load all Zoho customers into searchable dropdown
+    html += 'var allZohoCustomers = [];';
+    html += 'async function loadZohoCustomers() {';
+    html += '  var statusEl = document.getElementById("zohoCustomerStatus");';
+    html += '  try {';
+    html += '    var resp = await fetch("/api/zoho/search-customers?name=" + encodeURIComponent(orderData.customer_name || "a"));';
+    html += '    var d = await resp.json();';
+    html += '    if (d.success && d.customers) {';
+    html += '      allZohoCustomers = d.customers;';
+    html += '      statusEl.innerHTML = "<span style=\\"color:#2e7d32\\">" + d.customers.length + " Zoho customers loaded. Type to filter or click the box.</span>";';
+    // Auto-select if exact match found
+    html += '      var exactMatch = d.customers.find(function(c) { return c.contact_name.toUpperCase() === orderData.customer_name.toUpperCase(); });';
+    html += '      if (exactMatch) { selectZohoCustomer(exactMatch.contact_id, exactMatch.contact_name); }';
+    html += '    } else {';
+    html += '      statusEl.innerHTML = "<span style=\\"color:#e65100\\">Could not load customers: " + (d.error || "unknown error") + "</span>";';
+    html += '    }';
+    html += '  } catch(e) { statusEl.innerHTML = "<span style=\\"color:#c62828\\">Error: " + e.message + "</span>"; }';
     html += '}';
+
+    // Render filtered dropdown
+    html += 'function renderCustomerDropdown(filter) {';
+    html += '  var dd = document.getElementById("zohoCustomerDropdown");';
+    html += '  if (!dd) return;';
+    html += '  var filtered = allZohoCustomers;';
+    html += '  if (filter) {';
+    html += '    var f = filter.toLowerCase();';
+    html += '    filtered = allZohoCustomers.filter(function(c) { return c.contact_name.toLowerCase().indexOf(f) !== -1 || (c.company_name && c.company_name.toLowerCase().indexOf(f) !== -1); });';
+    html += '  }';
+    html += '  if (filtered.length === 0) {';
+    html += '    dd.innerHTML = "<div style=\\"padding:0.75rem 1rem;color:#999;font-size:0.85rem\\">No customers match \\"" + (filter||"") + "\\"</div>";';
+    html += '    dd.style.display = "";';
+    html += '    return;';
+    html += '  }';
+    html += '  var h = "";';
+    html += '  filtered.slice(0, 50).forEach(function(c, i) {';
+    html += '    h += "<div class=\\"zdd-item\\" data-idx=\\"" + i + "\\" style=\\"padding:0.5rem 1rem;cursor:pointer;border-bottom:1px solid #f0f0f0;font-size:0.875rem;transition:background 0.1s\\">";';
+    html += '    h += "<div style=\\"font-weight:600;color:#1e3a5f\\">" + c.contact_name.replace(/</g,"&lt;") + "</div>";';
+    html += '    if (c.company_name && c.company_name !== c.contact_name) h += "<div style=\\"font-size:0.75rem;color:#999\\">" + c.company_name.replace(/</g,"&lt;") + "</div>";';
+    html += '    h += "</div>";';
+    html += '  });';
+    html += '  if (filtered.length > 50) h += "<div style=\\"padding:0.5rem 1rem;color:#999;font-size:0.8rem;text-align:center\\">Showing 50 of " + filtered.length + " — type more to narrow down</div>";';
+    html += '  dd.innerHTML = h;';
+    html += '  dd.style.display = "";';
+    // Attach click handlers
+    html += '  dd.querySelectorAll(".zdd-item").forEach(function(el) {';
+    html += '    var idx = parseInt(el.dataset.idx);';
+    html += '    var c = filtered[idx];';
+    html += '    el.onmouseover = function() { this.style.background = "#f0f7ff"; };';
+    html += '    el.onmouseout = function() { this.style.background = ""; };';
+    html += '    el.onclick = function() { selectZohoCustomer(c.contact_id, c.contact_name); };';
+    html += '  });';
+    html += '}';
+
+    // Wire up the filter input
+    html += 'document.getElementById("zohoCustomerFilter").addEventListener("focus", function() { renderCustomerDropdown(this.value); });';
+    html += 'document.getElementById("zohoCustomerFilter").addEventListener("input", function() { renderCustomerDropdown(this.value); });';
+    html += 'document.addEventListener("click", function(e) {';
+    html += '  var dd = document.getElementById("zohoCustomerDropdown");';
+    html += '  var input = document.getElementById("zohoCustomerFilter");';
+    html += '  if (dd && input && !dd.contains(e.target) && e.target !== input) dd.style.display = "none";';
+    html += '});';
 
     // Select customer
     html += 'function selectZohoCustomer(id, name) {';
@@ -3107,7 +3135,11 @@ function getOrderDetailHTML(order, products) {
     html += '  selectedCustomerName = name;';
     html += '  document.getElementById("selectedZohoCustomerId").value = id;';
     html += '  document.getElementById("selectedZohoCustomerName").value = name;';
-    html += '  document.getElementById("zohoCustomerResults").innerHTML = "<div style=\\"background:#e8f5e9;border-radius:8px;padding:0.75rem;display:flex;justify-content:space-between;align-items:center\\"><div><span style=\\"color:#2e7d32;font-weight:700\\">✓ Selected:</span> <strong>" + name + "</strong></div><button onclick=\\"clearCustomerSelection()\\" style=\\"background:none;border:1px solid #999;border-radius:6px;padding:2px 10px;font-size:0.75rem;cursor:pointer;color:#666\\">Change</button></div>";';
+    html += '  var filterInput = document.getElementById("zohoCustomerFilter");';
+    html += '  if (filterInput) filterInput.value = name;';
+    html += '  var dd = document.getElementById("zohoCustomerDropdown");';
+    html += '  if (dd) dd.style.display = "none";';
+    html += '  document.getElementById("zohoCustomerStatus").innerHTML = "<div style=\\"background:#e8f5e9;border-radius:8px;padding:0.6rem 0.85rem;display:flex;justify-content:space-between;align-items:center\\"><div><span style=\\"color:#2e7d32;font-weight:700\\">✓ Selected:</span> <strong>" + name + "</strong></div><button onclick=\\"clearCustomerSelection()\\" style=\\"background:none;border:1px solid #999;border-radius:6px;padding:2px 10px;font-size:0.75rem;cursor:pointer;color:#666\\">Change</button></div>";';
     html += '  document.getElementById("soStep2").style.display = "";';
     html += '  loadSizeCurve();';
     html += '}';
@@ -3115,7 +3147,9 @@ function getOrderDetailHTML(order, products) {
     html += 'function clearCustomerSelection() {';
     html += '  selectedCustomerId = "";';
     html += '  selectedCustomerName = "";';
-    html += '  document.getElementById("zohoCustomerResults").innerHTML = "";';
+    html += '  var filterInput = document.getElementById("zohoCustomerFilter");';
+    html += '  if (filterInput) { filterInput.value = ""; filterInput.focus(); }';
+    html += '  document.getElementById("zohoCustomerStatus").innerHTML = "<span style=\\"color:#999\\">" + allZohoCustomers.length + " customers loaded. Type to filter or click the box.</span>";';
     html += '  document.getElementById("soStep2").style.display = "none";';
     html += '}';
 
@@ -3421,7 +3455,7 @@ function getOrderDetailHTML(order, products) {
     html += '}';
 
     // Auto-search customer on load
-    html += 'if (orderData.customer_name && !' + (order.zoho_so_number ? 'true' : 'false') + ') { setTimeout(function() { searchZohoCustomers(); }, 500); }';
+    html += 'if (!' + (order.zoho_so_number ? 'true' : 'false') + ') { loadZohoCustomers(); }';
 
     html += '</script>';
 

@@ -3114,13 +3114,13 @@ function getOrderDetailHTML(order, products) {
     html += '}';
 
     // Load size curve from Import PO
-    html += 'function loadSizeCurve() {';
+    html += 'async function loadSizeCurve() {';
     html += '  var po = orderData.import_po_numbers;';
     html += '  var statusDiv = document.getElementById("soCurveStatus");';
     html += '  var container = document.getElementById("soLineItemsContainer");';
     html += '  if (!po) {';
     html += '    statusDiv.innerHTML = "<span style=\\"color:#e65100\\">⚠ No Import PO on this order. Sizes will need to be entered manually.</span>";';
-    html += '    buildLineItemsTable(null);';
+    html += '    await buildLineItemsTable(null);';
     html += '    return;';
     html += '  }';
     html += '  statusDiv.innerHTML = "<span style=\\"color:#0088c2\\">Loading size curve from PO: " + po + "...</span>";';
@@ -3133,29 +3133,27 @@ function getOrderDetailHTML(order, products) {
     html += '      } else {';
     html += '        statusDiv.innerHTML = "<span style=\\"color:#e65100\\">⚠ Could not load size curve from PO. Enter quantities manually below.</span>";';
     html += '      }';
-    html += '      buildLineItemsTable(sizeCurveData);';
+    html += '      await buildLineItemsTable(sizeCurveData);';
     html += '    }).catch(function(e) {';
     html += '      statusDiv.innerHTML = "<span style=\\"color:#c62828\\">Error loading PO: " + e.message + "</span>";';
-    html += '      buildLineItemsTable(null);';
+    html += '      await buildLineItemsTable(null);';
     html += '    });';
     html += '}';
 
     // Build line items table
-    html += 'function buildLineItemsTable(curve) {';
+    html += 'async function buildLineItemsTable(curve) {';
     html += '  var container = document.getElementById("soLineItemsContainer");';
     html += '  var defPrice = orderData.customer_price || 0;';
     html += '  var h = "";';
 
-    // Table with each product/color as a row
+    // Build rows: one per style/color
     html += '  var rows = [];';
     html += '  orderData.products.forEach(function(p) {';
     html += '    if (p.colors && p.colors.length > 0) {';
     html += '      p.colors.forEach(function(c) {';
     html += '        var curveMatch = null;';
     html += '        if (curve) {';
-    html += '          curveMatch = curve.find(function(cv) {';
-    html += '            return cv.base_style === p.base_style && cv.color.toLowerCase() === c.toLowerCase();';
-    html += '          });';
+    html += '          curveMatch = curve.find(function(cv) { return cv.base_style === p.base_style && cv.color.toLowerCase() === c.toLowerCase(); });';
     html += '          if (!curveMatch) curveMatch = curve.find(function(cv) { return cv.base_style === p.base_style; });';
     html += '        }';
     html += '        rows.push({ style_id: p.style_id, base_style: p.base_style, name: p.name, color: c, curve: curveMatch });';
@@ -3166,36 +3164,84 @@ function getOrderDetailHTML(order, products) {
     html += '    }';
     html += '  });';
 
-    // Build size columns from curve data
+    // Collect all sizes from curve data OR from product_sizes
     html += '  var allSizes = [];';
     html += '  if (curve) { curve.forEach(function(cv) { Object.keys(cv.ratios).forEach(function(s) { if (allSizes.indexOf(s) === -1) allSizes.push(s); }); }); }';
+    // If no sizes from curve, try to get from the product sizes API
+    html += '  if (allSizes.length === 0) {';
+    html += '    var firstStyle = rows.length > 0 ? rows[0].style_id : "";';
+    html += '    if (firstStyle) {';
+    html += '      try {';
+    html += '        var sizeResp = await fetch("/api/product-sizes/" + encodeURIComponent(firstStyle));';
+    html += '        var sizeData = await sizeResp.json();';
+    html += '        if (sizeData.success && sizeData.sizes) {';
+    html += '          sizeData.sizes.forEach(function(s) { if (allSizes.indexOf(s.size) === -1) allSizes.push(s.size); });';
+    html += '        }';
+    html += '      } catch(e) { console.log("Could not load product sizes:", e); }';
+    html += '    }';
+    html += '  }';
     html += '  if (allSizes.length === 0) allSizes = ["OS"];';
+
     // Sort sizes
     html += '  var sizeOrder = {"XXS":0,"XS":1,"S":2,"M":3,"L":4,"XL":5,"XXL":6,"2XL":6,"3XL":7,"4XL":8,"5XL":9,"1X":5,"2X":6,"3X":7,"0T":0,"2T":1,"3T":2,"4T":3,"5":4,"6":5,"6X":6,"7":7,"8":8,"10":9,"12":10,"14":11,"16":12};';
     html += '  allSizes.sort(function(a, b) { var ra = sizeOrder[a] !== undefined ? sizeOrder[a] : 50; var rb = sizeOrder[b] !== undefined ? sizeOrder[b] : 50; return ra - rb; });';
 
-    html += '  h += "<table style=\\"width:100%;border-collapse:collapse;font-size:0.82rem\\">";';
-    html += '  h += "<thead><tr style=\\"background:#f5f5f7\\">";';
-    html += '  h += "<th style=\\"text-align:left;padding:0.5rem;border-bottom:2px solid #ddd;min-width:120px\\">Style / Color</th>";';
-    html += '  h += "<th style=\\"text-align:center;padding:0.5rem;border-bottom:2px solid #ddd;width:70px\\">Total Qty</th>";';
-    html += '  h += "<th style=\\"text-align:center;padding:0.5rem;border-bottom:2px solid #ddd;width:80px\\">Price</th>";';
-    html += '  allSizes.forEach(function(s) { h += "<th style=\\"text-align:center;padding:0.5rem;border-bottom:2px solid #ddd;width:45px;font-size:0.75rem\\">" + s + "</th>"; });';
+    // Build PO-style matrix table
+    html += '  h += "<div style=\\"overflow-x:auto\\">";';
+    html += '  h += "<table style=\\"width:100%;border-collapse:collapse;font-size:0.82rem;border:1px solid #e0e0e0\\">";';
+
+    // Header row
+    html += '  h += "<thead><tr style=\\"background:#1e3a5f;color:white\\">";';
+    html += '  h += "<th style=\\"text-align:left;padding:0.6rem 0.75rem;font-weight:600;font-size:0.8rem;min-width:100px\\">STYLE</th>";';
+    html += '  h += "<th style=\\"text-align:left;padding:0.6rem 0.5rem;font-weight:600;font-size:0.8rem;min-width:80px\\">COLOR</th>";';
+    html += '  allSizes.forEach(function(s) { h += "<th style=\\"text-align:center;padding:0.6rem 0.25rem;font-weight:600;font-size:0.75rem;min-width:50px\\">" + s + "</th>"; });';
+    html += '  h += "<th style=\\"text-align:center;padding:0.6rem 0.5rem;font-weight:700;font-size:0.8rem;min-width:65px;background:#163350\\">TOTAL</th>";';
+    html += '  h += "<th style=\\"text-align:center;padding:0.6rem 0.5rem;font-weight:600;font-size:0.8rem;min-width:75px\\">PRICE</th>";';
+    html += '  h += "<th style=\\"text-align:center;padding:0.6rem 0.5rem;font-weight:600;font-size:0.8rem;min-width:85px\\">AMOUNT</th>";';
     html += '  h += "</tr></thead><tbody>";';
 
+    // Data rows
     html += '  rows.forEach(function(row, idx) {';
-    html += '    var bgColor = idx % 2 === 0 ? "#fff" : "#fafbfc";';
-    html += '    h += "<tr style=\\"background:" + bgColor + "\\">";';
-    html += '    h += "<td style=\\"padding:0.5rem;border-bottom:1px solid #eee\\"><div style=\\"font-weight:600;color:#0088c2;font-size:0.78rem\\">" + row.style_id + "</div><div style=\\"color:#666;font-size:0.75rem\\">" + row.color + "</div></td>";';
-    html += '    h += "<td style=\\"padding:0.4rem;border-bottom:1px solid #eee;text-align:center\\"><input type=\\"number\\" id=\\"soQty_" + idx + "\\" value=\\"0\\" min=\\"0\\" style=\\"width:60px;text-align:center;padding:0.3rem;border:1.5px solid #ddd;border-radius:6px;font-size:0.82rem\\" onchange=\\"recalcSizes(" + idx + ")\\" onkeyup=\\"recalcSizes(" + idx + ")\\"></td>";';
-    html += '    h += "<td style=\\"padding:0.4rem;border-bottom:1px solid #eee;text-align:center\\"><input type=\\"number\\" id=\\"soPrice_" + idx + "\\" value=\\"" + defPrice.toFixed(2) + "\\" min=\\"0\\" step=\\"0.01\\" style=\\"width:70px;text-align:center;padding:0.3rem;border:1.5px solid #ddd;border-radius:6px;font-size:0.82rem\\" onchange=\\"if(" + idx + "===0)copyPriceDown()\\"></td>";';
-    // Size columns (read-only, auto-calculated)
+    html += '    var bgColor = idx % 2 === 0 ? "#fff" : "#f8f9fb";';
+    html += '    h += "<tr style=\\"background:" + bgColor + ";border-bottom:1px solid #eee\\">";';
+    // Style column
+    html += '    h += "<td style=\\"padding:0.5rem 0.75rem;font-weight:600;color:#0088c2;font-size:0.82rem;white-space:nowrap\\">" + row.style_id + "</td>";';
+    // Color column
+    html += '    h += "<td style=\\"padding:0.5rem 0.5rem;color:#333;font-size:0.8rem\\">" + row.color + "</td>";';
+    // Size input columns
     html += '    allSizes.forEach(function(s) {';
     html += '      var ratio = (row.curve && row.curve.ratios && row.curve.ratios[s]) ? row.curve.ratios[s] : 0;';
-    html += '      h += "<td style=\\"padding:0.4rem;border-bottom:1px solid #eee;text-align:center\\"><input type=\\"number\\" id=\\"soSize_" + idx + "_" + s + "\\" value=\\"0\\" min=\\"0\\" data-ratio=\\"" + ratio + "\\" style=\\"width:40px;text-align:center;padding:0.2rem;border:1px solid #e0e0e0;border-radius:4px;font-size:0.78rem;background:" + (ratio > 0 ? "#f0f7ff" : "#fff") + "\\" title=\\"Ratio: " + (ratio * 100).toFixed(1) + "%\\"></td>";';
+    html += '      h += "<td style=\\"padding:0.3rem 0.15rem;text-align:center\\"><input type=\\"number\\" id=\\"soSize_" + idx + "_" + s + "\\" value=\\"\\" min=\\"0\\" data-ratio=\\"" + ratio + "\\" data-row=\\"" + idx + "\\" style=\\"width:44px;text-align:center;padding:0.25rem;border:1px solid #d0d0d0;border-radius:4px;font-size:0.8rem;background:" + (ratio > 0 ? "#f0f7ff" : "#fff") + "\\" onchange=\\"recalcRow(" + idx + ")\\" onkeyup=\\"recalcRow(" + idx + ")\\"></td>";';
     html += '    });';
+    // Total column (auto-calc)
+    html += '    h += "<td style=\\"padding:0.5rem 0.5rem;text-align:center;font-weight:700;color:#1e3a5f;font-size:0.9rem;background:#f0f4f8\\" id=\\"soTotal_" + idx + "\\">0</td>";';
+    // Price column
+    html += '    h += "<td style=\\"padding:0.3rem 0.15rem;text-align:center\\"><input type=\\"number\\" id=\\"soPrice_" + idx + "\\" value=\\"" + defPrice.toFixed(2) + "\\" min=\\"0\\" step=\\"0.01\\" style=\\"width:68px;text-align:center;padding:0.25rem;border:1px solid #d0d0d0;border-radius:4px;font-size:0.8rem\\" onchange=\\"if(" + idx + "===0)copyPriceDown();recalcRow(" + idx + ")\\" onkeyup=\\"recalcRow(" + idx + ")\\"></td>";';
+    // Amount column (auto-calc)
+    html += '    h += "<td style=\\"padding:0.5rem 0.5rem;text-align:right;font-weight:600;color:#333;font-size:0.85rem\\" id=\\"soAmount_" + idx + "\\">$0.00</td>";';
     html += '    h += "</tr>";';
     html += '  });';
-    html += '  h += "</tbody></table>";';
+
+    // Totals row
+    html += '  h += "<tr style=\\"background:#e8ecf0;font-weight:700;border-top:2px solid #1e3a5f\\">";';
+    html += '  h += "<td style=\\"padding:0.6rem 0.75rem;font-size:0.85rem\\">TOTALS</td>";';
+    html += '  h += "<td></td>";';
+    html += '  allSizes.forEach(function(s) { h += "<td style=\\"text-align:center;padding:0.6rem 0.25rem;font-size:0.8rem\\" id=\\"soSizeTotal_" + s + "\\">0</td>"; });';
+    html += '  h += "<td style=\\"text-align:center;padding:0.6rem 0.5rem;font-size:0.95rem;color:#1e3a5f;background:#dce3eb\\" id=\\"soGrandTotal\\">0</td>";';
+    html += '  h += "<td></td>";';
+    html += '  h += "<td style=\\"text-align:right;padding:0.6rem 0.5rem;font-size:0.9rem;color:#1e3a5f\\" id=\\"soGrandAmount\\">$0.00</td>";';
+    html += '  h += "</tr>";';
+
+    html += '  h += "</tbody></table></div>";';
+
+    // Tip about auto-distribution
+    html += '  if (curve && curve.length > 0) {';
+    html += '    h += "<p style=\\"font-size:0.75rem;color:#0088c2;margin-top:0.5rem\\">💡 Tip: Enter a total in the TOTAL column to auto-distribute by Import PO size ratio. Or enter sizes individually.</p>";';
+    // Add hidden total-input overlay functionality
+    html += '    rows.forEach(function(row, idx) {';
+    html += '      var totalCell = "soTotal_" + idx;';
+    html += '    });';
+    html += '  }';
 
     // Store metadata
     html += '  h += "<input type=\\"hidden\\" id=\\"soRowCount\\" value=\\"" + rows.length + "\\">";';
@@ -3205,23 +3251,41 @@ function getOrderDetailHTML(order, products) {
     html += '  h += "<input type=\\"hidden\\" id=\\"soSizeList\\" value=\\"" + allSizes.join(",") + "\\">";';
 
     html += '  container.innerHTML = h;';
+
+    // Make total cells clickable for auto-distribute
+    html += '  for (var ri = 0; ri < rows.length; ri++) {';
+    html += '    (function(idx) {';
+    html += '      var totalCell = document.getElementById("soTotal_" + idx);';
+    html += '      if (totalCell) {';
+    html += '        totalCell.style.cursor = "pointer";';
+    html += '        totalCell.title = "Click to enter total and auto-distribute by size ratio";';
+    html += '        totalCell.onclick = function() {';
+    html += '          var current = parseInt(this.textContent) || 0;';
+    html += '          var val = prompt("Enter total quantity for this row (will auto-distribute by size ratio):", current);';
+    html += '          if (val === null) return;';
+    html += '          var totalQty = parseInt(val) || 0;';
+    html += '          autoDistribute(idx, totalQty);';
+    html += '        };';
+    html += '      }';
+    html += '    })(ri);';
+    html += '  }';
+
     html += '}';
 
-    // Recalculate sizes based on qty and ratio
-    html += 'function recalcSizes(rowIdx) {';
-    html += '  var totalQty = parseInt(document.getElementById("soQty_" + rowIdx).value) || 0;';
+    // Auto-distribute total qty across sizes by ratio
+    html += 'function autoDistribute(rowIdx, totalQty) {';
     html += '  var sizes = (document.getElementById("soSizeList") || {value:""}).value.split(",").filter(Boolean);';
-    html += '  if (totalQty === 0) { sizes.forEach(function(s) { var el = document.getElementById("soSize_" + rowIdx + "_" + s); if (el) el.value = 0; }); return; }';
+    html += '  if (totalQty === 0) { sizes.forEach(function(s) { var el = document.getElementById("soSize_" + rowIdx + "_" + s); if (el) el.value = ""; }); recalcRow(rowIdx); return; }';
     html += '  var totalRatio = 0;';
     html += '  sizes.forEach(function(s) { var el = document.getElementById("soSize_" + rowIdx + "_" + s); if (el) totalRatio += parseFloat(el.dataset.ratio || 0); });';
     html += '  if (totalRatio === 0) {';
-    // No curve data — just put total in first size
-    html += '    sizes.forEach(function(s, i) { var el = document.getElementById("soSize_" + rowIdx + "_" + s); if (el) el.value = (i === 0 ? totalQty : 0); });';
-    html += '    return;';
+    html += '    var perSize = Math.floor(totalQty / sizes.length);';
+    html += '    var remainder = totalQty - (perSize * sizes.length);';
+    html += '    sizes.forEach(function(s, i) { var el = document.getElementById("soSize_" + rowIdx + "_" + s); if (el) el.value = perSize + (i < remainder ? 1 : 0); });';
+    html += '    recalcRow(rowIdx); return;';
     html += '  }';
-    // Distribute by ratio using largest remainder method
-    html += '  var allocated = 0;';
-    html += '  var items = [];';
+    // Largest remainder method
+    html += '  var allocated = 0; var items = [];';
     html += '  sizes.forEach(function(s) {';
     html += '    var el = document.getElementById("soSize_" + rowIdx + "_" + s);';
     html += '    if (!el) return;';
@@ -3234,6 +3298,39 @@ function getOrderDetailHTML(order, products) {
     html += '  var remaining = totalQty - allocated;';
     html += '  items.sort(function(a, b) { return b.remainder - a.remainder; });';
     html += '  items.forEach(function(it, i) { it.el.value = it.floor + (i < remaining ? 1 : 0); });';
+    html += '  recalcRow(rowIdx);';
+    html += '}';
+
+    // Recalc row totals and amounts
+    html += 'function recalcRow(rowIdx) {';
+    html += '  var sizes = (document.getElementById("soSizeList") || {value:""}).value.split(",").filter(Boolean);';
+    html += '  var rowTotal = 0;';
+    html += '  sizes.forEach(function(s) { var el = document.getElementById("soSize_" + rowIdx + "_" + s); if (el && el.value) rowTotal += parseInt(el.value) || 0; });';
+    html += '  var totalEl = document.getElementById("soTotal_" + rowIdx);';
+    html += '  if (totalEl) totalEl.textContent = rowTotal.toLocaleString();';
+    html += '  var price = parseFloat((document.getElementById("soPrice_" + rowIdx) || {value:"0"}).value) || 0;';
+    html += '  var amountEl = document.getElementById("soAmount_" + rowIdx);';
+    html += '  if (amountEl) amountEl.textContent = "$" + (rowTotal * price).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});';
+    // Recalc column totals
+    html += '  recalcAllTotals();';
+    html += '}';
+
+    html += 'function recalcAllTotals() {';
+    html += '  var sizes = (document.getElementById("soSizeList") || {value:""}).value.split(",").filter(Boolean);';
+    html += '  var rowCount = parseInt((document.getElementById("soRowCount") || {value:"0"}).value);';
+    html += '  var grandTotal = 0; var grandAmount = 0;';
+    html += '  var sizeTotals = {};';
+    html += '  sizes.forEach(function(s) { sizeTotals[s] = 0; });';
+    html += '  for (var i = 0; i < rowCount; i++) {';
+    html += '    var rowTotal = 0;';
+    html += '    sizes.forEach(function(s) { var el = document.getElementById("soSize_" + i + "_" + s); var v = el && el.value ? parseInt(el.value) || 0 : 0; sizeTotals[s] += v; rowTotal += v; });';
+    html += '    grandTotal += rowTotal;';
+    html += '    var price = parseFloat((document.getElementById("soPrice_" + i) || {value:"0"}).value) || 0;';
+    html += '    grandAmount += rowTotal * price;';
+    html += '  }';
+    html += '  sizes.forEach(function(s) { var el = document.getElementById("soSizeTotal_" + s); if (el) el.textContent = sizeTotals[s].toLocaleString(); });';
+    html += '  var gtEl = document.getElementById("soGrandTotal"); if (gtEl) gtEl.textContent = grandTotal.toLocaleString();';
+    html += '  var gaEl = document.getElementById("soGrandAmount"); if (gaEl) gaEl.textContent = "$" + grandAmount.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});';
     html += '}';
 
     // Copy price from first row to all others
@@ -3245,6 +3342,7 @@ function getOrderDetailHTML(order, products) {
     html += '  for (var i = 1; i < count; i++) {';
     html += '    var el = document.getElementById("soPrice_" + i);';
     html += '    if (el) el.value = val;';
+    html += '    recalcRow(i);';
     html += '  }';
     html += '}';
 
@@ -3256,14 +3354,11 @@ function getOrderDetailHTML(order, products) {
     html += '  var lineItems = [];';
     html += '  var totalUnits = 0;';
     html += '  for (var i = 0; i < rowCount; i++) {';
-    html += '    var qty = parseInt((document.getElementById("soQty_" + i) || {value:"0"}).value) || 0;';
-    html += '    if (qty === 0) continue;';
     html += '    var price = parseFloat((document.getElementById("soPrice_" + i) || {value:"0"}).value) || 0;';
     html += '    var meta = document.getElementById("soRowMeta_" + i);';
     html += '    var styleId = meta ? meta.dataset.style : "";';
     html += '    var color = meta ? meta.dataset.color : "";';
     html += '    var baseName = meta ? meta.dataset.name : "";';
-    // Build individual line items per size with qty > 0
     html += '    sizes.forEach(function(s) {';
     html += '      var sizeQty = parseInt((document.getElementById("soSize_" + i + "_" + s) || {value:"0"}).value) || 0;';
     html += '      if (sizeQty > 0) {';
@@ -3274,15 +3369,15 @@ function getOrderDetailHTML(order, products) {
     html += '  }';
     html += '  if (lineItems.length === 0) { alert("Please enter quantities for at least one product/color"); return; }';
 
-    // Show confirmation
+    html += '  var totalAmount = lineItems.reduce(function(sum, li) { return sum + (li.quantity * li.rate); }, 0);';
     html += '  var msg = "Create Draft Sales Order in Zoho Books?\\n\\n";';
     html += '  msg += "Customer: " + selectedCustomerName + "\\n";';
     html += '  msg += "Line items: " + lineItems.length + "\\n";';
-    html += '  msg += "Total units: " + totalUnits + "\\n";';
+    html += '  msg += "Total units: " + totalUnits.toLocaleString() + "\\n";';
+    html += '  msg += "Total amount: $" + totalAmount.toLocaleString(undefined, {minimumFractionDigits:2}) + "\\n";';
     html += '  msg += "\\nThis will create a DRAFT SO (not approved).";';
     html += '  if (!confirm(msg)) return;';
 
-    // Build notes from order data
     html += '  var soNotes = "Stock Order Request: " + orderData.request_number + "\\n";';
     html += '  if (orderData.notes) soNotes += "Notes: " + orderData.notes + "\\n";';
 

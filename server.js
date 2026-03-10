@@ -3130,20 +3130,20 @@ function getOrderDetailHTML(order, products) {
     html += '    return;';
     html += '  }';
     html += '  statusDiv.innerHTML = "<span style=\\"color:#0088c2\\">Loading size curve from PO: " + po + "...</span>";';
-    html += '  fetch("/api/zoho/po-size-curve/" + encodeURIComponent(po))';
-    html += '    .then(function(r) { return r.json(); })';
-    html += '    .then(function(d) {';
-    html += '      if (d.success && d.curve && d.curve.length > 0) {';
-    html += '        sizeCurveData = d.curve;';
-    html += '        statusDiv.innerHTML = "<span style=\\"color:#2e7d32\\">✓ Size curve loaded from " + (d.source === "zoho" ? "Zoho PO" : "local data") + " — " + d.curve.length + " color group(s) found. Enter total qty per color and sizes will auto-distribute.</span>";';
-    html += '      } else {';
-    html += '        statusDiv.innerHTML = "<span style=\\"color:#e65100\\">⚠ Could not load size curve from PO. Enter quantities manually below.</span>";';
-    html += '      }';
-    html += '      await buildLineItemsTable(sizeCurveData);';
-    html += '    }).catch(function(e) {';
-    html += '      statusDiv.innerHTML = "<span style=\\"color:#c62828\\">Error loading PO: " + e.message + "</span>";';
-    html += '      await buildLineItemsTable(null);';
-    html += '    });';
+    html += '  try {';
+    html += '    var resp = await fetch("/api/zoho/po-size-curve/" + encodeURIComponent(po));';
+    html += '    var d = await resp.json();';
+    html += '    if (d.success && d.curve && d.curve.length > 0) {';
+    html += '      sizeCurveData = d.curve;';
+    html += '      statusDiv.innerHTML = "<span style=\\"color:#2e7d32\\">✓ Size curve loaded from " + (d.source === "zoho" ? "Zoho PO" : "local data") + " — " + d.curve.length + " color group(s) found. Enter total qty per color and sizes will auto-distribute.</span>";';
+    html += '    } else {';
+    html += '      statusDiv.innerHTML = "<span style=\\"color:#e65100\\">⚠ Could not load size curve from PO. Enter quantities manually below.</span>";';
+    html += '    }';
+    html += '    await buildLineItemsTable(sizeCurveData);';
+    html += '  } catch(e) {';
+    html += '    statusDiv.innerHTML = "<span style=\\"color:#c62828\\">Error loading PO: " + e.message + "</span>";';
+    html += '    await buildLineItemsTable(null);';
+    html += '  }';
     html += '}';
 
     // Build line items table

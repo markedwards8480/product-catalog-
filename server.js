@@ -2429,6 +2429,28 @@ app.put('/api/order-requests/:id', requireAuth, async function(req, res) {
 });
 
 // Order detail page (public - accessed via link from email)
+// Product sizes for SO creation (public - used by order detail page)
+app.get('/api/product-sizes-for-so', async function(req, res) {
+    try {
+        var styleIds = req.query.styles ? req.query.styles.split(',') : [];
+        if (styleIds.length === 0) return res.json({ success: true, sizes: {} });
+        var result = await pool.query(
+            'SELECT style_id, color_name, size, size_rank, available_now, left_to_sell FROM product_sizes WHERE style_id = ANY($1) ORDER BY style_id, color_name, size_rank',
+            [styleIds]
+        );
+        // Group by style_id + color
+        var grouped = {};
+        result.rows.forEach(function(r) {
+            var key = r.style_id + '|' + r.color_name;
+            if (!grouped[key]) grouped[key] = { style_id: r.style_id, color: r.color_name, sizes: [] };
+            grouped[key].sizes.push({ size: r.size, size_rank: r.size_rank, available_now: r.available_now || 0, left_to_sell: r.left_to_sell || 0 });
+        });
+        res.json({ success: true, data: Object.values(grouped) });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
+});
+
 // ============================================
 // ZOHO SALES ORDER CREATION APIs
 // ============================================
@@ -3207,18 +3229,29 @@ function getOrderDetailHTML(order, products) {
     // Collect all sizes from curve data OR from product_sizes
     html += '  var allSizes = [];';
     html += '  if (curve) { curve.forEach(function(cv) { Object.keys(cv.ratios).forEach(function(s) { if (allSizes.indexOf(s) === -1) allSizes.push(s); }); }); }';
-    // If no sizes from curve, try to get from the product sizes API
-    html += '  if (allSizes.length === 0) {';
-    html += '    var firstStyle = rows.length > 0 ? rows[0].style_id : "";';
-    html += '    if (firstStyle) {';
-    html += '      try {';
-    html += '        var sizeResp = await fetch("/api/product-sizes/" + encodeURIComponent(firstStyle));';
-    html += '        var sizeData = await sizeResp.json();';
-    html += '        if (sizeData.success && sizeData.sizes) {';
-    html += '          sizeData.sizes.forEach(function(s) { if (allSizes.indexOf(s.size) === -1) allSizes.push(s.size); });';
-    html += '        }';
-    html += '      } catch(e) { console.log("Could not load product sizes:", e); }';
-    html += '    }';
+    // If no sizes from curve, load from product_sizes and build a pseudo-curve from inventory
+    html += '  if (allSizes.length === 0 && rows.length > 0) {';
+    html += '    var styleList = rows.map(function(r) { return r.style_id; }).filter(function(v, i, a) { return a.indexOf(v) === i; });';
+    html += '    try {';
+    html += '      var psResp = await fetch("/api/product-sizes-for-so?styles=" + encodeURIComponent(styleList.join(",")));';
+    html += '      var psData = await psResp.json();';
+    html += '      if (psData.success && psData.data && psData.data.length > 0) {';
+    // Build allSizes from product data
+    html += '        psData.data.forEach(function(d) { d.sizes.forEach(function(s) { if (allSizes.indexOf(s.size) === -1) allSizes.push(s.size); }); });';
+    // Build pseudo-curve ratios from available inventory for each row
+    html += '        rows.forEach(function(row) {';
+    html += '          var match = psData.data.find(function(d) { return d.style_id === row.style_id && d.color.toLowerCase() === row.color.toLowerCase(); });';
+    html += '          if (!match) match = psData.data.find(function(d) { return d.style_id === row.style_id; });';
+    html += '          if (match) {';
+    html += '            var totalInv = match.sizes.reduce(function(sum, s) { return sum + (s.left_to_sell || s.available_now || 0); }, 0);';
+    html += '            var ratios = {}; var sizes = {};';
+    html += '            match.sizes.forEach(function(s) { var qty = s.left_to_sell || s.available_now || 0; sizes[s.size] = qty; ratios[s.size] = totalInv > 0 ? qty / totalInv : 0; });';
+    html += '            row.curve = { base_style: row.base_style, color: row.color, sizes: sizes, ratios: ratios, total_qty: totalInv, source: "inventory" };';
+    html += '          }';
+    html += '        });';
+    html += '        console.log("Built size grid from product inventory:", allSizes.length, "sizes");';
+    html += '      }';
+    html += '    } catch(e) { console.log("Could not load product sizes:", e); }';
     html += '  }';
     html += '  if (allSizes.length === 0) allSizes = ["OS"];';
 

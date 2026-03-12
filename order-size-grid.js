@@ -85,47 +85,44 @@
 
         var sourceLabel = source === 'zoho' ? 'Import PO' : (source === 'local' ? 'local data' : 'inventory');
         var h = '';
-        h += '<div style="font-size:0.75rem;color:#2e7d32;margin-bottom:0.35rem">\u2713 ' + sizeRows.length + ' color(s). Enter qty per color \u2014 sizes auto-distribute.</div>';
+        h += '<div style="font-size:0.72rem;color:#2e7d32;margin-bottom:0.25rem">\u2713 ' + sizeRows.length + ' color(s). Enter qty \u2014 sizes auto-distribute.</div>';
 
         // Compact color rows
-        h += '<div style="border:1px solid #e0e0e0;border-radius:8px;overflow:hidden">';
+        h += '<div style="border:1px solid #e0e0e0;border-radius:6px;overflow:hidden">';
 
         // Header
-        h += '<div style="display:flex;align-items:center;padding:0.3rem 0.6rem;background:#1e3a5f;color:white;font-size:0.7rem;font-weight:600">';
-        h += '<div style="width:90px">STYLE</div>';
+        h += '<div style="display:flex;align-items:center;padding:0.2rem 0.5rem;background:#1e3a5f;color:white;font-size:0.65rem;font-weight:600">';
         h += '<div style="flex:1">COLOR</div>';
-        h += '<div style="width:90px;text-align:center">QTY</div>';
-        h += '<div style="width:30px"></div>';
+        h += '<div style="width:80px;text-align:center">QTY</div>';
+        h += '<div style="width:24px"></div>';
         h += '</div>';
 
         sizeRows.forEach(function(row, idx) {
             var tabIdx = (idx + 1) * 100;
             var bgColor = idx % 2 === 0 ? '#fff' : '#f8f9fb';
 
-            // Compact row
             h += '<div style="background:' + bgColor + '">';
-            h += '<div style="display:flex;align-items:center;padding:0.25rem 0.6rem;border-bottom:1px solid #f0f0f0">';
-            h += '<div style="width:90px;font-weight:600;color:#0088c2;font-size:0.76rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + row.style_id + '</div>';
-            h += '<div style="flex:1;font-size:0.78rem;color:#333">' + row.color + '</div>';
-            h += '<div style="width:90px;text-align:center">';
+            h += '<div style="display:flex;align-items:center;padding:0.15rem 0.5rem;border-bottom:1px solid #f0f0f0">';
+            h += '<div style="flex:1;font-size:0.74rem;color:#333"><span style="color:#0088c2;font-weight:600">' + row.style_id.split('-').pop() + '</span> ' + row.color + '</div>';
+            h += '<div style="width:80px;text-align:center">';
             h += '<input type="number" id="orSzTotal_' + bs + '_' + idx + '" tabindex="' + tabIdx + '" value="" min="0" placeholder="0" ';
-            h += 'style="width:72px;text-align:center;padding:0.25rem;border:2px solid #0088c2;border-radius:5px;font-size:0.95rem;font-weight:700;color:#1e3a5f;background:#f0f8ff" ';
+            h += 'style="width:65px;text-align:center;padding:0.2rem;border:2px solid #0088c2;border-radius:4px;font-size:0.88rem;font-weight:700;color:#1e3a5f;background:#f0f8ff" ';
             h += 'onchange="orStyleAutoDistribute(\'' + bs + '\',' + idx + ',parseInt(this.value)||0)" onkeyup="orStyleAutoDistribute(\'' + bs + '\',' + idx + ',parseInt(this.value)||0)">';
             h += '</div>';
-            h += '<div style="width:30px;text-align:center">';
-            h += '<button type="button" onclick="toggleSizeDetail(\'' + bs + '\',' + idx + ')" style="background:none;border:none;cursor:pointer;font-size:0.65rem;color:#999;padding:0.15rem" title="Size detail">\u25BC</button>';
+            h += '<div style="width:24px;text-align:center">';
+            h += '<button type="button" onclick="toggleSizeDetail(\'' + bs + '\',' + idx + ')" style="background:none;border:none;cursor:pointer;font-size:0.6rem;color:#999;padding:0.1rem" title="Size detail">\u25BC</button>';
             h += '</div>';
             h += '</div>';
 
             // Size detail (collapsed)
-            h += '<div id="orSzDetail_' + bs + '_' + idx + '" style="display:none;padding:0.2rem 0.6rem 0.3rem;background:#fafbfc;border-bottom:1px solid #eee">';
-            h += '<div style="display:flex;gap:0.2rem;flex-wrap:wrap;align-items:center">';
+            h += '<div id="orSzDetail_' + bs + '_' + idx + '" style="display:none;padding:0.15rem 0.5rem 0.25rem;background:#fafbfc;border-bottom:1px solid #eee">';
+            h += '<div style="display:flex;gap:0.15rem;flex-wrap:wrap;align-items:center">';
             allSizes.forEach(function(s) {
                 var ratio = (row.curve && row.curve.ratios && row.curve.ratios[s]) ? row.curve.ratios[s] : 0;
                 h += '<div style="text-align:center">';
-                h += '<div style="font-size:0.6rem;color:#999;font-weight:600">' + s + '</div>';
+                h += '<div style="font-size:0.58rem;color:#999;font-weight:600">' + s + '</div>';
                 h += '<input type="number" id="orSz_' + bs + '_' + idx + '_' + s + '" value="" min="0" tabindex="-1" data-ratio="' + ratio + '" ';
-                h += 'style="width:38px;text-align:center;padding:0.15rem;border:1px solid ' + (ratio > 0 ? '#b3d4fc' : '#ddd') + ';border-radius:3px;font-size:0.68rem;background:' + (ratio > 0 ? '#f0f7ff' : '#fff') + '" ';
+                h += 'style="width:34px;text-align:center;padding:0.12rem;border:1px solid ' + (ratio > 0 ? '#b3d4fc' : '#ddd') + ';border-radius:3px;font-size:0.65rem;background:' + (ratio > 0 ? '#f0f7ff' : '#fff') + '" ';
                 h += 'onchange="orStyleRecalcRow(\'' + bs + '\',' + idx + ')" onkeyup="orStyleRecalcRow(\'' + bs + '\',' + idx + ')">';
                 h += '</div>';
             });
@@ -137,9 +134,9 @@
         h += '</div>'; // end table
 
         // Grand total - compact
-        h += '<div style="display:flex;justify-content:flex-end;align-items:center;gap:0.4rem;padding:0.3rem 0.6rem;margin-top:0.2rem">';
-        h += '<span style="font-size:0.78rem;font-weight:600;color:#1e3a5f">Total:</span>';
-        h += '<span id="orSzGrandTotal_' + bs + '" style="font-size:1rem;font-weight:700;color:#1e3a5f">0</span>';
+        h += '<div style="display:flex;justify-content:flex-end;align-items:center;gap:0.3rem;padding:0.2rem 0.5rem;margin-top:0.15rem">';
+        h += '<span style="font-size:0.72rem;font-weight:600;color:#1e3a5f">Total:</span>';
+        h += '<span id="orSzGrandTotal_' + bs + '" style="font-size:0.9rem;font-weight:700;color:#1e3a5f">0</span>';
         h += '</div>';
 
         container.innerHTML = h;

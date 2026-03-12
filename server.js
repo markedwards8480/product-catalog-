@@ -3031,12 +3031,6 @@ function getOrderDetailHTML(order, products) {
         html += '<div class="detail-row"><span class="detail-label">Zoho SO#</span><span class="detail-val" style="color:#2e7d32;font-weight:700">' + order.zoho_so_number + '</span></div>';
     }
 
-    // Unit Color Breakdown
-    if (order.unit_color_breakdown) {
-        html += '<div style="margin-top:1rem"><span class="detail-label">Unit Color Breakdown:</span>';
-        html += '<div class="notes-box" style="background:#e3f2fd;border-color:#90caf9">' + order.unit_color_breakdown.replace(/</g, '&lt;').replace(/\n/g, '<br>') + '</div></div>';
-    }
-
     // Size Grid Data (submitted by rep)
     var sizeGridData = order.size_grid_data ? (typeof order.size_grid_data === 'string' ? JSON.parse(order.size_grid_data) : order.size_grid_data) : null;
     if (sizeGridData && sizeGridData.rows && sizeGridData.sizes) {

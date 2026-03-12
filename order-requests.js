@@ -211,55 +211,48 @@
         h += '</div>';
 
         // ===== PER-STYLE SECTIONS =====
-        h += '<div class="or-form-section" style="margin-top:1.5rem">';
+        h += '<div class="or-form-section" style="margin-top:1rem">';
         h += '<h3>Import PO & Size Breakdown by Style</h3>';
-        h += '<p style="font-size:0.8rem;color:#999;margin:-0.5rem 0 1rem">Select an Import PO for each style and enter size quantities.</p>';
+
+        // 2-column grid for style cards
+        h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem">';
 
         styleKeys.forEach(function(bs) {
             var s = styles[bs];
             var imgUrl = typeof getImageUrl === 'function' ? getImageUrl(s.image) : s.image;
             var variantCount = s.variants.length;
-            var styleQty = s.variants.reduce(function(sum, v) { return sum + v.qty; }, 0);
 
             h += '<div class="or-style-card" data-base-style="' + bs + '">';
-            h += '<div class="or-style-card-header" onclick="toggleStyleCard(\'' + bs + '\')">';
-            h += '<div style="display:flex;align-items:center;gap:0.75rem;flex:1;min-width:0">';
-            h += '<img src="' + (imgUrl || '') + '" onerror="this.style.display=\'none\'" style="width:50px;height:50px;object-fit:contain;border-radius:8px;background:#f8f9fa;flex-shrink:0">';
-            h += '<div style="min-width:0">';
-            h += '<div style="font-weight:700;color:#1e3a5f;font-size:0.95rem">' + bs + ' \u2014 ' + s.name + '</div>';
-            h += '<div style="font-size:0.78rem;color:#666">' + variantCount + ' variant' + (variantCount !== 1 ? 's' : '') + ' \u2022 ' + styleQty.toLocaleString() + ' units</div>';
+
+            // Compact header: image + name + PO badge
+            h += '<div class="or-style-card-header" onclick="toggleStyleCard(\'' + bs + '\')" style="padding:0.5rem 0.75rem">';
+            h += '<div style="display:flex;align-items:center;gap:0.5rem;flex:1;min-width:0">';
+            h += '<img src="' + (imgUrl || '') + '" onerror="this.style.display=\'none\'" style="width:36px;height:36px;object-fit:contain;border-radius:6px;background:#f8f9fa;flex-shrink:0">';
+            h += '<div style="min-width:0;overflow:hidden">';
+            h += '<div style="font-weight:700;color:#1e3a5f;font-size:0.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + bs + ' \u2014 ' + s.name + '</div>';
+            h += '<div style="font-size:0.7rem;color:#666">' + variantCount + ' color' + (variantCount !== 1 ? 's' : '') + '</div>';
             h += '</div></div>';
-            h += '<div style="display:flex;align-items:center;gap:0.5rem">';
-            h += '<span class="or-style-po-badge" id="poLabel_' + bs + '">No PO selected</span>';
-            h += '<span class="or-style-toggle" id="toggle_' + bs + '">\u25BC</span>';
+            h += '<div style="display:flex;align-items:center;gap:0.4rem">';
+            h += '<span class="or-style-po-badge" id="poLabel_' + bs + '" style="font-size:0.68rem">No PO</span>';
+            h += '<span class="or-style-toggle" id="toggle_' + bs + '" style="font-size:0.7rem">\u25BC</span>';
             h += '</div></div>';
 
-            h += '<div class="or-style-card-body" id="styleBody_' + bs + '">';
+            // Card body
+            h += '<div class="or-style-card-body" id="styleBody_' + bs + '" style="padding:0.6rem 0.75rem">';
 
-            // Compact variant list
-            h += '<div style="margin-bottom:0.75rem;padding:0.5rem;background:#f8f9fa;border-radius:6px;font-size:0.78rem;color:#666">';
-            s.variants.forEach(function(v) {
-                h += '<span style="display:inline-block;margin:0.15rem 0.5rem 0.15rem 0">';
-                h += '<span style="color:#0088c2;font-weight:600">' + v.style_id + '</span>';
-                if (v.colors) h += ' <span style="color:#999">(' + v.colors + ')</span>';
-                h += '</span>';
-            });
+            // PO + Price inline
+            h += '<div style="display:flex;gap:0.5rem;align-items:end;margin-bottom:0.4rem">';
+            h += '<div style="flex:1;position:relative">';
+            h += '<label style="font-size:0.7rem;font-weight:600;color:#666;display:block;margin-bottom:0.2rem">Import PO *</label>';
+            h += '<div style="display:flex;gap:0.4rem;align-items:center">';
+            h += '<input type="text" id="orStylePO_' + bs + '" placeholder="Select PO..." autocomplete="off" style="flex:1;padding:0.4rem 0.6rem;font-size:0.82rem;border:1.5px solid #e0e0e0;border-radius:8px" oninput="filterStylePODropdown(\'' + bs + '\', this.value)" onfocus="showStylePODropdown(\'' + bs + '\')">';
+            h += '<a id="orStylePOLink_' + bs + '" href="#" target="_blank" style="display:none;font-size:0.68rem;white-space:nowrap;color:#0088c2;text-decoration:none;font-weight:600;padding:0.3rem 0.5rem;border:1px solid #0088c2;border-radius:4px;background:#f0f8ff">Zoho\u2197</a>';
             h += '</div>';
-
-            // Import PO + Customer Price row
-            h += '<div style="display:grid;grid-template-columns:1fr auto;gap:0.75rem;align-items:start">';
-            h += '<div class="or-field">';
-            h += '<label>Import PO for ' + bs + ' *</label>';
-            h += '<div style="display:flex;gap:0.5rem;align-items:center;position:relative">';
-            h += '<input type="text" id="orStylePO_' + bs + '" placeholder="Loading POs for ' + bs + '..." autocomplete="off" style="flex:1" oninput="filterStylePODropdown(\'' + bs + '\', this.value)" onfocus="showStylePODropdown(\'' + bs + '\')">';
-            h += '<a id="orStylePOLink_' + bs + '" href="#" target="_blank" style="display:none;font-size:0.75rem;white-space:nowrap;color:#0088c2;text-decoration:none;font-weight:600;padding:0.4rem 0.6rem;border:1px solid #0088c2;border-radius:4px;background:#f0f8ff">View in Zoho</a>';
             h += '<div class="or-style-po-dropdown" id="poDropdown_' + bs + '"></div>';
             h += '</div>';
-            h += '<span style="font-size:0.7rem;color:#999">Select from dropdown or type manually</span>';
-            h += '</div>';
-            h += '<div class="or-field" style="width:120px">';
-            h += '<label>Cust. Price *</label>';
-            h += '<input type="number" id="orStylePrice_' + bs + '" step="0.01" value="0.00" min="0" style="text-align:right">';
+            h += '<div style="width:85px">';
+            h += '<label style="font-size:0.7rem;font-weight:600;color:#666;display:block;margin-bottom:0.2rem">Price *</label>';
+            h += '<input type="number" id="orStylePrice_' + bs + '" step="0.01" value="0.00" min="0" style="width:100%;padding:0.4rem 0.5rem;font-size:0.82rem;text-align:right;border:1.5px solid #e0e0e0;border-radius:8px;box-sizing:border-box">';
             h += '</div>';
             h += '</div>';
 
@@ -269,6 +262,7 @@
             h += '</div></div>';
         });
 
+        h += '</div>'; // end 2-col grid
         h += '</div>';
 
         // Actions

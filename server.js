@@ -2963,7 +2963,7 @@ function getOrderDetailHTML(order, products) {
 
     var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Order ' + order.request_number + ' - Mark Edwards Apparel</title>';
     html += '<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f5f7;color:#1d1d1f}';
-    html += '.container{max-width:900px;margin:0 auto;padding:2rem 1rem}';
+    html += '.container{max-width:1300px;margin:0 auto;padding:2rem 1rem}';
     html += '.header{background:#1a1a2e;color:white;padding:2rem;border-radius:16px 16px 0 0;text-align:center}';
     html += '.header h1{font-size:1.5rem;margin-bottom:0.5rem}';
     html += '.header .order-num{font-size:2rem;font-weight:700;letter-spacing:1px}';
@@ -3007,6 +3007,8 @@ function getOrderDetailHTML(order, products) {
     var labelMarketing = order.label_marketing ? (typeof order.label_marketing === 'string' ? JSON.parse(order.label_marketing) : order.label_marketing) : null;
 
     html += '<div class="details">';
+    // Compact 2-column grid for order info
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 2rem">';
     html += '<div class="detail-row"><span class="detail-label">Account Name</span><span class="detail-val" style="font-weight:700;font-size:1.05rem">' + order.customer_name + '</span></div>';
     if (order.buyer_name) {
         html += '<div class="detail-row"><span class="detail-label">Buyer Name</span><span class="detail-val">' + order.buyer_name + '</span></div>';
@@ -3017,7 +3019,7 @@ function getOrderDetailHTML(order, products) {
         html += '<div class="detail-row"><span class="detail-label">Import PO #(s)</span><span class="detail-val" style="font-weight:700;color:#0088c2">' + order.import_po_numbers + '</span></div>';
     }
     if (order.customer_po_number) {
-        html += '<div class="detail-row"><span class="detail-label">Customer PO Number</span><span class="detail-val">' + order.customer_po_number + '</span></div>';
+        html += '<div class="detail-row"><span class="detail-label">Customer PO</span><span class="detail-val">' + order.customer_po_number + '</span></div>';
     }
     if (order.customer_price && parseFloat(order.customer_price) > 0) {
         html += '<div class="detail-row"><span class="detail-label">Customer Price</span><span class="detail-val">$' + parseFloat(order.customer_price).toFixed(2) + '</span></div>';
@@ -3030,6 +3032,7 @@ function getOrderDetailHTML(order, products) {
     if (order.zoho_so_number) {
         html += '<div class="detail-row"><span class="detail-label">Zoho SO#</span><span class="detail-val" style="color:#2e7d32;font-weight:700">' + order.zoho_so_number + '</span></div>';
     }
+    html += '</div>'; // end 2-col grid
 
     // Size Grid Data (submitted by rep)
     var sizeGridData = order.size_grid_data ? (typeof order.size_grid_data === 'string' ? JSON.parse(order.size_grid_data) : order.size_grid_data) : null;
@@ -3076,39 +3079,41 @@ function getOrderDetailHTML(order, products) {
         }
     }
 
-    // Price Tickets section
+    // Price Tickets / Re-Packaging / Label Marketing in 3-column layout
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.75rem;margin-top:1.25rem">';
+
     if (priceTickets) {
-        html += '<div style="margin-top:1.25rem">';
-        html += '<div style="background:#1e3a5f;color:white;padding:0.5rem 1rem;border-radius:8px 8px 0 0;font-weight:700;font-size:0.85rem">Price Tickets</div>';
-        html += '<table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;border-top:none;font-size:0.875rem">';
-        html += '<tr style="background:#f5f5f5"><td style="padding:0.5rem 1rem;border-bottom:1px solid #eee">Does Stock have Price Tickets</td><td style="padding:0.5rem 1rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(priceTickets, 'has_tickets') + '</td></tr>';
-        html += '<tr><td style="padding:0.5rem 1rem;border-bottom:1px solid #eee">Keep tickets</td><td style="padding:0.5rem 1rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(priceTickets, 'keep_tickets') + '</td></tr>';
-        html += '<tr style="background:#f5f5f5"><td style="padding:0.5rem 1rem;border-bottom:1px solid #eee">Just remove tickets</td><td style="padding:0.5rem 1rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(priceTickets, 'remove_tickets') + '</td></tr>';
-        html += '<tr><td style="padding:0.5rem 1rem;border-bottom:1px solid #eee">New Tickets Required</td><td style="padding:0.5rem 1rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(priceTickets, 'new_tickets') + '</td></tr>';
-        html += '<tr style="background:#f5f5f5"><td style="padding:0.5rem 1rem">Changes included in price?</td><td style="padding:0.5rem 1rem;text-align:right">' + radioDisplay(priceTickets, 'changes_in_price') + '</td></tr>';
+        html += '<div>';
+        html += '<div style="background:#1e3a5f;color:white;padding:0.4rem 0.75rem;border-radius:8px 8px 0 0;font-weight:700;font-size:0.78rem">Price Tickets</div>';
+        html += '<table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;border-top:none;font-size:0.8rem">';
+        html += '<tr style="background:#f5f5f5"><td style="padding:0.35rem 0.6rem;border-bottom:1px solid #eee">Has Price Tickets</td><td style="padding:0.35rem 0.5rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(priceTickets, 'has_tickets') + '</td></tr>';
+        html += '<tr><td style="padding:0.35rem 0.6rem;border-bottom:1px solid #eee">Keep tickets</td><td style="padding:0.35rem 0.5rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(priceTickets, 'keep_tickets') + '</td></tr>';
+        html += '<tr style="background:#f5f5f5"><td style="padding:0.35rem 0.6rem;border-bottom:1px solid #eee">Remove tickets</td><td style="padding:0.35rem 0.5rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(priceTickets, 'remove_tickets') + '</td></tr>';
+        html += '<tr><td style="padding:0.35rem 0.6rem;border-bottom:1px solid #eee">New Tickets</td><td style="padding:0.35rem 0.5rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(priceTickets, 'new_tickets') + '</td></tr>';
+        html += '<tr style="background:#f5f5f5"><td style="padding:0.35rem 0.6rem">In price?</td><td style="padding:0.35rem 0.5rem;text-align:right">' + radioDisplay(priceTickets, 'changes_in_price') + '</td></tr>';
         html += '</table></div>';
     }
 
-    // Re-Packaging section
     if (repackaging) {
-        html += '<div style="margin-top:1rem">';
-        html += '<div style="background:#1e3a5f;color:white;padding:0.5rem 1rem;border-radius:8px 8px 0 0;font-weight:700;font-size:0.85rem">Re-Packaging</div>';
-        html += '<table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;border-top:none;font-size:0.875rem">';
-        html += '<tr style="background:#f5f5f5"><td style="padding:0.5rem 1rem;border-bottom:1px solid #eee">Re-packaging required?</td><td style="padding:0.5rem 1rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(repackaging, 'required') + '</td></tr>';
-        html += '<tr><td style="padding:0.5rem 1rem">Changes included in price?</td><td style="padding:0.5rem 1rem;text-align:right">' + radioDisplay(repackaging, 'changes_in_price') + '</td></tr>';
+        html += '<div>';
+        html += '<div style="background:#1e3a5f;color:white;padding:0.4rem 0.75rem;border-radius:8px 8px 0 0;font-weight:700;font-size:0.78rem">Re-Packaging</div>';
+        html += '<table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;border-top:none;font-size:0.8rem">';
+        html += '<tr style="background:#f5f5f5"><td style="padding:0.35rem 0.6rem;border-bottom:1px solid #eee">Required?</td><td style="padding:0.35rem 0.5rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(repackaging, 'required') + '</td></tr>';
+        html += '<tr><td style="padding:0.35rem 0.6rem">In price?</td><td style="padding:0.35rem 0.5rem;text-align:right">' + radioDisplay(repackaging, 'changes_in_price') + '</td></tr>';
         html += '</table></div>';
     }
 
-    // Label Marketing section
     if (labelMarketing) {
-        html += '<div style="margin-top:1rem">';
-        html += '<div style="background:#1e3a5f;color:white;padding:0.5rem 1rem;border-radius:8px 8px 0 0;font-weight:700;font-size:0.85rem">Label Marketing</div>';
-        html += '<table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;border-top:none;font-size:0.875rem">';
-        html += '<tr style="background:#f5f5f5"><td style="padding:0.5rem 1rem;border-bottom:1px solid #eee">Keep existing Label Marketing</td><td style="padding:0.5rem 1rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(labelMarketing, 'keep_existing') + '</td></tr>';
-        html += '<tr><td style="padding:0.5rem 1rem;border-bottom:1px solid #eee">New Label Marketing Required</td><td style="padding:0.5rem 1rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(labelMarketing, 'new_required') + '</td></tr>';
-        html += '<tr style="background:#f5f5f5"><td style="padding:0.5rem 1rem">Changes included in price?</td><td style="padding:0.5rem 1rem;text-align:right">' + radioDisplay(labelMarketing, 'changes_in_price') + '</td></tr>';
+        html += '<div>';
+        html += '<div style="background:#1e3a5f;color:white;padding:0.4rem 0.75rem;border-radius:8px 8px 0 0;font-weight:700;font-size:0.78rem">Label Marketing</div>';
+        html += '<table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;border-top:none;font-size:0.8rem">';
+        html += '<tr style="background:#f5f5f5"><td style="padding:0.35rem 0.6rem;border-bottom:1px solid #eee">Keep existing</td><td style="padding:0.35rem 0.5rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(labelMarketing, 'keep_existing') + '</td></tr>';
+        html += '<tr><td style="padding:0.35rem 0.6rem;border-bottom:1px solid #eee">New labels</td><td style="padding:0.35rem 0.5rem;text-align:right;border-bottom:1px solid #eee">' + radioDisplay(labelMarketing, 'new_required') + '</td></tr>';
+        html += '<tr style="background:#f5f5f5"><td style="padding:0.35rem 0.6rem">In price?</td><td style="padding:0.35rem 0.5rem;text-align:right">' + radioDisplay(labelMarketing, 'changes_in_price') + '</td></tr>';
         html += '</table></div>';
     }
+
+    html += '</div>'; // end 3-col grid
 
     // Notes
     if (order.notes) {

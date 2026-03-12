@@ -3319,31 +3319,34 @@ function getOrderDetailHTML(order, products) {
     html += '  document.getElementById("soStep2").style.display = "none";';
     html += '}';
 
-    // Load size curve from Import PO
+    // Load size curve from Import PO (handles multiple comma-separated POs)
     html += 'async function loadSizeCurve() {';
-    html += '  var po = orderData.import_po_numbers;';
+    html += '  var poRaw = orderData.import_po_numbers;';
     html += '  var statusDiv = document.getElementById("soCurveStatus");';
     html += '  var container = document.getElementById("soLineItemsContainer");';
-    html += '  if (!po) {';
-    html += '    statusDiv.innerHTML = "<span style=\\"color:#e65100\\">⚠ No Import PO on this order. Sizes will need to be entered manually.</span>";';
+    html += '  if (!poRaw) {';
+    html += '    statusDiv.innerHTML = "<span style=\\"color:#e65100\\">⚠ No Import PO on this order.</span>";';
     html += '    await buildLineItemsTable(null);';
     html += '    return;';
     html += '  }';
-    html += '  statusDiv.innerHTML = "<span style=\\"color:#0088c2\\">Loading size curve from PO: " + po + "...</span>";';
-    html += '  try {';
-    html += '    var resp = await fetch("/api/zoho/po-size-curve/" + encodeURIComponent(po));';
-    html += '    var d = await resp.json();';
-    html += '    if (d.success && d.curve && d.curve.length > 0) {';
-    html += '      sizeCurveData = d.curve;';
-    html += '      statusDiv.innerHTML = "<span style=\\"color:#2e7d32\\">✓ Size curve loaded from " + (d.source === "zoho" ? "Zoho PO" : "local data") + " — " + d.curve.length + " color group(s) found. Enter total qty per color and sizes will auto-distribute.</span>";';
-    html += '    } else {';
-    html += '      statusDiv.innerHTML = "<span style=\\"color:#e65100\\">⚠ Could not load size curve from PO. Enter quantities manually below.</span>";';
-    html += '    }';
-    html += '    await buildLineItemsTable(sizeCurveData);';
-    html += '  } catch(e) {';
-    html += '    statusDiv.innerHTML = "<span style=\\"color:#c62828\\">Error loading PO: " + e.message + "</span>";';
-    html += '    await buildLineItemsTable(null);';
+    // Split multiple POs and try each
+    html += '  var poList = poRaw.split(",").map(function(p) { return p.trim(); }).filter(Boolean);';
+    html += '  statusDiv.innerHTML = "<span style=\\"color:#0088c2\\">Loading size curve from " + poList.length + " PO(s)...</span>";';
+    html += '  var allCurves = [];';
+    html += '  for (var pi = 0; pi < poList.length; pi++) {';
+    html += '    try {';
+    html += '      var resp = await fetch("/api/zoho/po-size-curve/" + encodeURIComponent(poList[pi]));';
+    html += '      var d = await resp.json();';
+    html += '      if (d.success && d.curve && d.curve.length > 0) { allCurves = allCurves.concat(d.curve); }';
+    html += '    } catch(e) { console.log("PO curve error for " + poList[pi] + ":", e); }';
     html += '  }';
+    html += '  if (allCurves.length > 0) {';
+    html += '    sizeCurveData = allCurves;';
+    html += '    statusDiv.innerHTML = "<span style=\\"color:#2e7d32\\">✓ Size curve loaded — " + allCurves.length + " color group(s) found. Enter total qty per color and sizes will auto-distribute.</span>";';
+    html += '  } else {';
+    html += '    statusDiv.innerHTML = "<span style=\\"color:#666\\">Size curve not available from PO. Quantities pre-filled from order request.</span>";';
+    html += '  }';
+    html += '  await buildLineItemsTable(sizeCurveData);';
     html += '}';
 
     // Build line items table

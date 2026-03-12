@@ -150,59 +150,62 @@
         h += '<p>' + styleKeys.length + ' style' + (styleKeys.length !== 1 ? 's' : '') + ' \u2022 ' + orderSelectedProducts.length + ' SKU' + (orderSelectedProducts.length !== 1 ? 's' : '') + ' \u2022 ' + totalQty.toLocaleString() + ' total units</p>';
         h += '</div>';
 
-        // ===== SHARED FIELDS =====
+        // ===== SHARED FIELDS - COMPACT 2-COLUMN LAYOUT =====
         h += '<div class="or-form-section">';
         h += '<h3>Order Information</h3>';
-        h += '<p style="font-size:0.8rem;color:#999;margin:-0.5rem 0 1rem">These fields apply to the entire order. Fields marked with * are required.</p>';
+        h += '<p style="font-size:0.8rem;color:#999;margin:-0.5rem 0 0.75rem">These fields apply to the entire order.</p>';
 
-        h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">';
+        // Top row: Account + Buyer + Customer PO + CXL Date
+        h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.75rem">';
         h += '<div class="or-field"><label>Account Name *</label>';
-        h += '<select id="orCustomerSelect"><option value="">Select a customer...</option></select>';
-        h += '<span style="font-size:0.7rem;color:#999">Select from dropdown, use OTHER if not in list</span></div>';
+        h += '<select id="orCustomerSelect"><option value="">Select customer...</option></select></div>';
         h += '<div class="or-field"><label>Buyer Name</label>';
-        h += '<input type="text" id="orBuyerName" placeholder="Who are you selling to?"></div>';
-        h += '</div>';
-
-        h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem">';
-        h += '<div class="or-field"><label>Customer PO Number</label>';
-        h += '<input type="text" id="orCustomerPO" placeholder="Customer PO number"></div>';
+        h += '<input type="text" id="orBuyerName" placeholder="Buyer name"></div>';
+        h += '<div class="or-field"><label>Customer PO #</label>';
+        h += '<input type="text" id="orCustomerPO" placeholder="Customer PO"></div>';
         h += '<div class="or-field"><label>CXL Date *</label>';
         h += '<input type="date" id="orCxlDate"></div>';
-        h += '<div class="or-field"><label>Customer Price *</label>';
-        h += '<input type="number" id="orCustomerPrice" step="0.01" value="0.00" min="0"></div>';
         h += '</div>';
 
-        // Price Tickets
+        // Radio grids in 3 columns side by side
+        h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.75rem;margin-top:0.5rem">';
+
+        // Price Tickets column
+        h += '<div>';
         h += '<div class="or-section-header">Price Tickets *</div>';
         h += '<div class="or-radio-grid">';
-        h += '<div class="or-radio-grid-header"><span></span><span>Yes</span><span>No</span><span>N/A</span></div>';
-        h += radioGroup('pt_has_tickets', 'Does Stock have Price Tickets *');
-        h += radioGroup('pt_keep_tickets', 'Keep tickets *');
-        h += radioGroup('pt_remove_tickets', 'Just remove tickets *');
-        h += radioGroup('pt_new_tickets', 'New Tickets Required *');
-        h += radioGroup('pt_changes_in_price', 'Are changes included in customer price? *');
-        h += '</div>';
+        h += '<div class="or-radio-grid-header"><span></span><span>Y</span><span>N</span><span>N/A</span></div>';
+        h += radioGroup('pt_has_tickets', 'Has Price Tickets');
+        h += radioGroup('pt_keep_tickets', 'Keep tickets');
+        h += radioGroup('pt_remove_tickets', 'Just remove tickets');
+        h += radioGroup('pt_new_tickets', 'New Tickets Required');
+        h += radioGroup('pt_changes_in_price', 'Changes in cust. price?');
+        h += '</div></div>';
 
-        // Re-Packaging
+        // Re-Packaging column
+        h += '<div>';
         h += '<div class="or-section-header">Re-Packaging *</div>';
         h += '<div class="or-radio-grid">';
-        h += '<div class="or-radio-grid-header"><span></span><span>Yes</span><span>No</span><span>N/A</span></div>';
-        h += radioGroup('rp_required', 'Re-packaging required? *');
-        h += radioGroup('rp_changes_in_price', 'Are changes included in customer price? *');
-        h += '</div>';
+        h += '<div class="or-radio-grid-header"><span></span><span>Y</span><span>N</span><span>N/A</span></div>';
+        h += radioGroup('rp_required', 'Re-packaging required?');
+        h += radioGroup('rp_changes_in_price', 'Changes in cust. price?');
+        h += '</div></div>';
 
-        // Label Marketing
+        // Label Marketing column
+        h += '<div>';
         h += '<div class="or-section-header">Label Marketing *</div>';
         h += '<div class="or-radio-grid">';
-        h += '<div class="or-radio-grid-header"><span></span><span>Yes</span><span>No</span><span>N/A</span></div>';
-        h += radioGroup('lm_keep_existing', 'Keep existing Label Marketing *');
-        h += radioGroup('lm_new_required', 'New Label Marketing Required (replace labels) *');
-        h += radioGroup('lm_changes_in_price', 'Are changes included in customer price? *');
-        h += '</div>';
+        h += '<div class="or-radio-grid-header"><span></span><span>Y</span><span>N</span><span>N/A</span></div>';
+        h += radioGroup('lm_keep_existing', 'Keep existing labels');
+        h += radioGroup('lm_new_required', 'New labels (replace)');
+        h += radioGroup('lm_changes_in_price', 'Changes in cust. price?');
+        h += '</div></div>';
 
-        // Notes
-        h += '<div class="or-field" style="margin-top:1rem"><label>Additional Notes / Instructions</label>';
-        h += '<textarea id="orNotes" rows="3" placeholder="Any additional instructions, ship dates, special requirements..."></textarea></div>';
+        h += '</div>'; // end 3-col radio grid
+
+        // Notes - compact
+        h += '<div class="or-field" style="margin-top:0.75rem"><label>Additional Notes / Instructions</label>';
+        h += '<textarea id="orNotes" rows="2" placeholder="Any additional instructions, ship dates, special requirements..."></textarea></div>';
         h += '</div>';
 
         // ===== PER-STYLE SECTIONS =====
@@ -241,7 +244,8 @@
             });
             h += '</div>';
 
-            // Import PO dropdown
+            // Import PO + Customer Price row
+            h += '<div style="display:grid;grid-template-columns:1fr auto;gap:0.75rem;align-items:start">';
             h += '<div class="or-field">';
             h += '<label>Import PO for ' + bs + ' *</label>';
             h += '<div style="display:flex;gap:0.5rem;align-items:center;position:relative">';
@@ -250,6 +254,11 @@
             h += '<div class="or-style-po-dropdown" id="poDropdown_' + bs + '"></div>';
             h += '</div>';
             h += '<span style="font-size:0.7rem;color:#999">Select from dropdown or type manually</span>';
+            h += '</div>';
+            h += '<div class="or-field" style="width:120px">';
+            h += '<label>Cust. Price *</label>';
+            h += '<input type="number" id="orStylePrice_' + bs + '" step="0.01" value="0.00" min="0" style="text-align:right">';
+            h += '</div>';
             h += '</div>';
 
             // Size grid container
@@ -330,7 +339,7 @@
         });
         if (filtered.length === 0) {
             dd.innerHTML = '<div style="padding:0.75rem;color:#999;font-size:0.8rem">No matching POs</div>';
-            dd.style.display = ''; return;
+            dd.style.display = 'block'; return;
         }
         var h = '';
         filtered.forEach(function(po) {
@@ -346,7 +355,7 @@
             h += '</div>';
         });
         dd.innerHTML = h;
-        dd.style.display = '';
+        dd.style.display = 'block';
         dd.querySelectorAll('.po-dd-item').forEach(function(el) {
             el.addEventListener('click', function() { selectStylePO(this.dataset.bs, this.dataset.po); });
         });
@@ -435,12 +444,16 @@
         var cxlDate = (document.getElementById('orCxlDate') || {}).value || null;
         var stylePoSelections = {};
         var allImportPOs = [];
+        var allPrices = [];
 
         Object.keys(poDataByStyle).forEach(function(bs) {
             var input = document.getElementById('orStylePO_' + bs);
+            var priceInput = document.getElementById('orStylePrice_' + bs);
             var poVal = input ? input.value.trim() : '';
-            stylePoSelections[bs] = { import_po: poVal };
+            var priceVal = priceInput ? parseFloat(priceInput.value) || 0 : 0;
+            stylePoSelections[bs] = { import_po: poVal, customer_price: priceVal };
             if (poVal && allImportPOs.indexOf(poVal) === -1) allImportPOs.push(poVal);
+            if (priceVal > 0) allPrices.push(priceVal);
             if (typeof getStyleSizeGridData === 'function') {
                 var gridData = getStyleSizeGridData(bs);
                 if (gridData) stylePoSelections[bs].size_grid = gridData;
@@ -453,7 +466,7 @@
             buyer_name: (document.getElementById('orBuyerName') || {}).value || '',
             import_po_numbers: allImportPOs.join(', '),
             customer_po_number: (document.getElementById('orCustomerPO') || {}).value || '',
-            customer_price: parseFloat((document.getElementById('orCustomerPrice') || {}).value) || 0,
+            customer_price: allPrices.length > 0 ? allPrices[0] : 0,
             cxl_date: cxlDate, cancel_date: cxlDate,
             unit_color_breakdown: '',
             notes: (document.getElementById('orNotes') || {}).value || '',

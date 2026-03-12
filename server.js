@@ -3127,34 +3127,6 @@ function getOrderDetailHTML(order, products) {
     }
     html += '</div>';
 
-    // Products
-    html += '<div class="products-section"><h2>Selected Products (' + products.length + ')</h2>';
-    html += '<div class="product-grid">';
-    products.forEach(function(p) {
-        var colors = p.colors || [];
-        var totalQty = 0;
-        colors.forEach(function(c) { totalQty += (c.left_to_sell || c.available_qty || 0); });
-        var colorNames = colors.map(function(c) { return c.color_name; }).filter(Boolean);
-
-        var imgUrl = p.image_url;
-        if (imgUrl && imgUrl.indexOf('http') !== 0) {
-            imgUrl = '/api/product-image/' + encodeURIComponent(imgUrl);
-        }
-
-        var catalogUrl = (process.env.APP_URL || 'https://product-catalog-production-682f.up.railway.app') + '/?search=' + encodeURIComponent(p.style_id);
-        html += '<a href="' + catalogUrl + '" target="_blank" class="p-card" style="text-decoration:none;color:inherit;display:block;cursor:pointer;transition:transform 0.15s,box-shadow 0.15s"  onmouseover="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 4px 12px rgba(0,0,0,0.12)\'" onmouseout="this.style.transform=\'\';this.style.boxShadow=\'\'">';
-        if (imgUrl) html += '<img src="' + imgUrl + '" onerror="this.style.display=\'none\'">';
-        html += '<div class="p-card-info">';
-        html += '<div class="p-card-style">' + p.style_id + ' <span style="font-size:0.65rem;color:#999">\u2197 View in Catalog</span></div>';
-        html += '<div class="p-card-name">' + p.name + '</div>';
-        if (colorNames.length > 0) {
-            html += '<div class="p-card-colors">' + colorNames.join(', ') + '</div>';
-        }
-        html += '<div class="p-card-qty">' + totalQty.toLocaleString() + ' units available</div>';
-        html += '</div></a>';
-    });
-    html += '</div></div>';
-
     // ===== ZOHO SALES ORDER CREATION SECTION =====
     html += '<div class="products-section" style="margin-top:0;border-top:none;border-radius:0" id="zohoSOSection">';
     html += '<h2 style="color:#1e3a5f;margin-bottom:1rem;display:flex;align-items:center;gap:0.5rem">';
@@ -3219,10 +3191,13 @@ function getOrderDetailHTML(order, products) {
         size_grid_data: order.size_grid_data || null,
         unit_color_breakdown: order.unit_color_breakdown || '',
         products: products.map(function(p) {
+            var imgUrl = p.image_url;
+            if (imgUrl && imgUrl.indexOf('http') !== 0) imgUrl = '/api/product-image/' + encodeURIComponent(imgUrl);
             return {
                 style_id: p.style_id,
                 base_style: p.base_style,
                 name: p.name,
+                image_url: imgUrl || '',
                 colors: (p.colors || []).map(function(c) { return c.color_name; }).filter(Boolean)
             };
         })
@@ -3365,11 +3340,11 @@ function getOrderDetailHTML(order, products) {
     html += '          curveMatch = curve.find(function(cv) { return cv.base_style === p.base_style && cv.color.toLowerCase() === c.toLowerCase(); });';
     html += '          if (!curveMatch) curveMatch = curve.find(function(cv) { return cv.base_style === p.base_style; });';
     html += '        }';
-    html += '        rows.push({ style_id: p.style_id, base_style: p.base_style, name: p.name, color: c, curve: curveMatch });';
+    html += '        rows.push({ style_id: p.style_id, base_style: p.base_style, name: p.name, color: c, curve: curveMatch, image: p.image_url || "" });';
     html += '      });';
     html += '    } else {';
     html += '      var curveMatch = curve ? curve.find(function(cv) { return cv.base_style === p.base_style; }) : null;';
-    html += '      rows.push({ style_id: p.style_id, base_style: p.base_style, name: p.name, color: "Default", curve: curveMatch });';
+    html += '      rows.push({ style_id: p.style_id, base_style: p.base_style, name: p.name, color: "Default", curve: curveMatch, image: p.image_url || "" });';
     html += '    }';
     html += '  });';
 
@@ -3420,12 +3395,20 @@ function getOrderDetailHTML(order, products) {
     html += '  h += "<th style=\\"text-align:center;padding:0.6rem 0.5rem;font-weight:600;font-size:0.8rem;min-width:85px\\">AMOUNT</th>";';
     html += '  h += "</tr></thead><tbody>";';
 
-    // Data rows
+    // Data rows with style group separators and thumbnails
+    html += '  var lastBase = "";';
     html += '  rows.forEach(function(row, idx) {';
+    // Style group separator when base style changes
+    html += '    var curBase = row.base_style || row.style_id.split("-")[0];';
+    html += '    if (curBase !== lastBase) {';
+    html += '      var colSpan = allSizes.length + 5;';
+    html += '      h += "<tr style=\\"background:#e8ecf0;border-top:2.5px solid #1e3a5f\\"><td colspan=\\"" + colSpan + "\\" style=\\"padding:0.4rem 0.75rem;font-weight:700;color:#1e3a5f;font-size:0.85rem\\">" + curBase + " — " + row.name + "</td></tr>";';
+    html += '      lastBase = curBase;';
+    html += '    }';
     html += '    var bgColor = idx % 2 === 0 ? "#fff" : "#f8f9fb";';
     html += '    h += "<tr style=\\"background:" + bgColor + ";border-bottom:1px solid #eee\\">";';
-    // Style column
-    html += '    h += "<td style=\\"padding:0.5rem 0.75rem;font-weight:600;color:#0088c2;font-size:0.82rem;white-space:nowrap\\">" + row.style_id + "</td>";';
+    // Thumbnail + Style column
+    html += '    h += "<td style=\\"padding:0.3rem 0.5rem;white-space:nowrap\\"><div style=\\"display:flex;align-items:center;gap:0.4rem\\"><img src=\\"" + (row.image || "") + "\\" onerror=\\"this.style.display=\'none\'\\" style=\\"width:28px;height:28px;object-fit:contain;border-radius:4px;background:#f0f0f0;cursor:pointer\\" onclick=\\"var o=document.createElement(\'div\');o.style.cssText=\'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;cursor:pointer\';o.onclick=function(){o.remove()};var i=document.createElement(\'img\');i.src=this.src;i.style.cssText=\'max-width:400px;max-height:400px;border-radius:12px;background:white;padding:4px;box-shadow:0 20px 60px rgba(0,0,0,0.4)\';o.appendChild(i);document.body.appendChild(o)\\"><span style=\\"font-weight:600;color:#0088c2;font-size:0.8rem\\">" + row.style_id + "</span></div></td>";';
     // Color column
     html += '    h += "<td style=\\"padding:0.5rem 0.5rem;color:#333;font-size:0.8rem\\">" + row.color + "</td>";';
     // Size input columns

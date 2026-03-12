@@ -2336,6 +2336,12 @@ app.get('/api/import-pos-for-styles', requireAuth, async function(req, res) {
                     pos[i].size_ratio = sortedSizes.map(function(s) {
                         return s + ':' + Math.round((sizeTotals[s] / grandTotal) * 100) + '%';
                     }).join(' ');
+                    // Also build simplified numerical ratio (e.g. "XS-S-M-L-XL = 1-2-2-1-1")
+                    var minQty = Math.min.apply(null, sortedSizes.map(function(s) { return sizeTotals[s]; }));
+                    if (minQty > 0) {
+                        var ratioNums = sortedSizes.map(function(s) { return Math.round(sizeTotals[s] / minQty); });
+                        pos[i].size_ratio = sortedSizes.join('-') + ' = ' + ratioNums.join('-');
+                    }
                     pos[i].total_units = grandTotal;
                 }
             } catch(e) { /* skip size data for this PO */ }

@@ -85,48 +85,61 @@
 
         var sourceLabel = source === 'zoho' ? 'Import PO' : (source === 'local' ? 'local data' : 'inventory');
         var h = '';
-        h += '<div style="font-size:0.78rem;color:#2e7d32;margin-bottom:0.5rem">\u2713 ' + sizeRows.length + ' color(s) from ' + sourceLabel + '. Enter total qty per color — sizes auto-distribute.</div>';
+        h += '<div style="font-size:0.75rem;color:#2e7d32;margin-bottom:0.35rem">\u2713 ' + sizeRows.length + ' color(s). Enter qty per color \u2014 sizes auto-distribute.</div>';
 
-        // Build color rows — each has a prominent TOTAL input and collapsible size detail
+        // Compact color rows
+        h += '<div style="border:1px solid #e0e0e0;border-radius:8px;overflow:hidden">';
+
+        // Header
+        h += '<div style="display:flex;align-items:center;padding:0.3rem 0.6rem;background:#1e3a5f;color:white;font-size:0.7rem;font-weight:600">';
+        h += '<div style="width:90px">STYLE</div>';
+        h += '<div style="flex:1">COLOR</div>';
+        h += '<div style="width:90px;text-align:center">QTY</div>';
+        h += '<div style="width:30px"></div>';
+        h += '</div>';
+
         sizeRows.forEach(function(row, idx) {
-            var tabIdx = (idx + 1) * 100; // tab index for total inputs so they're sequential
-            h += '<div class="or-sg-row" style="border:1px solid #e8e8e8;border-radius:8px;margin-bottom:0.4rem;background:white">';
+            var tabIdx = (idx + 1) * 100;
+            var bgColor = idx % 2 === 0 ? '#fff' : '#f8f9fb';
 
-            // Main row: style, color, TOTAL input (prominent)
-            h += '<div style="display:flex;align-items:center;gap:0.75rem;padding:0.5rem 0.75rem">';
-            h += '<div style="min-width:80px"><span style="font-weight:600;color:#0088c2;font-size:0.8rem">' + row.style_id + '</span></div>';
-            h += '<div style="flex:1;font-size:0.82rem;color:#333;font-weight:500">' + row.color + '</div>';
-            h += '<div style="display:flex;align-items:center;gap:0.5rem">';
-            h += '<label style="font-size:0.72rem;color:#999;font-weight:600">QTY:</label>';
+            // Compact row
+            h += '<div style="background:' + bgColor + '">';
+            h += '<div style="display:flex;align-items:center;padding:0.25rem 0.6rem;border-bottom:1px solid #f0f0f0">';
+            h += '<div style="width:90px;font-weight:600;color:#0088c2;font-size:0.76rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + row.style_id + '</div>';
+            h += '<div style="flex:1;font-size:0.78rem;color:#333">' + row.color + '</div>';
+            h += '<div style="width:90px;text-align:center">';
             h += '<input type="number" id="orSzTotal_' + bs + '_' + idx + '" tabindex="' + tabIdx + '" value="" min="0" placeholder="0" ';
-            h += 'style="width:80px;text-align:center;padding:0.4rem;border:2px solid #0088c2;border-radius:6px;font-size:1rem;font-weight:700;color:#1e3a5f;background:#f0f8ff" ';
+            h += 'style="width:72px;text-align:center;padding:0.25rem;border:2px solid #0088c2;border-radius:5px;font-size:0.95rem;font-weight:700;color:#1e3a5f;background:#f0f8ff" ';
             h += 'onchange="orStyleAutoDistribute(\'' + bs + '\',' + idx + ',parseInt(this.value)||0)" onkeyup="orStyleAutoDistribute(\'' + bs + '\',' + idx + ',parseInt(this.value)||0)">';
             h += '</div>';
-            h += '<button type="button" onclick="toggleSizeDetail(\'' + bs + '\',' + idx + ')" style="background:none;border:none;cursor:pointer;font-size:0.7rem;color:#999;padding:0.25rem 0.5rem" title="Show/hide size breakdown">\u25BC sizes</button>';
+            h += '<div style="width:30px;text-align:center">';
+            h += '<button type="button" onclick="toggleSizeDetail(\'' + bs + '\',' + idx + ')" style="background:none;border:none;cursor:pointer;font-size:0.65rem;color:#999;padding:0.15rem" title="Size detail">\u25BC</button>';
+            h += '</div>';
             h += '</div>';
 
-            // Size detail row (collapsed by default)
-            h += '<div id="orSzDetail_' + bs + '_' + idx + '" style="display:none;padding:0.25rem 0.75rem 0.5rem;background:#fafbfc;border-top:1px solid #f0f0f0">';
-            h += '<div style="display:flex;gap:0.25rem;flex-wrap:wrap;align-items:center">';
+            // Size detail (collapsed)
+            h += '<div id="orSzDetail_' + bs + '_' + idx + '" style="display:none;padding:0.2rem 0.6rem 0.3rem;background:#fafbfc;border-bottom:1px solid #eee">';
+            h += '<div style="display:flex;gap:0.2rem;flex-wrap:wrap;align-items:center">';
             allSizes.forEach(function(s) {
                 var ratio = (row.curve && row.curve.ratios && row.curve.ratios[s]) ? row.curve.ratios[s] : 0;
                 h += '<div style="text-align:center">';
-                h += '<div style="font-size:0.65rem;color:#999;font-weight:600;margin-bottom:0.1rem">' + s + '</div>';
+                h += '<div style="font-size:0.6rem;color:#999;font-weight:600">' + s + '</div>';
                 h += '<input type="number" id="orSz_' + bs + '_' + idx + '_' + s + '" value="" min="0" tabindex="-1" data-ratio="' + ratio + '" ';
-                h += 'style="width:42px;text-align:center;padding:0.2rem;border:1px solid ' + (ratio > 0 ? '#b3d4fc' : '#ddd') + ';border-radius:4px;font-size:0.72rem;background:' + (ratio > 0 ? '#f0f7ff' : '#fff') + '" ';
+                h += 'style="width:38px;text-align:center;padding:0.15rem;border:1px solid ' + (ratio > 0 ? '#b3d4fc' : '#ddd') + ';border-radius:3px;font-size:0.68rem;background:' + (ratio > 0 ? '#f0f7ff' : '#fff') + '" ';
                 h += 'onchange="orStyleRecalcRow(\'' + bs + '\',' + idx + ')" onkeyup="orStyleRecalcRow(\'' + bs + '\',' + idx + ')">';
                 h += '</div>';
             });
-            h += '</div>';
-            h += '</div>';
+            h += '</div></div>';
 
-            h += '</div>'; // end row
+            h += '</div>'; // end row wrapper
         });
 
-        // Grand total
-        h += '<div style="display:flex;justify-content:flex-end;align-items:center;gap:0.5rem;padding:0.4rem 0.75rem;background:#e8ecf0;border-radius:6px;margin-top:0.25rem">';
-        h += '<span style="font-size:0.82rem;font-weight:600;color:#1e3a5f">Order Total:</span>';
-        h += '<span id="orSzGrandTotal_' + bs + '" style="font-size:1.1rem;font-weight:700;color:#1e3a5f">0</span>';
+        h += '</div>'; // end table
+
+        // Grand total - compact
+        h += '<div style="display:flex;justify-content:flex-end;align-items:center;gap:0.4rem;padding:0.3rem 0.6rem;margin-top:0.2rem">';
+        h += '<span style="font-size:0.78rem;font-weight:600;color:#1e3a5f">Total:</span>';
+        h += '<span id="orSzGrandTotal_' + bs + '" style="font-size:1rem;font-weight:700;color:#1e3a5f">0</span>';
         h += '</div>';
 
         container.innerHTML = h;

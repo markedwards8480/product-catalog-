@@ -1,16 +1,14 @@
 // ==========================================
-// ORDER REQUESTS - Frontend Module (Enhanced)
+// ORDER REQUESTS - Frontend Module (Per-Style PO)
 // ==========================================
-// Loaded via <script src="/order-requests.js">
-// Depends on: allProducts, qtyMode, getImageUrl, userPicks, userNotes (from main app)
+// Each base style gets its own Import PO dropdown + size grid
+// Shared fields (account, buyer, CXL, price, tickets, repack, labels, notes) apply to whole order
 
 (function() {
-    // State
     var orderMode = false;
     var orderSelectedProducts = [];
 
     // ---- Order Selection Mode ----
-
     window.toggleOrderMode = function() {
         orderMode = !orderMode;
         var btn = document.getElementById('orderModeBtn');
@@ -94,7 +92,7 @@
         renderProducts();
     };
 
-    // ---- Helper: build radio group for Yes/No/N/A ----
+    // ---- Helpers ----
     function radioGroup(name, label) {
         var h = '<div class="or-radio-row">';
         h += '<span class="or-radio-label">' + label + '</span>';
@@ -110,14 +108,16 @@
         return el ? el.value : '';
     }
 
-    // ---- Order Review Screen (Enhanced Stock Order Request) ----
+    // ---- Per-style PO data store ----
+    var poDataByStyle = {};
 
+    // ---- Order Review Screen ----
     window.showOrderReview = function() {
         var overlay = document.getElementById('orderReviewOverlay');
         var content = document.getElementById('orderReviewContent');
         if (!overlay || !content) return;
 
-        // Build product list
+        // Group products by base style
         var styles = {};
         var totalQty = 0;
         var allStyleIds = [];
@@ -126,7 +126,7 @@
             if (!pr) return;
             var baseStyle = pr.style_id.split('-')[0];
             if (!styles[baseStyle]) {
-                styles[baseStyle] = { name: pr.name, variants: [], image: pr.image_url };
+                styles[baseStyle] = { name: pr.name, variants: [], image: pr.image_url, baseStyle: baseStyle };
             }
             if (allStyleIds.indexOf(pr.style_id) === -1) allStyleIds.push(pr.style_id);
             var qty = 0;
@@ -143,41 +143,18 @@
 
         var styleKeys = Object.keys(styles);
 
-        // Build HTML
+        // ===== Build HTML =====
         var h = '';
         h += '<div class="or-review-header">';
         h += '<h2>Stock Order Request</h2>';
         h += '<p>' + styleKeys.length + ' style' + (styleKeys.length !== 1 ? 's' : '') + ' \u2022 ' + orderSelectedProducts.length + ' SKU' + (orderSelectedProducts.length !== 1 ? 's' : '') + ' \u2022 ' + totalQty.toLocaleString() + ' total units</p>';
         h += '</div>';
 
-        // Selected products list (collapsible)
-        h += '<details class="or-products-details" open>';
-        h += '<summary style="cursor:pointer;font-weight:600;margin-bottom:0.5rem;color:#1e3a5f">Selected Products (' + orderSelectedProducts.length + ')</summary>';
-        h += '<div class="or-products-list">';
-        styleKeys.forEach(function(bs) {
-            var s = styles[bs];
-            s.variants.forEach(function(v) {
-                var imgUrl = typeof getImageUrl === 'function' ? getImageUrl(v.image) : v.image;
-                h += '<div class="or-product-row">';
-                h += '<img src="' + (imgUrl || '') + '" onerror="this.style.display=\'none\'" class="or-product-thumb">';
-                h += '<div class="or-product-info">';
-                h += '<div class="or-product-style">' + v.style_id + '</div>';
-                h += '<div class="or-product-name">' + v.name + '</div>';
-                if (v.colors) h += '<div class="or-product-colors">' + v.colors + '</div>';
-                h += '</div>';
-                h += '<div class="or-product-qty">' + v.qty.toLocaleString() + ' units</div>';
-                h += '<button class="or-remove-btn" onclick="removeFromOrder(' + v.id + ')">\u2715</button>';
-                h += '</div>';
-            });
-        });
-        h += '</div></details>';
-
-        // ===== STOCK ORDER REQUEST FORM =====
+        // ===== SHARED FIELDS =====
         h += '<div class="or-form-section">';
-        h += '<h3>Stock Order Request</h3>';
-        h += '<p style="font-size:0.8rem;color:#999;margin:-0.5rem 0 1rem">Fields marked with * are required</p>';
+        h += '<h3>Order Information</h3>';
+        h += '<p style="font-size:0.8rem;color:#999;margin:-0.5rem 0 1rem">These fields apply to the entire order. Fields marked with * are required.</p>';
 
-        // Row: Account Name + Buyer Name
         h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">';
         h += '<div class="or-field"><label>Account Name *</label>';
         h += '<select id="orCustomerSelect"><option value="">Select a customer...</option></select>';
@@ -186,34 +163,19 @@
         h += '<input type="text" id="orBuyerName" placeholder="Who are you selling to?"></div>';
         h += '</div>';
 
-        // Import PO #(s) - dropdown with typeahead
-        h += '<div class="or-field"><label>Import PO #(s) *</label>';
-        h += '<div style="position:relative">';
-        h += '<input type="text" id="orImportPO" placeholder="Loading import POs..." list="importPOList" autocomplete="off">';
-        h += '<datalist id="importPOList"></datalist>';
-        h += '</div>';
-        h += '<span style="font-size:0.7rem;color:#999">Select from dropdown or type manually. Shows Import POs for selected styles.</span></div>';
-
-        // Customer PO Number
+        h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem">';
         h += '<div class="or-field"><label>Customer PO Number</label>';
         h += '<input type="text" id="orCustomerPO" placeholder="Customer PO number"></div>';
-
-        // Row: Customer Price + CXL Date
-        h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">';
+        h += '<div class="or-field"><label>CXL Date *</label>';
+        h += '<input type="date" id="orCxlDate"></div>';
         h += '<div class="or-field"><label>Customer Price *</label>';
         h += '<input type="number" id="orCustomerPrice" step="0.01" value="0.00" min="0"></div>';
-        h += '<div class="or-field"><label>CXL Date *</label>';
-        h += '<input type="date" id="orCxlDate">';
-        h += '<span style="font-size:0.7rem;color:#999">dd-MMM-yyyy</span></div>';
         h += '</div>';
 
-        // Unit Color Breakdown
-        h += '<div class="or-field"><label>Unit Color Breakdown</label>';
-        h += '<textarea id="orUnitColorBreakdown" rows="4" placeholder="Enter here, free form\n\nExample:\nNavy: S-50, M-100, L-100, XL-50\nBlack: S-25, M-75, L-75, XL-25"></textarea></div>';
-
-        // ===== PRICE TICKETS SECTION =====
+        // Price Tickets
         h += '<div class="or-section-header">Price Tickets *</div>';
         h += '<div class="or-radio-grid">';
+        h += '<div class="or-radio-grid-header"><span></span><span>Yes</span><span>No</span><span>N/A</span></div>';
         h += radioGroup('pt_has_tickets', 'Does Stock have Price Tickets *');
         h += radioGroup('pt_keep_tickets', 'Keep tickets *');
         h += radioGroup('pt_remove_tickets', 'Just remove tickets *');
@@ -221,16 +183,18 @@
         h += radioGroup('pt_changes_in_price', 'Are changes included in customer price? *');
         h += '</div>';
 
-        // ===== RE-PACKAGING SECTION =====
+        // Re-Packaging
         h += '<div class="or-section-header">Re-Packaging *</div>';
         h += '<div class="or-radio-grid">';
+        h += '<div class="or-radio-grid-header"><span></span><span>Yes</span><span>No</span><span>N/A</span></div>';
         h += radioGroup('rp_required', 'Re-packaging required? *');
         h += radioGroup('rp_changes_in_price', 'Are changes included in customer price? *');
         h += '</div>';
 
-        // ===== LABEL MARKETING SECTION =====
+        // Label Marketing
         h += '<div class="or-section-header">Label Marketing *</div>';
         h += '<div class="or-radio-grid">';
+        h += '<div class="or-radio-grid-header"><span></span><span>Yes</span><span>No</span><span>N/A</span></div>';
         h += radioGroup('lm_keep_existing', 'Keep existing Label Marketing *');
         h += radioGroup('lm_new_required', 'New Label Marketing Required (replace labels) *');
         h += radioGroup('lm_changes_in_price', 'Are changes included in customer price? *');
@@ -238,7 +202,61 @@
 
         // Notes
         h += '<div class="or-field" style="margin-top:1rem"><label>Additional Notes / Instructions</label>';
-        h += '<textarea id="orNotes" rows="4" placeholder="Any additional instructions, ship dates, special requirements..."></textarea></div>';
+        h += '<textarea id="orNotes" rows="3" placeholder="Any additional instructions, ship dates, special requirements..."></textarea></div>';
+        h += '</div>';
+
+        // ===== PER-STYLE SECTIONS =====
+        h += '<div class="or-form-section" style="margin-top:1.5rem">';
+        h += '<h3>Import PO & Size Breakdown by Style</h3>';
+        h += '<p style="font-size:0.8rem;color:#999;margin:-0.5rem 0 1rem">Select an Import PO for each style and enter size quantities.</p>';
+
+        styleKeys.forEach(function(bs) {
+            var s = styles[bs];
+            var imgUrl = typeof getImageUrl === 'function' ? getImageUrl(s.image) : s.image;
+            var variantCount = s.variants.length;
+            var styleQty = s.variants.reduce(function(sum, v) { return sum + v.qty; }, 0);
+
+            h += '<div class="or-style-card" data-base-style="' + bs + '">';
+            h += '<div class="or-style-card-header" onclick="toggleStyleCard(\'' + bs + '\')">';
+            h += '<div style="display:flex;align-items:center;gap:0.75rem;flex:1;min-width:0">';
+            h += '<img src="' + (imgUrl || '') + '" onerror="this.style.display=\'none\'" style="width:50px;height:50px;object-fit:contain;border-radius:8px;background:#f8f9fa;flex-shrink:0">';
+            h += '<div style="min-width:0">';
+            h += '<div style="font-weight:700;color:#1e3a5f;font-size:0.95rem">' + bs + ' \u2014 ' + s.name + '</div>';
+            h += '<div style="font-size:0.78rem;color:#666">' + variantCount + ' variant' + (variantCount !== 1 ? 's' : '') + ' \u2022 ' + styleQty.toLocaleString() + ' units</div>';
+            h += '</div></div>';
+            h += '<div style="display:flex;align-items:center;gap:0.5rem">';
+            h += '<span class="or-style-po-badge" id="poLabel_' + bs + '">No PO selected</span>';
+            h += '<span class="or-style-toggle" id="toggle_' + bs + '">\u25BC</span>';
+            h += '</div></div>';
+
+            h += '<div class="or-style-card-body" id="styleBody_' + bs + '">';
+
+            // Compact variant list
+            h += '<div style="margin-bottom:0.75rem;padding:0.5rem;background:#f8f9fa;border-radius:6px;font-size:0.78rem;color:#666">';
+            s.variants.forEach(function(v) {
+                h += '<span style="display:inline-block;margin:0.15rem 0.5rem 0.15rem 0">';
+                h += '<span style="color:#0088c2;font-weight:600">' + v.style_id + '</span>';
+                if (v.colors) h += ' <span style="color:#999">(' + v.colors + ')</span>';
+                h += '</span>';
+            });
+            h += '</div>';
+
+            // Import PO dropdown
+            h += '<div class="or-field">';
+            h += '<label>Import PO for ' + bs + ' *</label>';
+            h += '<div style="display:flex;gap:0.5rem;align-items:center;position:relative">';
+            h += '<input type="text" id="orStylePO_' + bs + '" placeholder="Loading POs for ' + bs + '..." autocomplete="off" style="flex:1" oninput="filterStylePODropdown(\'' + bs + '\', this.value)" onfocus="showStylePODropdown(\'' + bs + '\')">';
+            h += '<a id="orStylePOLink_' + bs + '" href="#" target="_blank" style="display:none;font-size:0.75rem;white-space:nowrap;color:#0088c2;text-decoration:none;font-weight:600;padding:0.4rem 0.6rem;border:1px solid #0088c2;border-radius:4px;background:#f0f8ff">View in Zoho</a>';
+            h += '<div class="or-style-po-dropdown" id="poDropdown_' + bs + '"></div>';
+            h += '</div>';
+            h += '<span style="font-size:0.7rem;color:#999">Select from dropdown or type manually</span>';
+            h += '</div>';
+
+            // Size grid container
+            h += '<div id="orStyleSizeGrid_' + bs + '" class="or-style-size-grid"></div>';
+
+            h += '</div></div>';
+        });
 
         h += '</div>';
 
@@ -251,63 +269,128 @@
         content.innerHTML = h;
         overlay.classList.add('active');
 
-        // Load data
+        // Load shared data
         loadOrderCustomers();
-        loadImportPOs(allStyleIds);
+
+        // Load POs per style
+        poDataByStyle = {};
+        styleKeys.forEach(function(bs) { loadStyleImportPOs(bs, styles[bs]); });
+
+        // Close dropdowns on outside click
+        document.addEventListener('click', function(e) {
+            styleKeys.forEach(function(bs) {
+                var dd = document.getElementById('poDropdown_' + bs);
+                var input = document.getElementById('orStylePO_' + bs);
+                if (dd && e.target !== input && !dd.contains(e.target)) dd.style.display = 'none';
+            });
+        });
     };
 
-    // ---- Load Import POs for the selected styles ----
-    function loadImportPOs(styleIds) {
-        var input = document.getElementById('orImportPO');
+    // ---- Style card toggle ----
+    window.toggleStyleCard = function(bs) {
+        var body = document.getElementById('styleBody_' + bs);
+        var toggle = document.getElementById('toggle_' + bs);
+        if (!body) return;
+        if (body.style.display === 'none') { body.style.display = ''; if (toggle) toggle.textContent = '\u25BC'; }
+        else { body.style.display = 'none'; if (toggle) toggle.textContent = '\u25B6'; }
+    };
+
+    // ---- Load Import POs for a specific base style ----
+    function loadStyleImportPOs(bs, styleData) {
+        var input = document.getElementById('orStylePO_' + bs);
         if (!input) return;
-        if (styleIds.length === 0) {
-            input.placeholder = 'No styles selected';
-            return;
-        }
+        var styleIds = styleData.variants.map(function(v) { return v.style_id; });
+
         fetch('/api/import-pos-for-styles?styles=' + encodeURIComponent(styleIds.join(',')))
             .then(function(r) { return r.json(); })
             .then(function(d) {
                 if (!d.success || !d.importPOs || d.importPOs.length === 0) {
-                    input.placeholder = 'No import POs found - type manually';
+                    input.placeholder = 'No import POs found \u2014 type manually';
+                    poDataByStyle[bs] = { importPOs: [], selectedPO: '' };
                     return;
                 }
-                input.placeholder = 'Select or type Import PO #...';
-                var datalist = document.getElementById('importPOList');
-                if (!datalist) return;
-                datalist.innerHTML = '';
-                d.importPOs.forEach(function(po) {
-                    var opt = document.createElement('option');
-                    var dateStr = po.doc_date ? new Date(po.doc_date).toLocaleDateString() : '';
-                    var label = po.document_number;
-                    if (po.customer_vendor) label += ' - ' + po.customer_vendor;
-                    if (dateStr) label += ' (' + dateStr + ')';
-                    if (po.status) label += ' [' + po.status + ']';
-                    opt.value = po.document_number;
-                    opt.label = label;
-                    opt.textContent = label;
-                    datalist.appendChild(opt);
-                });
+                input.placeholder = 'Click to select Import PO...';
+                poDataByStyle[bs] = { importPOs: d.importPOs, selectedPO: '' };
+                renderStylePODropdown(bs, '');
             })
             .catch(function(e) {
-                console.error('Error loading import POs:', e);
+                console.error('Error loading POs for ' + bs + ':', e);
                 input.placeholder = 'Type Import PO # manually';
+                poDataByStyle[bs] = { importPOs: [], selectedPO: '' };
             });
     }
 
+    function renderStylePODropdown(bs, filter) {
+        var dd = document.getElementById('poDropdown_' + bs);
+        if (!dd || !poDataByStyle[bs]) return;
+        var f = (filter || '').toLowerCase();
+        var all = poDataByStyle[bs].importPOs || [];
+        var filtered = all.filter(function(po) {
+            return !f || po.document_number.toLowerCase().indexOf(f) !== -1 || (po.customer_vendor || '').toLowerCase().indexOf(f) !== -1;
+        });
+        if (filtered.length === 0) {
+            dd.innerHTML = '<div style="padding:0.75rem;color:#999;font-size:0.8rem">No matching POs</div>';
+            dd.style.display = ''; return;
+        }
+        var h = '';
+        filtered.forEach(function(po) {
+            var dateStr = po.doc_date ? new Date(po.doc_date).toLocaleDateString() : '';
+            h += '<div class="po-dd-item" data-po="' + po.document_number + '" data-bs="' + bs + '" style="padding:0.5rem 0.75rem;cursor:pointer;border-bottom:1px solid #f0f0f0">';
+            h += '<div style="display:flex;justify-content:space-between;align-items:center">';
+            h += '<span style="font-weight:700;color:#1e3a5f;font-size:0.88rem">' + po.document_number + '</span>';
+            h += '<span style="font-size:0.72rem;color:#999">' + (po.status || '') + '</span>';
+            h += '</div>';
+            if (po.customer_vendor) h += '<div style="font-size:0.74rem;color:#666;margin-top:0.1rem">' + po.customer_vendor + (dateStr ? ' \u2014 ' + dateStr : '') + '</div>';
+            if (po.size_ratio) h += '<div style="font-size:0.72rem;color:#0088c2;margin-top:0.15rem;font-weight:500">Sizes: ' + po.size_ratio + '</div>';
+            if (po.total_units) h += '<div style="font-size:0.7rem;color:#999;margin-top:0.1rem">' + parseInt(po.total_units).toLocaleString() + ' total units</div>';
+            h += '</div>';
+        });
+        dd.innerHTML = h;
+        dd.style.display = '';
+        dd.querySelectorAll('.po-dd-item').forEach(function(el) {
+            el.addEventListener('click', function() { selectStylePO(this.dataset.bs, this.dataset.po); });
+        });
+    }
+
+    window.showStylePODropdown = function(bs) {
+        var input = document.getElementById('orStylePO_' + bs);
+        renderStylePODropdown(bs, input ? input.value : '');
+    };
+    window.filterStylePODropdown = function(bs, val) { renderStylePODropdown(bs, val); };
+
+    window.selectStylePO = function(bs, poNum) {
+        var input = document.getElementById('orStylePO_' + bs);
+        if (input) input.value = poNum;
+        var dd = document.getElementById('poDropdown_' + bs);
+        if (dd) dd.style.display = 'none';
+        var badge = document.getElementById('poLabel_' + bs);
+        if (badge) { badge.textContent = 'PO ' + poNum; badge.className = 'or-style-po-badge selected'; }
+        if (poDataByStyle[bs]) poDataByStyle[bs].selectedPO = poNum;
+        updateStylePOZohoLink(bs, poNum);
+        if (typeof loadStyleSizeGrid === 'function') loadStyleSizeGrid(bs, poNum);
+    };
+
+    function updateStylePOZohoLink(bs, poNum) {
+        var link = document.getElementById('orStylePOLink_' + bs);
+        if (!link) return;
+        if (!poNum || poNum.length < 3) { link.style.display = 'none'; return; }
+        link.style.display = ''; link.textContent = 'Looking up...'; link.href = '#';
+        fetch('/api/zoho-link/purchaseorder/' + encodeURIComponent(poNum))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (d.success && d.url) { link.href = d.url; link.style.display = ''; link.textContent = 'View PO in Zoho \u2197'; }
+                else { link.style.display = 'none'; }
+            }).catch(function() { link.style.display = 'none'; });
+    }
+
+    // ---- Customer dropdown ----
     var orderCustomersLoaded = false;
     var orderCustomerList = [];
 
     function loadOrderCustomers() {
-        if (orderCustomersLoaded && orderCustomerList.length > 0) {
-            populateCustomerDropdown();
-            return;
-        }
+        if (orderCustomersLoaded && orderCustomerList.length > 0) { populateCustomerDropdown(); return; }
         fetch('/api/customers').then(function(r) { return r.json(); }).then(function(d) {
-            if (d.success) {
-                orderCustomerList = d.customers.map(function(c) { return c.name; });
-                orderCustomersLoaded = true;
-                populateCustomerDropdown();
-            }
+            if (d.success) { orderCustomerList = d.customers.map(function(c) { return c.name; }); orderCustomersLoaded = true; populateCustomerDropdown(); }
         }).catch(function(e) { console.error('Error loading customers:', e); });
     }
 
@@ -317,34 +400,19 @@
         var current = sel.value;
         sel.innerHTML = '<option value="">Select a customer...</option>';
         orderCustomerList.forEach(function(name) {
-            var opt = document.createElement('option');
-            opt.value = name;
-            opt.textContent = name;
-            sel.appendChild(opt);
+            var opt = document.createElement('option'); opt.value = name; opt.textContent = name; sel.appendChild(opt);
         });
-        // Add OTHER option
-        var otherOpt = document.createElement('option');
-        otherOpt.value = '__OTHER__';
-        otherOpt.textContent = '-- OTHER (type below) --';
-        sel.appendChild(otherOpt);
+        var otherOpt = document.createElement('option'); otherOpt.value = '__OTHER__'; otherOpt.textContent = '-- OTHER (type below) --'; sel.appendChild(otherOpt);
         if (current) sel.value = current;
-
-        // Handle OTHER selection
         sel.addEventListener('change', function() {
             var otherInput = document.getElementById('orCustomerOther');
             if (sel.value === '__OTHER__') {
                 if (!otherInput) {
-                    var inp = document.createElement('input');
-                    inp.type = 'text';
-                    inp.id = 'orCustomerOther';
-                    inp.placeholder = 'Enter account name...';
-                    inp.style.marginTop = '0.5rem';
-                    sel.parentNode.appendChild(inp);
-                    inp.focus();
+                    var inp = document.createElement('input'); inp.type = 'text'; inp.id = 'orCustomerOther';
+                    inp.placeholder = 'Enter account name...'; inp.style.marginTop = '0.5rem';
+                    sel.parentNode.appendChild(inp); inp.focus();
                 }
-            } else if (otherInput) {
-                otherInput.remove();
-            }
+            } else if (otherInput) { otherInput.remove(); }
         });
     }
 
@@ -354,7 +422,6 @@
     };
 
     // ---- Submit Order ----
-
     window.submitOrder = function() {
         var customerSel = document.getElementById('orCustomerSelect');
         var customer = customerSel.value;
@@ -362,67 +429,52 @@
             var otherInput = document.getElementById('orCustomerOther');
             customer = otherInput ? otherInput.value.trim() : '';
         }
-        if (!customer) {
-            alert('Please select or enter a customer/account name');
-            return;
-        }
-        if (orderSelectedProducts.length === 0) {
-            alert('No products selected');
-            return;
-        }
+        if (!customer) { alert('Please select or enter a customer/account name'); return; }
+        if (orderSelectedProducts.length === 0) { alert('No products selected'); return; }
 
-        var importPO = (document.getElementById('orImportPO') || {}).value || '';
         var cxlDate = (document.getElementById('orCxlDate') || {}).value || null;
+        var stylePoSelections = {};
+        var allImportPOs = [];
 
-        // Collect all form data
+        Object.keys(poDataByStyle).forEach(function(bs) {
+            var input = document.getElementById('orStylePO_' + bs);
+            var poVal = input ? input.value.trim() : '';
+            stylePoSelections[bs] = { import_po: poVal };
+            if (poVal && allImportPOs.indexOf(poVal) === -1) allImportPOs.push(poVal);
+            if (typeof getStyleSizeGridData === 'function') {
+                var gridData = getStyleSizeGridData(bs);
+                if (gridData) stylePoSelections[bs].size_grid = gridData;
+            }
+        });
+
         var formData = {
             customer_name: customer,
             product_ids: orderSelectedProducts,
             buyer_name: (document.getElementById('orBuyerName') || {}).value || '',
-            import_po_numbers: importPO,
+            import_po_numbers: allImportPOs.join(', '),
             customer_po_number: (document.getElementById('orCustomerPO') || {}).value || '',
             customer_price: parseFloat((document.getElementById('orCustomerPrice') || {}).value) || 0,
-            cxl_date: cxlDate,
-            cancel_date: cxlDate,
-            unit_color_breakdown: (document.getElementById('orUnitColorBreakdown') || {}).value || '',
+            cxl_date: cxlDate, cancel_date: cxlDate,
+            unit_color_breakdown: '',
             notes: (document.getElementById('orNotes') || {}).value || '',
-            price_tickets: {
-                has_tickets: getRadioVal('pt_has_tickets'),
-                keep_tickets: getRadioVal('pt_keep_tickets'),
-                remove_tickets: getRadioVal('pt_remove_tickets'),
-                new_tickets: getRadioVal('pt_new_tickets'),
-                changes_in_price: getRadioVal('pt_changes_in_price')
-            },
-            repackaging: {
-                required: getRadioVal('rp_required'),
-                changes_in_price: getRadioVal('rp_changes_in_price')
-            },
-            label_marketing: {
-                keep_existing: getRadioVal('lm_keep_existing'),
-                new_required: getRadioVal('lm_new_required'),
-                changes_in_price: getRadioVal('lm_changes_in_price')
-            }
+            price_tickets: { has_tickets: getRadioVal('pt_has_tickets'), keep_tickets: getRadioVal('pt_keep_tickets'), remove_tickets: getRadioVal('pt_remove_tickets'), new_tickets: getRadioVal('pt_new_tickets'), changes_in_price: getRadioVal('pt_changes_in_price') },
+            repackaging: { required: getRadioVal('rp_required'), changes_in_price: getRadioVal('rp_changes_in_price') },
+            label_marketing: { keep_existing: getRadioVal('lm_keep_existing'), new_required: getRadioVal('lm_new_required'), changes_in_price: getRadioVal('lm_changes_in_price') },
+            style_po_selections: stylePoSelections
         };
 
         var btn = document.getElementById('orSubmitOrderBtn');
-        btn.disabled = true;
-        btn.textContent = 'Submitting...';
+        btn.disabled = true; btn.textContent = 'Submitting...';
 
         fetch('/api/order-requests', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(formData)
         }).then(function(r) { return r.json(); }).then(function(d) {
-            btn.disabled = false;
-            btn.textContent = 'Submit Stock Order Request';
-            if (d.success) {
-                showOrderSuccess(d.order);
-            } else {
-                alert('Error: ' + (d.error || 'Unknown error'));
-            }
+            btn.disabled = false; btn.textContent = 'Submit Stock Order Request';
+            if (d.success) showOrderSuccess(d.order);
+            else alert('Error: ' + (d.error || 'Unknown error'));
         }).catch(function(e) {
-            btn.disabled = false;
-            btn.textContent = 'Submit Stock Order Request';
+            btn.disabled = false; btn.textContent = 'Submit Stock Order Request';
             alert('Error: ' + e.message);
         });
     };
@@ -430,225 +482,103 @@
     function showOrderSuccess(order) {
         var content = document.getElementById('orderReviewContent');
         if (!content) return;
-
         var detailFullUrl = (order.app_url || window.location.origin) + order.detail_url;
         var subject = 'Stock Order Request ' + order.request_number + ' - ' + order.customer_name;
-        var body = 'New Stock Order Request: ' + order.request_number + '\n\n';
-        body += 'Account: ' + order.customer_name + '\n';
+        var body = 'New Stock Order Request: ' + order.request_number + '\n\nAccount: ' + order.customer_name + '\n';
         if (order.buyer_name) body += 'Buyer: ' + order.buyer_name + '\n';
         body += 'Products: ' + (order.product_count || 'N/A') + ' items\n';
-        if (order.import_po_numbers) body += 'Import PO: ' + order.import_po_numbers + '\n';
+        if (order.import_po_numbers) body += 'Import PO(s): ' + order.import_po_numbers + '\n';
         if (order.customer_po_number) body += 'Customer PO: ' + order.customer_po_number + '\n';
         if (order.customer_price > 0) body += 'Customer Price: $' + parseFloat(order.customer_price).toFixed(2) + '\n';
         if (order.cxl_date) body += 'CXL Date: ' + order.cxl_date + '\n';
         body += 'Submitted by: ' + (order.user_name || 'Unknown') + '\n';
         if (order.notes) body += '\nNotes:\n' + order.notes + '\n';
         body += '\nView full order details:\n' + detailFullUrl + '\n';
-
         var toEmail = order.notify_email || '';
         var mailtoUrl = 'mailto:' + encodeURIComponent(toEmail) + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
 
-        var h = '<div class="or-success">';
-        h += '<div class="or-success-icon">\u2705</div>';
+        var h = '<div class="or-success"><div class="or-success-icon">\u2705</div>';
         h += '<h2>Stock Order Request Saved!</h2>';
         h += '<div class="or-success-number">' + order.request_number + '</div>';
-        h += '<p style="color:#666;margin:0.5rem 0 1.5rem">Your order request has been saved and the order entry team has been notified. You can also email the details:</p>';
+        h += '<p style="color:#666;margin:0.5rem 0 1.5rem">Your order request has been saved and the order entry team has been notified.</p>';
         h += '<div style="display:flex;flex-direction:column;gap:0.75rem;align-items:center">';
         h += '<a href="' + mailtoUrl + '" class="btn btn-primary" style="background:#0088c2;border-color:#0088c2;text-decoration:none;padding:0.75rem 2rem;font-size:1rem;display:inline-block">\ud83d\udce7 Email Order Details</a>';
         h += '<a href="' + detailFullUrl + '" target="_blank" class="or-detail-link">View Order Details \u2192</a>';
-        h += '</div>';
-        h += '<button class="btn btn-secondary" onclick="finishOrder()" style="margin-top:1.5rem">Done</button>';
-        h += '</div>';
+        h += '</div><button class="btn btn-secondary" onclick="finishOrder()" style="margin-top:1.5rem">Done</button></div>';
         content.innerHTML = h;
     }
 
     window.finishOrder = function() {
-        orderMode = false;
-        orderSelectedProducts = [];
+        orderMode = false; orderSelectedProducts = [];
         var btn = document.getElementById('orderModeBtn');
-        if (btn) {
-            btn.textContent = '\ud83d\udccb Create Order';
-            btn.classList.remove('active');
-        }
-        updateOrderBar();
-        closeOrderReview();
-        renderProducts();
+        if (btn) { btn.textContent = '\ud83d\udccb Create Order'; btn.classList.remove('active'); }
+        updateOrderBar(); closeOrderReview(); renderProducts();
     };
 
-    // ---- Orders List (for viewing past orders) ----
-
+    // ---- Orders List ----
     var ordersCustomersLoaded = false;
-
     window.toggleOrdersList = function() {
         var panel = document.getElementById('ordersListPanel');
         if (!panel) {
-            var main = document.querySelector('.main');
-            if (!main) return;
-            var div = document.createElement('div');
-            div.id = 'ordersListPanel';
-            div.className = 'orders-list-panel';
-            div.innerHTML = '<div class="orders-list-header"><h2>\ud83d\udccb Order Requests</h2><button class="btn btn-secondary btn-sm" onclick="closeOrdersList()">\u2715 Close</button></div>' +
-                '<div class="orders-list-filters">' +
-                '<select id="ordersStatusFilter" onchange="loadOrdersList()"><option value="all">All Status</option><option value="pending">Pending</option><option value="processing">Processing</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option></select>' +
-                '<select id="ordersCustomerFilter" onchange="loadOrdersList()"><option value="all">All Customers</option></select>' +
-                '<span id="ordersResultCount" style="font-size:0.8rem;color:#999;margin-left:0.5rem"></span>' +
-                '</div>' +
-                '<div id="ordersListContent">Loading...</div>';
-            main.insertBefore(div, main.firstChild);
-            loadOrdersCustomerFilter();
-            loadOrdersList();
-        } else {
-            panel.style.display = panel.style.display === 'none' ? '' : 'none';
-            if (panel.style.display !== 'none') loadOrdersList();
-        }
+            var main = document.querySelector('.main'); if (!main) return;
+            var div = document.createElement('div'); div.id = 'ordersListPanel'; div.className = 'orders-list-panel';
+            div.innerHTML = '<div class="orders-list-header"><h2>\ud83d\udccb Order Requests</h2><button class="btn btn-secondary btn-sm" onclick="closeOrdersList()">\u2715 Close</button></div><div class="orders-list-filters"><select id="ordersStatusFilter" onchange="loadOrdersList()"><option value="all">All Status</option><option value="pending">Pending</option><option value="processing">Processing</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option></select><select id="ordersCustomerFilter" onchange="loadOrdersList()"><option value="all">All Customers</option></select><span id="ordersResultCount" style="font-size:0.8rem;color:#999;margin-left:0.5rem"></span></div><div id="ordersListContent">Loading...</div>';
+            main.insertBefore(div, main.firstChild); loadOrdersCustomerFilter(); loadOrdersList();
+        } else { panel.style.display = panel.style.display === 'none' ? '' : 'none'; if (panel.style.display !== 'none') loadOrdersList(); }
     };
-
     function loadOrdersCustomerFilter() {
         if (ordersCustomersLoaded) return;
-        fetch('/api/order-requests/customers')
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
-                if (d.success && d.customers) {
-                    var sel = document.getElementById('ordersCustomerFilter');
-                    if (!sel) return;
-                    d.customers.forEach(function(c) {
-                        var opt = document.createElement('option');
-                        opt.value = c;
-                        opt.textContent = c;
-                        sel.appendChild(opt);
-                    });
-                    ordersCustomersLoaded = true;
-                }
-            }).catch(function() {});
+        fetch('/api/order-requests/customers').then(function(r) { return r.json(); }).then(function(d) {
+            if (d.success && d.customers) {
+                var sel = document.getElementById('ordersCustomerFilter'); if (!sel) return;
+                d.customers.forEach(function(c) { var opt = document.createElement('option'); opt.value = c; opt.textContent = c; sel.appendChild(opt); });
+                ordersCustomersLoaded = true;
+            }
+        }).catch(function() {});
     }
-
-    window.closeOrdersList = function() {
-        var panel = document.getElementById('ordersListPanel');
-        if (panel) panel.style.display = 'none';
-    };
-
+    window.closeOrdersList = function() { var panel = document.getElementById('ordersListPanel'); if (panel) panel.style.display = 'none'; };
     window.loadOrdersList = function() {
-        var statusEl = document.getElementById('ordersStatusFilter');
-        var customerEl = document.getElementById('ordersCustomerFilter');
-        var status = statusEl ? statusEl.value : 'all';
-        var customer = customerEl ? customerEl.value : 'all';
+        var statusEl = document.getElementById('ordersStatusFilter'); var customerEl = document.getElementById('ordersCustomerFilter');
+        var status = statusEl ? statusEl.value : 'all'; var customer = customerEl ? customerEl.value : 'all';
         var url = '/api/order-requests?status=' + encodeURIComponent(status);
         if (customer !== 'all') url += '&customer=' + encodeURIComponent(customer);
-
-        fetch(url)
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
-                var container = document.getElementById('ordersListContent');
-                var countEl = document.getElementById('ordersResultCount');
-                if (!container) return;
-                if (!d.success || !d.orders || d.orders.length === 0) {
-                    container.innerHTML = '<p class="or-empty">No order requests found.</p>';
-                    if (countEl) countEl.textContent = '0 orders';
-                    return;
+        fetch(url).then(function(r) { return r.json(); }).then(function(d) {
+            var container = document.getElementById('ordersListContent'); var countEl = document.getElementById('ordersResultCount');
+            if (!container) return;
+            if (!d.success || !d.orders || d.orders.length === 0) { container.innerHTML = '<p class="or-empty">No order requests found.</p>'; if (countEl) countEl.textContent = '0 orders'; return; }
+            if (countEl) countEl.textContent = d.orders.length + ' order' + (d.orders.length !== 1 ? 's' : '');
+            var h = '';
+            d.orders.forEach(function(o) {
+                var dt = new Date(o.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+                h += '<div class="or-list-card"><div class="or-list-card-header"><span class="or-list-num">' + o.request_number + '</span><span class="or-status ' + o.status + '">' + o.status + '</span></div>';
+                h += '<div class="or-list-card-body">';
+                h += '<div class="or-list-row"><span class="or-list-label">Account</span><span class="or-list-val" style="font-weight:700">' + o.customer_name + '</span></div>';
+                if (o.buyer_name) h += '<div class="or-list-row"><span class="or-list-label">Buyer</span><span class="or-list-val">' + o.buyer_name + '</span></div>';
+                h += '<div class="or-list-row"><span class="or-list-label">Products</span><span class="or-list-val">' + (o.product_count || 0) + ' items</span></div>';
+                if (o.import_po_numbers) h += '<div class="or-list-row"><span class="or-list-label">Import PO(s)</span><span class="or-list-val">' + o.import_po_numbers + '</span></div>';
+                if (o.customer_po_number) h += '<div class="or-list-row"><span class="or-list-label">Customer PO</span><span class="or-list-val">' + o.customer_po_number + '</span></div>';
+                if (o.customer_price && parseFloat(o.customer_price) > 0) h += '<div class="or-list-row"><span class="or-list-label">Price</span><span class="or-list-val">$' + parseFloat(o.customer_price).toFixed(2) + '</span></div>';
+                if (o.cxl_date || o.cancel_date) { var cd = o.cxl_date || o.cancel_date; h += '<div class="or-list-row"><span class="or-list-label">CXL Date</span><span class="or-list-val">' + new Date(cd).toLocaleDateString() + '</span></div>'; }
+                h += '<div class="or-list-row"><span class="or-list-label">Submitted</span><span class="or-list-val">' + dt + '</span></div>';
+                h += '<div class="or-list-row"><span class="or-list-label">Rep</span><span class="or-list-val">' + (o.user_name || 'Unknown') + '</span></div>';
+                if (o.notes) { var tn = o.notes.length > 150 ? o.notes.substring(0, 150) + '...' : o.notes; h += '<div class="or-list-notes">' + tn.replace(/</g, '&lt;').replace(/\n/g, '<br>') + '</div>'; }
+                if (o.zoho_so_number) h += '<div class="or-list-so">Zoho SO: ' + o.zoho_so_number + '</div>';
+                h += '<div class="or-list-actions">'; if (o.detail_id) h += '<a href="/order/' + o.detail_id + '" target="_blank" class="or-action-link">View Details \u2192</a>'; h += '</div></div>';
+                if (o.can_admin && (o.status === 'pending' || o.status === 'processing')) {
+                    h += '<div class="or-admin-controls"><input type="text" placeholder="Zoho SO #" id="soInput' + o.id + '" value="' + (o.zoho_so_number || '') + '" class="or-admin-input"><input type="text" placeholder="Admin note" id="noteInput' + o.id + '" value="' + (o.admin_notes || '') + '" class="or-admin-input" style="flex:1">';
+                    if (o.status === 'pending') h += '<button class="or-admin-btn processing" onclick="updateOrderStatus(' + o.id + ',\'processing\')">Processing</button>';
+                    h += '<button class="or-admin-btn complete" onclick="completeOrderAdmin(' + o.id + ')">Complete</button><button class="or-admin-btn cancel" onclick="updateOrderStatus(' + o.id + ',\'cancelled\')">Cancel</button></div>';
                 }
-                if (countEl) countEl.textContent = d.orders.length + ' order' + (d.orders.length !== 1 ? 's' : '');
-
-                var h = '';
-                d.orders.forEach(function(o) {
-                    var dt = new Date(o.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
-                    h += '<div class="or-list-card">';
-                    h += '<div class="or-list-card-header">';
-                    h += '<span class="or-list-num">' + o.request_number + '</span>';
-                    h += '<span class="or-status ' + o.status + '">' + o.status + '</span>';
-                    h += '</div>';
-                    h += '<div class="or-list-card-body">';
-                    h += '<div class="or-list-row"><span class="or-list-label">Account</span><span class="or-list-val" style="font-weight:700">' + o.customer_name + '</span></div>';
-                    if (o.buyer_name) {
-                        h += '<div class="or-list-row"><span class="or-list-label">Buyer</span><span class="or-list-val">' + o.buyer_name + '</span></div>';
-                    }
-                    h += '<div class="or-list-row"><span class="or-list-label">Products</span><span class="or-list-val">' + (o.product_count || 0) + ' items</span></div>';
-                    if (o.import_po_numbers) {
-                        h += '<div class="or-list-row"><span class="or-list-label">Import PO</span><span class="or-list-val">' + o.import_po_numbers + '</span></div>';
-                    }
-                    if (o.customer_po_number) {
-                        h += '<div class="or-list-row"><span class="or-list-label">Customer PO</span><span class="or-list-val">' + o.customer_po_number + '</span></div>';
-                    }
-                    if (o.customer_price && parseFloat(o.customer_price) > 0) {
-                        h += '<div class="or-list-row"><span class="or-list-label">Price</span><span class="or-list-val">$' + parseFloat(o.customer_price).toFixed(2) + '</span></div>';
-                    }
-                    if (o.cxl_date || o.cancel_date) {
-                        var cd = o.cxl_date || o.cancel_date;
-                        h += '<div class="or-list-row"><span class="or-list-label">CXL Date</span><span class="or-list-val">' + new Date(cd).toLocaleDateString() + '</span></div>';
-                    }
-                    h += '<div class="or-list-row"><span class="or-list-label">Submitted</span><span class="or-list-val">' + dt + '</span></div>';
-                    h += '<div class="or-list-row"><span class="or-list-label">Rep</span><span class="or-list-val">' + (o.user_name || 'Unknown') + '</span></div>';
-                    if (o.unit_color_breakdown) {
-                        h += '<div class="or-list-notes" style="background:#e3f2fd"><strong>Unit/Color Breakdown:</strong><br>' + o.unit_color_breakdown.replace(/</g, '&lt;').replace(/\n/g, '<br>') + '</div>';
-                    }
-                    if (o.notes) {
-                        var truncNotes = o.notes.length > 150 ? o.notes.substring(0, 150) + '...' : o.notes;
-                        h += '<div class="or-list-notes">' + truncNotes.replace(/</g, '&lt;').replace(/\n/g, '<br>') + '</div>';
-                    }
-                    if (o.zoho_so_number) {
-                        h += '<div class="or-list-so">Zoho SO: ' + o.zoho_so_number + '</div>';
-                    }
-
-                    // Action buttons row
-                    h += '<div class="or-list-actions">';
-                    if (o.detail_id) {
-                        h += '<a href="/order/' + o.detail_id + '" target="_blank" class="or-action-link">View Details \u2192</a>';
-                    }
-                    h += '</div>';
-
-                    h += '</div>';
-
-                    // Admin controls
-                    if (o.can_admin && (o.status === 'pending' || o.status === 'processing')) {
-                        h += '<div class="or-admin-controls">';
-                        h += '<input type="text" placeholder="Zoho SO #" id="soInput' + o.id + '" value="' + (o.zoho_so_number || '') + '" class="or-admin-input">';
-                        h += '<input type="text" placeholder="Admin note" id="noteInput' + o.id + '" value="' + (o.admin_notes || '') + '" class="or-admin-input" style="flex:1">';
-                        if (o.status === 'pending') {
-                            h += '<button class="or-admin-btn processing" onclick="updateOrderStatus(' + o.id + ',\'processing\')">Processing</button>';
-                        }
-                        h += '<button class="or-admin-btn complete" onclick="completeOrderAdmin(' + o.id + ')">Complete</button>';
-                        h += '<button class="or-admin-btn cancel" onclick="updateOrderStatus(' + o.id + ',\'cancelled\')">Cancel</button>';
-                        h += '</div>';
-                    }
-
-                    h += '</div>';
-                });
-                container.innerHTML = h;
-            })
-            .catch(function(e) {
-                console.error('Error loading orders:', e);
-                var container = document.getElementById('ordersListContent');
-                if (container) container.innerHTML = '<p class="or-empty">Error loading orders.</p>';
+                h += '</div>';
             });
+            container.innerHTML = h;
+        }).catch(function(e) { console.error('Error loading orders:', e); var c = document.getElementById('ordersListContent'); if (c) c.innerHTML = '<p class="or-empty">Error loading orders.</p>'; });
     };
-
     window.updateOrderStatus = function(id, status) {
-        fetch('/api/order-requests/' + id, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ status: status })
-        }).then(function(r) { return r.json(); }).then(function(d) {
-            if (d.success) loadOrdersList();
-            else alert('Error: ' + d.error);
-        }).catch(function(e) { alert(e.message); });
+        fetch('/api/order-requests/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: status }) }).then(function(r) { return r.json(); }).then(function(d) { if (d.success) loadOrdersList(); else alert('Error: ' + d.error); }).catch(function(e) { alert(e.message); });
     };
-
     window.completeOrderAdmin = function(id) {
-        var so = document.getElementById('soInput' + id);
-        var note = document.getElementById('noteInput' + id);
-        var soVal = so ? so.value.trim() : '';
-        var noteVal = note ? note.value.trim() : '';
-
-        fetch('/api/order-requests/' + id, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                status: 'completed',
-                zoho_so_number: soVal || null,
-                admin_notes: noteVal || null
-            })
-        }).then(function(r) { return r.json(); }).then(function(d) {
-            if (d.success) loadOrdersList();
-            else alert('Error: ' + d.error);
-        }).catch(function(e) { alert(e.message); });
+        var so = document.getElementById('soInput' + id); var note = document.getElementById('noteInput' + id);
+        fetch('/api/order-requests/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'completed', zoho_so_number: (so ? so.value.trim() : '') || null, admin_notes: (note ? note.value.trim() : '') || null }) }).then(function(r) { return r.json(); }).then(function(d) { if (d.success) loadOrdersList(); else alert('Error: ' + d.error); }).catch(function(e) { alert(e.message); });
     };
 })();

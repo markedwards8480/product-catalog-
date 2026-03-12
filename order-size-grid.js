@@ -93,7 +93,7 @@
 
         // Header
         h += '<div style="display:flex;align-items:center;padding:0.2rem 0.5rem;background:#1e3a5f;color:white;font-size:0.65rem;font-weight:600">';
-        h += '<div style="width:28px"></div>';
+        h += '<div style="width:36px"></div>';
         h += '<div style="flex:1">COLOR</div>';
         h += '<div style="width:80px;text-align:center">QTY</div>';
         h += '<div style="width:24px"></div>';
@@ -105,7 +105,7 @@
 
             h += '<div style="background:' + bgColor + '">';
             h += '<div style="display:flex;align-items:center;padding:0.15rem 0.5rem;border-bottom:1px solid #f0f0f0">';
-            h += '<div style="width:28px;flex-shrink:0"><img src="' + (row.image || '') + '" onerror="this.style.display=\'none\'" style="width:24px;height:24px;object-fit:contain;border-radius:3px;background:#f0f0f0;display:block"></div>';
+            h += '<div style="width:36px;flex-shrink:0"><img src="' + (row.image || '') + '" onerror="this.style.display=\'none\'" style="width:32px;height:32px;object-fit:contain;border-radius:4px;background:#f0f0f0;display:block;cursor:pointer" onclick="showImagePreview(this.src, \'' + row.style_id.replace(/'/g, '') + ' ' + row.color.replace(/'/g, '') + '\')" title="Click to enlarge"></div>';
             h += '<div style="flex:1;font-size:0.74rem;color:#333"><span style="color:#0088c2;font-weight:600">' + row.style_id.split('-').pop() + '</span> ' + row.color + '</div>';
             h += '<div style="width:80px;text-align:center">';
             h += '<input type="number" id="orSzTotal_' + bs + '_' + idx + '" tabindex="' + tabIdx + '" value="" min="0" placeholder="0" ';
@@ -253,5 +253,27 @@
         };
 
         return hasData ? gridData : null;
+    };
+
+    // Image preview overlay
+    window.showImagePreview = function(src, label) {
+        if (!src) return;
+        var existing = document.getElementById('imgPreviewOverlay');
+        if (existing) existing.remove();
+        var overlay = document.createElement('div');
+        overlay.id = 'imgPreviewOverlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-direction:column;gap:0.75rem';
+        overlay.onclick = function() { overlay.remove(); };
+        var img = document.createElement('img');
+        img.src = src;
+        img.style.cssText = 'max-width:500px;max-height:500px;object-fit:contain;border-radius:12px;background:white;padding:0.5rem;box-shadow:0 20px 60px rgba(0,0,0,0.4)';
+        overlay.appendChild(img);
+        if (label) {
+            var lbl = document.createElement('div');
+            lbl.textContent = label;
+            lbl.style.cssText = 'color:white;font-size:1rem;font-weight:600;text-shadow:0 1px 4px rgba(0,0,0,0.5)';
+            overlay.appendChild(lbl);
+        }
+        document.body.appendChild(overlay);
     };
 })();

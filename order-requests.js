@@ -155,12 +155,14 @@
         h += '<h3>Order Information</h3>';
         h += '<p style="font-size:0.8rem;color:#999;margin:-0.5rem 0 0.75rem">These fields apply to the entire order.</p>';
 
-        // Top row: Account + Buyer + Customer PO + CXL Date
-        h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.75rem">';
+        // Top rows: Account + Buyer, then Customer PO + CXL Date
+        h += '<div style="display:grid;grid-template-columns:1.5fr 1fr;gap:0.75rem">';
         h += '<div class="or-field"><label>Account Name *</label>';
-        h += '<select id="orCustomerSelect"><option value="">Select customer...</option></select></div>';
+        h += '<select id="orCustomerSelect" style="min-width:0"><option value="">Select customer...</option></select></div>';
         h += '<div class="or-field"><label>Buyer Name</label>';
         h += '<input type="text" id="orBuyerName" placeholder="Buyer name"></div>';
+        h += '</div>';
+        h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem">';
         h += '<div class="or-field"><label>Customer PO #</label>';
         h += '<input type="text" id="orCustomerPO" placeholder="Customer PO"></div>';
         h += '<div class="or-field"><label>CXL Date *</label>';

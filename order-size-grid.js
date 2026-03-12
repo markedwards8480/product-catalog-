@@ -60,17 +60,18 @@
     function buildStyleSizeGrid(bs, container, selectedProducts, curve, source) {
         var sizeRows = [];
         selectedProducts.forEach(function(p) {
+            var imgUrl = (typeof getImageUrl === 'function' && p.image_url) ? getImageUrl(p.image_url) : (p.image_url || '');
             var colors = (p.colors || []).map(function(c) { return c.color_name || c; }).filter(Boolean);
             if (colors.length > 0) {
                 colors.forEach(function(c) {
                     var colorName = typeof c === 'string' ? c : (c.color_name || 'Default');
                     var curveMatch = curve.find(function(cv) { return cv.base_style === p.base_style && cv.color.toLowerCase() === colorName.toLowerCase(); });
                     if (!curveMatch) curveMatch = curve.find(function(cv) { return cv.base_style === p.base_style; });
-                    sizeRows.push({ style_id: p.style_id, base_style: p.base_style, name: p.name, color: colorName, curve: curveMatch });
+                    sizeRows.push({ style_id: p.style_id, base_style: p.base_style, name: p.name, color: colorName, curve: curveMatch, image: imgUrl });
                 });
             } else {
                 var curveMatch = curve.find(function(cv) { return cv.base_style === p.base_style; });
-                sizeRows.push({ style_id: p.style_id, base_style: p.base_style, name: p.name, color: 'Default', curve: curveMatch });
+                sizeRows.push({ style_id: p.style_id, base_style: p.base_style, name: p.name, color: 'Default', curve: curveMatch, image: imgUrl });
             }
         });
 
@@ -92,6 +93,7 @@
 
         // Header
         h += '<div style="display:flex;align-items:center;padding:0.2rem 0.5rem;background:#1e3a5f;color:white;font-size:0.65rem;font-weight:600">';
+        h += '<div style="width:28px"></div>';
         h += '<div style="flex:1">COLOR</div>';
         h += '<div style="width:80px;text-align:center">QTY</div>';
         h += '<div style="width:24px"></div>';
@@ -103,6 +105,7 @@
 
             h += '<div style="background:' + bgColor + '">';
             h += '<div style="display:flex;align-items:center;padding:0.15rem 0.5rem;border-bottom:1px solid #f0f0f0">';
+            h += '<div style="width:28px;flex-shrink:0"><img src="' + (row.image || '') + '" onerror="this.style.display=\'none\'" style="width:24px;height:24px;object-fit:contain;border-radius:3px;background:#f0f0f0;display:block"></div>';
             h += '<div style="flex:1;font-size:0.74rem;color:#333"><span style="color:#0088c2;font-weight:600">' + row.style_id.split('-').pop() + '</span> ' + row.color + '</div>';
             h += '<div style="width:80px;text-align:center">';
             h += '<input type="number" id="orSzTotal_' + bs + '_' + idx + '" tabindex="' + tabIdx + '" value="" min="0" placeholder="0" ';

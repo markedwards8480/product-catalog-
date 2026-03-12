@@ -478,6 +478,24 @@
             style_po_selections: stylePoSelections
         };
 
+        // Build aggregated size_grid_data and unit_color_breakdown text from all styles
+        var allGridData = { styles: {} };
+        var breakdownLines = [];
+        Object.keys(stylePoSelections).forEach(function(bs) {
+            if (stylePoSelections[bs].size_grid) {
+                allGridData.styles[bs] = stylePoSelections[bs].size_grid;
+                stylePoSelections[bs].size_grid.rows.forEach(function(row) {
+                    if (row.total > 0) {
+                        var sizeParts = [];
+                        Object.keys(row.sizes).forEach(function(s) { if (row.sizes[s] > 0) sizeParts.push(s + ':' + row.sizes[s]); });
+                        breakdownLines.push(row.style_id + ' ' + row.color + ' = ' + row.total + (sizeParts.length > 0 ? ' (' + sizeParts.join(', ') + ')' : ''));
+                    }
+                });
+            }
+        });
+        if (Object.keys(allGridData.styles).length > 0) formData.size_grid_data = allGridData;
+        if (breakdownLines.length > 0) formData.unit_color_breakdown = breakdownLines.join('\n');
+
         var btn = document.getElementById('orSubmitOrderBtn');
         btn.disabled = true; btn.textContent = 'Submitting...';
 

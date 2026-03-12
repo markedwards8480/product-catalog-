@@ -3215,6 +3215,9 @@ function getOrderDetailHTML(order, products) {
         cxl_date: order.cxl_date || order.cancel_date || '',
         notes: order.notes || '',
         request_number: order.request_number,
+        style_po_selections: order.style_po_selections || null,
+        size_grid_data: order.size_grid_data || null,
+        unit_color_breakdown: order.unit_color_breakdown || '',
         products: products.map(function(p) {
             return {
                 style_id: p.style_id,
@@ -3466,6 +3469,33 @@ function getOrderDetailHTML(order, products) {
     html += '  h += "<input type=\\"hidden\\" id=\\"soSizeList\\" value=\\"" + allSizes.join(",") + "\\">";';
 
     html += '  container.innerHTML = h;';
+
+    // Pre-populate quantities from saved style_po_selections
+    html += '  if (orderData.style_po_selections) {';
+    html += '    var spo = orderData.style_po_selections;';
+    html += '    rows.forEach(function(row, idx) {';
+    html += '      var bs = row.base_style || row.style_id.split("-")[0];';
+    html += '      var styleData = spo[bs];';
+    html += '      if (styleData && styleData.size_grid && styleData.size_grid.rows) {';
+    html += '        var gridRow = styleData.size_grid.rows.find(function(gr) { return gr.style_id === row.style_id && gr.color.toLowerCase() === row.color.toLowerCase(); });';
+    html += '        if (gridRow && gridRow.total > 0) {';
+    html += '          var totalEl = document.getElementById("soTotal_" + idx);';
+    html += '          if (totalEl) { totalEl.value = gridRow.total; autoDistribute(idx, gridRow.total); }';
+    // Also set individual sizes if available
+    html += '          if (gridRow.sizes) { Object.keys(gridRow.sizes).forEach(function(s) {';
+    html += '            var sEl = document.getElementById("soSize_" + idx + "_" + s);';
+    html += '            if (sEl && gridRow.sizes[s] > 0) sEl.value = gridRow.sizes[s];';
+    html += '          }); recalcRow(idx); }';
+    html += '        }';
+    html += '      }';
+    // Also check price from style_po_selections
+    html += '      if (styleData && styleData.customer_price > 0) {';
+    html += '        var prEl = document.getElementById("soPrice_" + idx);';
+    html += '        if (prEl) { prEl.value = styleData.customer_price.toFixed(2); recalcRow(idx); }';
+    html += '      }';
+    html += '    });';
+    html += '  }';
+
     html += '}';
 
     // Auto-distribute total qty across sizes by ratio

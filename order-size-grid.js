@@ -26,8 +26,9 @@
 
         // Get selected products info
         var selectedProducts = [];
-        if (typeof orderSelectedProducts !== 'undefined' && typeof allProducts !== 'undefined') {
-            orderSelectedProducts.forEach(function(id) {
+        if (typeof getOrderSelectedProducts === 'function' && typeof allProducts !== 'undefined') {
+            var selectedIds = getOrderSelectedProducts();
+            selectedIds.forEach(function(id) {
                 var p = allProducts.find(function(pr) { return pr.id === id; });
                 if (p) selectedProducts.push(p);
             });

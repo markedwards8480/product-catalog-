@@ -246,6 +246,7 @@
             h += '<label style="font-size:0.7rem;font-weight:600;color:#666;display:block;margin-bottom:0.2rem">Import PO *</label>';
             h += '<div style="display:flex;gap:0.4rem;align-items:center">';
             h += '<input type="text" id="orStylePO_' + bs + '" placeholder="Select PO..." autocomplete="off" style="flex:1;padding:0.4rem 0.6rem;font-size:0.82rem;border:1.5px solid #e0e0e0;border-radius:8px" oninput="filterStylePODropdown(\'' + bs + '\', this.value)" onfocus="showStylePODropdown(\'' + bs + '\')">';
+            h += '<button type="button" id="orStylePOClear_' + bs + '" onclick="clearStylePO(\'' + bs + '\')" style="display:none;background:none;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:0.72rem;color:#999;padding:0.25rem 0.5rem;white-space:nowrap" title="Clear PO selection">\u2715 Clear</button>';
             h += '<a id="orStylePOLink_' + bs + '" href="#" target="_blank" style="display:none;font-size:0.68rem;white-space:nowrap;color:#0088c2;text-decoration:none;font-weight:600;padding:0.3rem 0.5rem;border:1px solid #0088c2;border-radius:4px;background:#f0f8ff">Zoho\u2197</a>';
             h += '</div>';
             h += '<div class="or-style-po-dropdown" id="poDropdown_' + bs + '"></div>';
@@ -371,8 +372,27 @@
         var badge = document.getElementById('poLabel_' + bs);
         if (badge) { badge.textContent = 'PO ' + poNum; badge.className = 'or-style-po-badge selected'; }
         if (poDataByStyle[bs]) poDataByStyle[bs].selectedPO = poNum;
+        // Show clear button
+        var clearBtn = document.getElementById('orStylePOClear_' + bs);
+        if (clearBtn) clearBtn.style.display = '';
         updateStylePOZohoLink(bs, poNum);
         if (typeof loadStyleSizeGrid === 'function') loadStyleSizeGrid(bs, poNum);
+    };
+
+    window.clearStylePO = function(bs) {
+        var input = document.getElementById('orStylePO_' + bs);
+        if (input) { input.value = ''; input.placeholder = 'Select PO...'; }
+        var badge = document.getElementById('poLabel_' + bs);
+        if (badge) { badge.textContent = 'No PO'; badge.className = 'or-style-po-badge'; }
+        if (poDataByStyle[bs]) poDataByStyle[bs].selectedPO = '';
+        // Hide clear button and Zoho link
+        var clearBtn = document.getElementById('orStylePOClear_' + bs);
+        if (clearBtn) clearBtn.style.display = 'none';
+        var link = document.getElementById('orStylePOLink_' + bs);
+        if (link) link.style.display = 'none';
+        // Clear size grid
+        var grid = document.getElementById('orStyleSizeGrid_' + bs);
+        if (grid) grid.innerHTML = '';
     };
 
     function updateStylePOZohoLink(bs, poNum) {

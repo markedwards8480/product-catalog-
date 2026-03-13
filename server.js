@@ -2458,6 +2458,10 @@ app.put('/api/order-requests/:id', requireAuth, async function(req, res) {
         if (b.status) { updates.push("status = $" + idx); params.push(b.status); idx++; }
         if (b.zoho_so_number !== undefined) { updates.push("zoho_so_number = $" + idx); params.push(b.zoho_so_number); idx++; }
         if (b.admin_notes !== undefined) { updates.push("admin_notes = $" + idx); params.push(b.admin_notes); idx++; }
+        if (b.buyer_name !== undefined) { updates.push("buyer_name = $" + idx); params.push(b.buyer_name); idx++; }
+        if (b.customer_po_number !== undefined) { updates.push("customer_po_number = $" + idx); params.push(b.customer_po_number); idx++; }
+        if (b.cxl_date !== undefined) { updates.push("cxl_date = $" + idx); params.push(b.cxl_date || null); idx++; }
+        if (b.customer_price !== undefined) { updates.push("customer_price = $" + idx); params.push(b.customer_price || 0); idx++; }
 
         params.push(parseInt(req.params.id));
         var result = await pool.query("UPDATE order_requests SET " + updates.join(", ") + " WHERE id = $" + idx + " RETURNING *", params);
@@ -2470,6 +2474,29 @@ app.put('/api/order-requests/:id', requireAuth, async function(req, res) {
 });
 
 // Order detail page (public - accessed via link from email)
+
+// Public update for order detail page inline edits (by detail_id)
+app.put('/api/order-detail/:detailId', async function(req, res) {
+    try {
+        var b = req.body;
+        var updates = ["updated_at = CURRENT_TIMESTAMP"];
+        var params = [];
+        var idx = 1;
+        if (b.buyer_name !== undefined) { updates.push("buyer_name = $" + idx); params.push(b.buyer_name); idx++; }
+        if (b.customer_po_number !== undefined) { updates.push("customer_po_number = $" + idx); params.push(b.customer_po_number); idx++; }
+        if (b.cxl_date !== undefined) { updates.push("cxl_date = $" + idx); params.push(b.cxl_date || null); idx++; }
+        if (b.customer_price !== undefined) { updates.push("customer_price = $" + idx); params.push(b.customer_price || 0); idx++; }
+        if (updates.length <= 1) return res.json({ success: false, error: 'No fields to update' });
+        params.push(req.params.detailId);
+        var result = await pool.query("UPDATE order_requests SET " + updates.join(", ") + " WHERE detail_id = $" + idx + " RETURNING *", params);
+        if (result.rows.length === 0) return res.json({ success: false, error: 'Not found' });
+        res.json({ success: true, order: result.rows[0] });
+    } catch (err) {
+        console.error('Update order detail error:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
+
 // Product sizes for SO creation (public - used by order detail page)
 app.get('/api/product-sizes-for-so', async function(req, res) {
     try {
@@ -3010,24 +3037,21 @@ function getOrderDetailHTML(order, products) {
     // Compact 2-column grid for order info
     html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 2rem">';
     html += '<div class="detail-row"><span class="detail-label">Account Name</span><span class="detail-val" style="font-weight:700;font-size:1.05rem">' + order.customer_name + '</span></div>';
-    if (order.buyer_name) {
-        html += '<div class="detail-row"><span class="detail-label">Buyer Name</span><span class="detail-val">' + order.buyer_name + '</span></div>';
-    }
+    html += '<div class="detail-row"><span class="detail-label">Buyer Name</span><span class="detail-val"><input type="text" id="editBuyerName" value="' + (order.buyer_name || '').replace(/"/g, '&quot;') + '" style="border:1px solid #e0e0e0;border-radius:6px;padding:0.3rem 0.5rem;font-size:0.9rem;width:200px" onchange="saveDetailField(\'buyer_name\', this.value)"><span class="edit-saved" id="savedBuyerName" style="display:none;color:#2e7d32;font-size:0.7rem;margin-left:0.3rem">\u2713</span></span></div>';
     html += '<div class="detail-row"><span class="detail-label">Requested by</span><span class="detail-val">' + (order.user_name || 'Unknown') + '</span></div>';
     html += '<div class="detail-row"><span class="detail-label">Products</span><span class="detail-val">' + products.length + ' items</span></div>';
     if (order.import_po_numbers) {
         html += '<div class="detail-row"><span class="detail-label">Import PO #(s)</span><span class="detail-val" style="font-weight:700;color:#0088c2">' + order.import_po_numbers + '</span></div>';
     }
-    if (order.customer_po_number) {
-        html += '<div class="detail-row"><span class="detail-label">Customer PO</span><span class="detail-val">' + order.customer_po_number + '</span></div>';
-    }
-    if (order.customer_price && parseFloat(order.customer_price) > 0) {
-        html += '<div class="detail-row"><span class="detail-label">Customer Price</span><span class="detail-val">$' + parseFloat(order.customer_price).toFixed(2) + '</span></div>';
-    }
+    html += '<div class="detail-row"><span class="detail-label">Customer PO</span><span class="detail-val"><input type="text" id="editCustomerPO" value="' + (order.customer_po_number || '').replace(/"/g, '&quot;') + '" placeholder="Enter PO#" style="border:1px solid #e0e0e0;border-radius:6px;padding:0.3rem 0.5rem;font-size:0.9rem;width:160px" onchange="saveDetailField(\'customer_po_number\', this.value)"><span class="edit-saved" id="savedCustomerPO" style="display:none;color:#2e7d32;font-size:0.7rem;margin-left:0.3rem">\u2713</span></span></div>';
+    html += '<div class="detail-row"><span class="detail-label">Customer Price</span><span class="detail-val"><input type="number" id="editCustomerPrice" value="' + (parseFloat(order.customer_price) || 0).toFixed(2) + '" step="0.01" min="0" style="border:1px solid #e0e0e0;border-radius:6px;padding:0.3rem 0.5rem;font-size:0.9rem;width:100px;text-align:right" onchange="saveDetailField(\'customer_price\', parseFloat(this.value)||0)"><span class="edit-saved" id="savedCustomerPrice" style="display:none;color:#2e7d32;font-size:0.7rem;margin-left:0.3rem">\u2713</span></span></div>';
+
+    var cxlVal = '';
     if (order.cxl_date || order.cancel_date) {
-        var cxlDateVal = order.cxl_date || order.cancel_date;
-        html += '<div class="detail-row"><span class="detail-label">CXL Date</span><span class="detail-val">' + new Date(cxlDateVal).toLocaleDateString() + '</span></div>';
+        var cxlDateObj = new Date(order.cxl_date || order.cancel_date);
+        cxlVal = cxlDateObj.toISOString().split('T')[0];
     }
+    html += '<div class="detail-row"><span class="detail-label">CXL Date</span><span class="detail-val"><input type="date" id="editCxlDate" value="' + cxlVal + '" style="border:1px solid #e0e0e0;border-radius:6px;padding:0.3rem 0.5rem;font-size:0.9rem" onchange="saveDetailField(\'cxl_date\', this.value)"><span class="edit-saved" id="savedCxlDate" style="display:none;color:#2e7d32;font-size:0.7rem;margin-left:0.3rem">\u2713</span></span></div>';
     html += '<div class="detail-row"><span class="detail-label">Submitted</span><span class="detail-val">' + new Date(order.created_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) + '</span></div>';
     if (order.zoho_so_number) {
         html += '<div class="detail-row"><span class="detail-label">Zoho SO#</span><span class="detail-val" style="color:#2e7d32;font-weight:700">' + order.zoho_so_number + '</span></div>';
@@ -3205,6 +3229,20 @@ function getOrderDetailHTML(order, products) {
     html += 'var sizeCurveData = null;';
     html += 'var selectedCustomerId = "";';
     html += 'var selectedCustomerName = "";';
+
+    // Inline edit save function
+    html += 'function saveDetailField(field, value) {';
+    html += '  var fieldMap = {buyer_name: "BuyerName", customer_po_number: "CustomerPO", cxl_date: "CxlDate", customer_price: "CustomerPrice"};';
+    html += '  var savedEl = document.getElementById("saved" + (fieldMap[field] || ""));';
+    html += '  fetch("/api/order-detail/" + orderData.detail_id, {';
+    html += '    method: "PUT",';
+    html += '    headers: {"Content-Type": "application/json"},';
+    html += '    body: JSON.stringify(function(){var o={};o[field]=value;return o}())';
+    html += '  }).then(function(r) { return r.json(); }).then(function(d) {';
+    html += '    if (d.success && savedEl) { savedEl.style.display = "inline"; setTimeout(function() { savedEl.style.display = "none"; }, 2000); }';
+    html += '    else if (!d.success) { alert("Save failed: " + (d.error || "unknown")); }';
+    html += '  }).catch(function(e) { alert("Error: " + e.message); });';
+    html += '}';
 
     // Customer search function
     // Load all Zoho customers into searchable dropdown

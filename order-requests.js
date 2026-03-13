@@ -476,6 +476,29 @@
             }
         });
 
+        // Validate: any style with quantities entered must have a price
+        var priceErrors = [];
+        Object.keys(stylePoSelections).forEach(function(bs) {
+            var sel = stylePoSelections[bs];
+            var hasQty = false;
+            if (sel.size_grid && sel.size_grid.rows) {
+                hasQty = sel.size_grid.rows.some(function(r) { return r.total > 0; });
+            }
+            if (hasQty && (!sel.customer_price || sel.customer_price <= 0)) {
+                priceErrors.push(bs);
+                // Highlight the price input
+                var priceInput = document.getElementById('orStylePrice_' + bs);
+                if (priceInput) { priceInput.style.borderColor = '#d32f2f'; priceInput.style.background = '#fff0f0'; }
+            }
+        });
+        if (priceErrors.length > 0) {
+            alert('Please enter a customer price for: ' + priceErrors.join(', ') + '\n\nStyles with quantities must have a price.');
+            // Scroll to the first one
+            var firstErr = document.getElementById('orStylePrice_' + priceErrors[0]);
+            if (firstErr) firstErr.focus();
+            return;
+        }
+
         var formData = {
             customer_name: customer,
             product_ids: orderSelectedProducts,

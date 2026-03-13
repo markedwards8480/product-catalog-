@@ -3519,6 +3519,40 @@ function getOrderDetailHTML(order, products) {
     html += '    });';
     html += '  }';
 
+    // After pre-populating, collapse rows with zero qty and add toggle button
+    html += '  var hasAnyPrePop = false;';
+    html += '  rows.forEach(function(row, idx) {';
+    html += '    var totalEl = document.getElementById("soTotal_" + idx);';
+    html += '    if (totalEl && parseInt(totalEl.value) > 0) hasAnyPrePop = true;';
+    html += '  });';
+    html += '  if (hasAnyPrePop) {';
+    html += '    var hiddenCount = 0;';
+    html += '    rows.forEach(function(row, idx) {';
+    html += '      var totalEl = document.getElementById("soTotal_" + idx);';
+    html += '      var val = totalEl ? parseInt(totalEl.value) || 0 : 0;';
+    html += '      if (val === 0) {';
+    html += '        var tr = totalEl ? totalEl.closest("tr") : null;';
+    html += '        if (tr) { tr.classList.add("collapsed-row"); tr.style.display = "none"; hiddenCount++; }';
+    html += '      }';
+    html += '    });';
+    html += '    if (hiddenCount > 0) {';
+    html += '      var toggleDiv = document.createElement("div");';
+    html += '      toggleDiv.style.cssText = "text-align:center;padding:0.5rem;margin-top:0.25rem";';
+    html += '      toggleDiv.innerHTML = "<button onclick=\\"toggleEmptyRows(this)\\" style=\\"background:none;border:1px solid #0088c2;color:#0088c2;border-radius:6px;padding:0.3rem 1rem;font-size:0.78rem;cursor:pointer;font-weight:600\\">Show " + hiddenCount + " empty color(s)</button>";';
+    html += '      container.appendChild(toggleDiv);';
+    html += '    }';
+    html += '  }';
+
+    html += '}';
+
+    // Toggle empty rows visibility
+    html += 'function toggleEmptyRows(btn) {';
+    html += '  var rows = document.querySelectorAll(".collapsed-row");';
+    html += '  var showing = rows[0] && rows[0].style.display !== "none";';
+    html += '  rows.forEach(function(r) { r.style.display = showing ? "none" : ""; });';
+    html += '  var count = rows.length;';
+    html += '  btn.textContent = showing ? "Show " + count + " empty color(s)" : "Hide empty colors";';
+    html += '  btn.style.background = showing ? "none" : "#f0f8ff";';
     html += '}';
 
     // Auto-distribute total qty across sizes by ratio
